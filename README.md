@@ -201,7 +201,7 @@ RUST_LOG=debug ./target/release/ids-rs
 ## Testare
 
 Testerul (`tester/tester.py`) trimite log-uri simulate pe UDP catre IDS-RS.
-Trebuie sa ai IDS-RS pornit intr-un terminal inainte de a rula testerul.
+Exista doua metode de testare: cu **fisiere sample** (replay) sau cu **generare automata**.
 
 ### Pas 0 — Porneste IDS-RS
 
@@ -228,77 +228,95 @@ Testele acopera:
 - Parser CEF: drop valid, accept ignorat, non-CEF, campuri incomplete
 - Detector: fast scan alert, sub prag, cooldown, cleanup, IP-uri separate
 
+---
+
+### Fisiere sample disponibile
+
+Proiectul include fisiere de log pre-generate, gata de replay:
+
+| Fisier | Format | Linii | Ce contine | Rezultat asteptat |
+|--------|--------|-------|------------|-------------------|
+| `sample_fast_gaia.log` | GAIA | 20 | 20 drop-uri, porturi unice, acelasi IP | Alerta Fast Scan |
+| `sample_fast_cef.log` | CEF | 20 | Acelasi scenariu, format CEF | Alerta Fast Scan |
+| `sample_slow_gaia.log` | GAIA | 35 | 35 drop-uri, porturi unice, acelasi IP | Alerta Slow Scan |
+| `sample_slow_cef.log` | CEF | 35 | Acelasi scenariu, format CEF | Alerta Slow Scan |
+| `sample_normal_gaia.log` | GAIA | 5 | 5 drop-uri pe porturi comune (sub prag) | Fara alerta |
+| `sample_normal_cef.log` | CEF | 5 | Acelasi scenariu, format CEF | Fara alerta |
+| `sample2_gaia.log` | GAIA | 56 | Log-uri reale Checkpoint (accept + drop mixt) | Depinde de continut |
+
+---
+
 ### Pas 2 — Fast Scan (trebuie sa declanseze alerta)
 
-Trimite 20 de drop-uri de la acelasi IP pe porturi diferite, rapid:
-
 ```bash
-# Format GAIA
-python3 tester/tester.py fast-scan --format gaia --ports 20 --delay 0.1
+# GAIA (config.toml: parser = "gaia")
+python3 tester/tester.py fast
 
-# Format CEF
-python3 tester/tester.py fast-scan --format cef --ports 20 --delay 0.1
+# CEF (config.toml: parser = "cef")
+python3 tester/tester.py fast --cef
 ```
 
 IDS-RS ar trebui sa afiseze o alerta `Fast Scan detectat!` in terminalul sau.
 
 ### Pas 3 — Slow Scan (trebuie sa declanseze alerta)
 
-Trimite 40 de drop-uri distribuite pe un interval mai lung:
-
 ```bash
-# Format GAIA (dureaza ~5 min cu delay default 7s)
-python3 tester/tester.py slow-scan --format gaia --ports 40
+# GAIA
+python3 tester/tester.py slow
 
-# Format CEF (delay redus pentru test mai rapid)
-python3 tester/tester.py slow-scan --format cef --ports 40 --delay 3
+# CEF
+python3 tester/tester.py slow --cef
 ```
 
 IDS-RS ar trebui sa afiseze o alerta `Slow Scan detectat!`.
 
 ### Pas 4 — Trafic normal (NU trebuie sa declanseze alerta)
 
-Trimite cateva drop-uri pe porturi comune (sub prag):
-
 ```bash
-python3 tester/tester.py normal --format gaia --count 5
+# GAIA
+python3 tester/tester.py normal
+
+# CEF
+python3 tester/tester.py normal --cef
 ```
 
 IDS-RS **nu** ar trebui sa genereze nicio alerta.
 
-### Pas 5 — Replay fisier de log-uri reale
+### Pas 5 — Replay log-uri reale Checkpoint
 
-Trimite log-uri reale Checkpoint GAIA din fisierul sample:
+Fisierul `sample2_gaia.log` contine 56 de log-uri reale Checkpoint GAIA (accept + drop mixt):
 
 ```bash
-python3 tester/tester.py replay --file tester/sample2_gaia.log --delay 0.05
+python3 tester/tester.py replay tester/sample2_gaia.log --delay 0.05
 ```
 
 IDS-RS va procesa fiecare linie si va genera alerte daca detecteaza scanari.
 
-### Pas 6 — Sample Mode (6 moduri)
+---
 
-Sample mode citeste log-uri reale dintr-un fisier, le parseaza, si le trimite in formatul dorit.
+### Moduri avansate
+
+#### Generare dinamica (fast-scan / slow-scan)
+
+Genereaza log-uri din mers, util pentru scenarii custom:
 
 ```bash
-# raw-gaia: trimite liniile GAIA exact cum sunt in fisier
-python3 tester/tester.py sample --file tester/sample2_gaia.log --mode raw-gaia
+python3 tester/tester.py fast-scan --format gaia --ports 20 --delay 0.1
+python3 tester/tester.py fast-scan --format cef --ports 20 --delay 0.1
+python3 tester/tester.py slow-scan --format gaia --ports 40
+python3 tester/tester.py slow-scan --format cef --ports 40 --delay 3
+```
 
-# raw-cef: converteste fiecare linie GAIA la CEF si trimite
-#   (necesita parser = "cef" in config.toml)
-python3 tester/tester.py sample --file tester/sample2_gaia.log --mode raw-cef
+#### Sample Mode
 
-# scan-gaia: extrage drop-urile din sample, genereaza log-uri GAIA noi (scan lent)
-python3 tester/tester.py sample --file tester/sample2_gaia.log --mode scan-gaia
+Citeste log-uri GAIA dintr-un fisier, le parseaza, si le poate retrimite
+in alt format sau le poate folosi ca baza pentru generarea de scanari noi:
 
-# scan-cef: la fel, dar genereaza CEF
-python3 tester/tester.py sample --file tester/sample2_gaia.log --mode scan-cef
-
-# fast-gaia: scan rapid cu drop-urile din sample (delay mic)
-python3 tester/tester.py sample --file tester/sample2_gaia.log --mode fast-gaia
-
-# fast-cef: scan rapid in format CEF
-python3 tester/tester.py sample --file tester/sample2_gaia.log --mode fast-cef
+```bash
+python3 tester/tester.py sample tester/sample2_gaia.log raw-gaia
+python3 tester/tester.py sample tester/sample2_gaia.log raw-cef
+python3 tester/tester.py sample tester/sample2_gaia.log scan-gaia
+python3 tester/tester.py sample tester/sample2_gaia.log fast-cef
 ```
 
 | Mod | Ce face | Parser necesar |
@@ -310,31 +328,49 @@ python3 tester/tester.py sample --file tester/sample2_gaia.log --mode fast-cef
 | `fast-gaia` | Genereaza log-uri GAIA noi, trimise rapid (fast scan) | `gaia` |
 | `fast-cef` | Genereaza log-uri CEF noi, trimise rapid (fast scan) | `cef` |
 
+---
+
+```
+┌────────────────────────────────┬───────────────────────────────┐
+│            Command             │         What it does          │
+├────────────────────────────────┼───────────────────────────────┤
+│ tester.py fast                 │ Replay sample_fast_gaia.log   │
+├────────────────────────────────┼───────────────────────────────┤
+│ tester.py fast --cef           │ Replay sample_fast_cef.log    │
+├────────────────────────────────┼───────────────────────────────┤
+│ tester.py slow                 │ Replay sample_slow_gaia.log   │
+├────────────────────────────────┼───────────────────────────────┤
+│ tester.py normal               │ Replay sample_normal_gaia.log │
+├────────────────────────────────┼───────────────────────────────┤
+│ tester.py replay <file>        │ Replay from any file          │
+├────────────────────────────────┼───────────────────────────────┤
+│ tester.py sample <file> <mode> │ Advanced sample mode          │
+└────────────────────────────────┴───────────────────────────────┘
+
+```
+
 ### Parametri comuni
 
 | Parametru | Default | Descriere |
 |-----------|---------|-----------|
 | `--host` | `127.0.0.1` | Adresa IP a IDS-RS |
 | `--port` | `5555` | Portul UDP al IDS-RS |
-| `--format` | `gaia` | Formatul log-urilor: `gaia` sau `cef` (fast/slow/normal) |
-| `--source` | `192.168.11.7` | IP-ul sursa simulat (fast/slow/normal) |
-| `--ports` | `20` / `40` | Numar de porturi unice (fast/slow scan) |
+| `--cef` | `false` | Format CEF in loc de GAIA (preset-uri) |
+| `--format` | `gaia` | Formatul log-urilor: `gaia` sau `cef` (fast-scan/slow-scan) |
+| `--source` | `192.168.11.7` | IP-ul sursa simulat (fast-scan/slow-scan) |
+| `--ports` | `20` / `40` | Numar de porturi unice (fast-scan/slow-scan) |
 | `--delay` | variabil | Delay intre batch-uri in secunde |
 | `--batch` | `1` | Log-uri per pachet UDP |
-| `--count` | `5` | Numar de log-uri (normal) |
-| `--file` | — | Cale catre fisier de log-uri (replay/sample) |
-| `--mode` | — | Modul sample (raw-gaia, raw-cef, etc.) |
 
 ### Schimbare parser in config.toml
 
-Daca vrei sa testezi cu format CEF, schimba in `config.toml`:
+Testele GAIA functioneaza cu `parser = "gaia"`, iar testele CEF cu `parser = "cef"`.
+Schimba in `config.toml` si reporneste IDS-RS:
 
 ```toml
 [network]
 parser = "cef"    # in loc de "gaia"
 ```
-
-Apoi reporneste IDS-RS.
 
 ---
 
@@ -357,8 +393,14 @@ ids-rs/
 │       ├── gaia.rs         # Parser Checkpoint Gaia (format real syslog)
 │       └── cef.rs          # Parser CEF / ArcSight
 └── tester/
-    ├── tester.py           # Script Python de testare (fast/slow/normal/replay/sample)
-    └── sample2_gaia.log    # ~56 linii de log-uri reale Checkpoint GAIA
+    ├── tester.py              # Script Python de testare (fast/slow/normal/replay/sample)
+    ├── sample_fast_gaia.log   # 20 drop-uri GAIA (Fast Scan)
+    ├── sample_fast_cef.log    # 20 drop-uri CEF  (Fast Scan)
+    ├── sample_slow_gaia.log   # 35 drop-uri GAIA (Slow Scan)
+    ├── sample_slow_cef.log    # 35 drop-uri CEF  (Slow Scan)
+    ├── sample_normal_gaia.log # 5 drop-uri GAIA  (sub prag, trafic normal)
+    ├── sample_normal_cef.log  # 5 drop-uri CEF   (sub prag, trafic normal)
+    └── sample2_gaia.log       # 56 log-uri reale Checkpoint GAIA (accept + drop mixt)
 ```
 
 ### Dependente principale

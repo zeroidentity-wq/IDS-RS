@@ -3,31 +3,34 @@
 tester.py - Script de testare pentru IDS-RS
 
 Trimite pachete UDP catre IDS-RS simuland log-uri de firewall.
-Suporta urmatoarele moduri de testare:
 
-  1. fast-scan   - Simuleaza un atac Fast Scan (multe porturi intr-un interval scurt)
-  2. slow-scan   - Simuleaza un atac Slow Scan (porturi distribuite pe un interval lung)
-  3. normal      - Trimite trafic normal (sub pragul de detectie)
-  4. replay      - Trimite log-uri dintr-un fisier catre IDS-RS
+Preset-uri rapide (replay automat din fisierele sample pre-generate):
+  python tester.py fast                     # Fast Scan GAIA
+  python tester.py fast --cef               # Fast Scan CEF
+  python tester.py slow                     # Slow Scan GAIA
+  python tester.py slow --cef               # Slow Scan CEF
+  python tester.py normal                   # Trafic normal GAIA
+  python tester.py normal --cef             # Trafic normal CEF
 
-Fiecare mod de scanare suporta formatele: gaia si cef (--format).
+Replay / sample (fisier la alegere):
+  python tester.py replay tester/sample2_gaia.log
+  python tester.py sample tester/sample2_gaia.log raw-gaia
 
-Utilizare:
+Generare dinamica (avansat):
   python tester.py fast-scan --format gaia --ports 20 --delay 0.1
-  python tester.py fast-scan --format cef --ports 25 --batch 5
   python tester.py slow-scan --format gaia --ports 40
-  python tester.py slow-scan --format cef --ports 35 --delay 8
-  python tester.py normal --format gaia --count 5
-  python tester.py normal --format cef --count 3
-  python tester.py replay --file /path/to/logs.txt
-  python tester.py replay --file /path/to/logs.txt --delay 0.05
 """
 
 import argparse
+import os
+import re
 import socket
 import sys
 import time
 import random
+from collections import Counter
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 # =============================================================================
@@ -35,13 +38,17 @@ import random
 # =============================================================================
 
 def generate_gaia_log(source_ip: str, dst_port: int, action: str = "drop") -> str:
-    """Genereaza un log Checkpoint Gaia realist."""
+    """Genereaza un log Checkpoint Gaia in formatul REAL (cu header complet)."""
     src_port = random.randint(1024, 65535)
     second = random.randint(0, 59)
     return (
         f"Sep  3 15:12:{second:02d} 192.168.99.1 "
-        f"Checkpoint: {action} {source_ip} "
-        f"proto: tcp; service: {dst_port}; s_port: {src_port}"
+        f"Checkpoint: 3Sep2007 15:12:{second:02d} {action} "
+        f"{source_ip} >eth8 rule: 134; "
+        f"rule_uid: {{11111111-2222-3333-BD17-711F536C7C33}}; "
+        f"service_id: port-scan; src: {source_ip}; dst: 10.0.0.1; "
+        f"proto: tcp; product: VPN-1 & FireWall-1; "
+        f"service: {dst_port}; s_port: {src_port};"
     )
 
 
@@ -60,6 +67,80 @@ def generate_log(fmt: str, source_ip: str, dst_port: int, action: str = "drop") 
     if fmt == "cef":
         return generate_cef_log(source_ip, dst_port, action)
     return generate_gaia_log(source_ip, dst_port, action)
+
+
+# =============================================================================
+# Parsare GAIA (pentru sample mode)
+# =============================================================================
+
+# Regex pentru header-ul GAIA: extrage actiunea dupa checkpoint date+time.
+_GAIA_HEADER_RE = re.compile(
+    r"(?i)Checkpoint:\s+\S+\s+\S+\s+(accept|drop|reject)\s+"
+)
+
+
+def parse_gaia_line(line: str) -> dict | None:
+    """
+    Parseaza o linie de log GAIA si extrage campurile relevante.
+
+    Returneaza un dict cu: action, src, dst, proto, service, rule
+    sau None daca linia nu este un log GAIA valid.
+    """
+    m = _GAIA_HEADER_RE.search(line)
+    if not m:
+        return None
+
+    action = m.group(1).lower()
+
+    # Zona de extensii: tot ce urmeaza dupa match-ul header-ului.
+    extensions = line[m.end():]
+
+    # Extragem campurile key-value separate prin ";"
+    fields = {}
+    for part in extensions.split(";"):
+        part = part.strip()
+        if ": " in part:
+            key, _, value = part.partition(": ")
+            fields[key.strip()] = value.strip()
+
+    result = {"action": action}
+    result["src"] = fields.get("src")
+    result["dst"] = fields.get("dst")
+    result["proto"] = fields.get("proto")
+    result["service"] = fields.get("service")
+    result["rule"] = fields.get("rule") or fields.get("rule_uid")
+
+    return result
+
+
+def gaia_to_cef(parsed: dict) -> str | None:
+    """
+    Converteste campurile parsate din GAIA in format CEF.
+
+    Returneaza un string CEF sau None daca campuri esentiale lipsesc.
+    """
+    src = parsed.get("src")
+    dst = parsed.get("dst")
+    action = parsed.get("action", "drop")
+    proto = (parsed.get("proto") or "tcp").upper()
+    service = parsed.get("service")
+    rule = parsed.get("rule") or "100"
+
+    if not src or not dst:
+        return None
+
+    severity = 5 if action == "drop" else 3
+    name = action.capitalize()
+
+    parts = [
+        f"CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|{rule}|{name}|{severity}|",
+        f"src={src} dst={dst}",
+    ]
+    if service:
+        parts.append(f"dpt={service}")
+    parts.append(f"proto={proto} act={action}")
+
+    return " ".join(parts)
 
 
 # =============================================================================
@@ -279,6 +360,223 @@ def replay_file(
 
 
 # =============================================================================
+# Sample Mode
+# =============================================================================
+
+def _load_sample_file(file_path: str) -> list[str]:
+    """Incarca liniile non-goale dintr-un fisier sample."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return [line.rstrip("\n\r") for line in f if line.strip()]
+    except FileNotFoundError:
+        print(f"[!] Eroare: fisierul '{file_path}' nu exista.")
+        sys.exit(1)
+    except PermissionError:
+        print(f"[!] Eroare: nu am permisiuni pentru '{file_path}'.")
+        sys.exit(1)
+
+
+def _extract_drops(lines: list[str]) -> list[dict]:
+    """Parseaza liniile si returneaza doar drop-urile cu src si service."""
+    drops = []
+    for line in lines:
+        parsed = parse_gaia_line(line)
+        if parsed and parsed["action"] == "drop" and parsed["src"] and parsed["service"]:
+            parsed["_raw"] = line
+            drops.append(parsed)
+    return drops
+
+
+def sample_raw_gaia(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    lines: list[str],
+    delay: float,
+    batch_size: int,
+) -> None:
+    """Trimite liniile GAIA as-is (replay cu filtrare pe linii valide)."""
+    valid_lines = [l for l in lines if _GAIA_HEADER_RE.search(l)]
+    total = len(valid_lines)
+    print(f"[*] Sample RAW-GAIA: {total} linii valide din {len(lines)} total")
+    print()
+
+    batch_buffer = []
+    sent_count = 0
+
+    for i, line in enumerate(valid_lines):
+        batch_buffer.append(line)
+        if len(batch_buffer) >= batch_size or i == total - 1:
+            message = "\n".join(batch_buffer)
+            send_udp(sock, host, port, message)
+            sent_count += len(batch_buffer)
+            print(f"  [{sent_count:>4}/{total}] Trimis {len(batch_buffer)} linie(i)")
+            batch_buffer.clear()
+            if delay > 0 and i < total - 1:
+                time.sleep(delay)
+
+    print()
+    print(f"[+] Raw-GAIA complet: {sent_count} log-uri trimise")
+
+
+def sample_raw_cef(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    lines: list[str],
+    delay: float,
+    batch_size: int,
+) -> None:
+    """Parseaza fiecare linie GAIA, converteste la CEF si trimite."""
+    cef_lines = []
+    for line in lines:
+        parsed = parse_gaia_line(line)
+        if parsed:
+            cef = gaia_to_cef(parsed)
+            if cef:
+                cef_lines.append(cef)
+
+    total = len(cef_lines)
+    print(f"[*] Sample RAW-CEF: {total} linii convertite din {len(lines)} total")
+    print()
+
+    batch_buffer = []
+    sent_count = 0
+
+    for i, line in enumerate(cef_lines):
+        batch_buffer.append(line)
+        if len(batch_buffer) >= batch_size or i == total - 1:
+            message = "\n".join(batch_buffer)
+            send_udp(sock, host, port, message)
+            sent_count += len(batch_buffer)
+            print(f"  [{sent_count:>4}/{total}] Trimis {len(batch_buffer)} linie(i)")
+            batch_buffer.clear()
+            if delay > 0 and i < total - 1:
+                time.sleep(delay)
+
+    print()
+    print(f"[+] Raw-CEF complet: {sent_count} log-uri trimise")
+
+
+def _find_most_frequent_src(drops: list[dict]) -> str:
+    """Gaseste IP-ul sursa cel mai frecvent din drop-uri."""
+    src_counter = Counter(d["src"] for d in drops if d["src"])
+    if not src_counter:
+        return "192.168.11.34"
+    return src_counter.most_common(1)[0][0]
+
+
+def sample_scan(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    lines: list[str],
+    delay: float,
+    batch_size: int,
+    fmt: str,
+    fast: bool,
+) -> None:
+    """
+    Extrage drop-urile din sample, identifica IP-ul sursa cel mai frecvent
+    si porturile reale, apoi genereaza log-uri noi (scan lent sau rapid).
+    """
+    drops = _extract_drops(lines)
+    if not drops:
+        print("[!] Nu s-au gasit drop-uri valide in fisier.")
+        return
+
+    source_ip = _find_most_frequent_src(drops)
+    ports = list({int(d["service"]) for d in drops if d["service"] and d["service"].isdigit()})
+    if not ports:
+        print("[!] Nu s-au gasit porturi valide in drop-uri.")
+        return
+
+    scan_type = "FAST" if fast else "SLOW"
+    actual_delay = delay if not fast else min(delay, 0.05)
+
+    print(f"[*] Sample {scan_type}-SCAN ({fmt.upper()}) de la {source_ip}")
+    print(f"    Porturi unice din sample: {len(ports)} | Delay: {actual_delay}s")
+    print()
+
+    batch_buffer = []
+    sent_count = 0
+    total = len(ports)
+
+    for i, dst_port in enumerate(ports):
+        log_line = generate_log(fmt, source_ip, dst_port, "drop")
+        batch_buffer.append(log_line)
+
+        if len(batch_buffer) >= batch_size or i == total - 1:
+            message = "\n".join(batch_buffer)
+            send_udp(sock, host, port, message)
+            sent_count += len(batch_buffer)
+            print(f"  [{sent_count:>4}/{total}] Port: {dst_port}")
+            batch_buffer.clear()
+            if actual_delay > 0 and i < total - 1:
+                time.sleep(actual_delay)
+
+    print()
+    print(f"[+] {scan_type}-Scan complet: {sent_count} log-uri trimise ({fmt.upper()})")
+
+
+def run_sample(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    file_path: str,
+    mode: str,
+    delay: float,
+    batch_size: int,
+) -> None:
+    """Dispatch-er pentru sample mode."""
+    lines = _load_sample_file(file_path)
+    if not lines:
+        print("[!] Fisierul este gol.")
+        return
+
+    print(f"[*] Fisier incarcat: {file_path} ({len(lines)} linii)")
+    print(f"    Mod: {mode} | Delay: {delay}s | Batch: {batch_size}")
+    print(f"    Destinatie: {host}:{port}")
+    print()
+
+    if mode == "raw-gaia":
+        sample_raw_gaia(sock, host, port, lines, delay, batch_size)
+    elif mode == "raw-cef":
+        sample_raw_cef(sock, host, port, lines, delay, batch_size)
+    elif mode == "scan-gaia":
+        sample_scan(sock, host, port, lines, delay, batch_size, "gaia", fast=False)
+    elif mode == "scan-cef":
+        sample_scan(sock, host, port, lines, delay, batch_size, "cef", fast=False)
+    elif mode == "fast-gaia":
+        sample_scan(sock, host, port, lines, delay, batch_size, "gaia", fast=True)
+    elif mode == "fast-cef":
+        sample_scan(sock, host, port, lines, delay, batch_size, "cef", fast=True)
+    else:
+        print(f"[!] Mod necunoscut: {mode}")
+        sys.exit(1)
+
+
+# =============================================================================
+# Preset-uri
+# =============================================================================
+
+def run_preset(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    preset: str,
+    cef: bool,
+    delay: float,
+    batch_size: int,
+) -> None:
+    """Replay automat din sample-ul corespunzator preset-ului."""
+    fmt = "cef" if cef else "gaia"
+    filename = f"sample_{preset}_{fmt}.log"
+    file_path = os.path.join(SCRIPT_DIR, filename)
+    replay_file(sock, host, port, file_path, delay, batch_size)
+
+
+# =============================================================================
 # CLI - Argparse
 # =============================================================================
 
@@ -308,15 +606,19 @@ def main() -> None:
         description="Tester IDS-RS - Simuleaza log-uri de firewall pe UDP",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Exemple:\n"
+            "Preset-uri (replay automat din sample):\n"
+            "  python tester.py fast                  # Fast Scan GAIA\n"
+            "  python tester.py fast --cef            # Fast Scan CEF\n"
+            "  python tester.py slow                  # Slow Scan GAIA\n"
+            "  python tester.py normal                # Trafic normal GAIA\n"
+            "\n"
+            "Replay / sample (fisier la alegere):\n"
+            "  python tester.py replay tester/sample2_gaia.log\n"
+            "  python tester.py sample tester/sample2_gaia.log raw-gaia\n"
+            "\n"
+            "Generare dinamica (avansat):\n"
             "  python tester.py fast-scan --format gaia --ports 20 --delay 0.1\n"
-            "  python tester.py fast-scan --format cef --ports 25 --batch 5\n"
             "  python tester.py slow-scan --format gaia --ports 40\n"
-            "  python tester.py slow-scan --format cef --ports 35 --delay 8\n"
-            "  python tester.py normal --format gaia --count 5\n"
-            "  python tester.py normal --format cef --count 3\n"
-            "  python tester.py replay --file /path/to/logs.txt\n"
-            "  python tester.py replay --file /path/to/logs.txt --delay 0.05 --batch 10\n"
         ),
     )
 
@@ -336,10 +638,37 @@ def main() -> None:
     subparsers = root_parser.add_subparsers(dest="command", help="Modul de testare")
     subparsers.required = True
 
-    # --- fast-scan ---
+    # --- fast (preset) ---
+    fast_preset = subparsers.add_parser(
+        "fast",
+        help="Replay sample_fast_*.log (Fast Scan)",
+    )
+    fast_preset.add_argument("--cef", action="store_true", help="Format CEF in loc de GAIA")
+    fast_preset.add_argument("--delay", type=float, default=0.1, help="Delay intre batch-uri (default: 0.1)")
+    fast_preset.add_argument("--batch", type=int, default=1, help="Linii per pachet UDP (default: 1)")
+
+    # --- slow (preset) ---
+    slow_preset = subparsers.add_parser(
+        "slow",
+        help="Replay sample_slow_*.log (Slow Scan)",
+    )
+    slow_preset.add_argument("--cef", action="store_true", help="Format CEF in loc de GAIA")
+    slow_preset.add_argument("--delay", type=float, default=0.5, help="Delay intre batch-uri (default: 0.5)")
+    slow_preset.add_argument("--batch", type=int, default=1, help="Linii per pachet UDP (default: 1)")
+
+    # --- normal (preset) ---
+    normal_preset = subparsers.add_parser(
+        "normal",
+        help="Replay sample_normal_*.log (trafic normal, fara alerta)",
+    )
+    normal_preset.add_argument("--cef", action="store_true", help="Format CEF in loc de GAIA")
+    normal_preset.add_argument("--delay", type=float, default=0.1, help="Delay intre batch-uri (default: 0.1)")
+    normal_preset.add_argument("--batch", type=int, default=1, help="Linii per pachet UDP (default: 1)")
+
+    # --- fast-scan (generare dinamica) ---
     fast_parser = subparsers.add_parser(
         "fast-scan",
-        help="Simuleaza un atac Fast Scan (>15 porturi in <10s)",
+        help="Genereaza dinamic un atac Fast Scan (>15 porturi in <10s)",
     )
     add_common_scan_args(fast_parser)
     fast_parser.add_argument(
@@ -355,10 +684,10 @@ def main() -> None:
         help="Delay intre batch-uri in secunde (default: 0.1)",
     )
 
-    # --- slow-scan ---
+    # --- slow-scan (generare dinamica) ---
     slow_parser = subparsers.add_parser(
         "slow-scan",
-        help="Simuleaza un atac Slow Scan (>30 porturi in <5 min)",
+        help="Genereaza dinamic un atac Slow Scan (>30 porturi in <5 min)",
     )
     add_common_scan_args(slow_parser)
     slow_parser.add_argument(
@@ -374,27 +703,13 @@ def main() -> None:
         help="Delay intre batch-uri in secunde (default: 7.0)",
     )
 
-    # --- normal ---
-    normal_parser = subparsers.add_parser(
-        "normal",
-        help="Trimite trafic normal (sub pragul de detectie)",
-    )
-    add_common_scan_args(normal_parser)
-    normal_parser.add_argument(
-        "--count",
-        type=int,
-        default=5,
-        help="Numar de log-uri de trimis (default: 5)",
-    )
-
     # --- replay ---
     replay_parser = subparsers.add_parser(
         "replay",
         help="Trimite log-uri dintr-un fisier catre IDS-RS",
     )
     replay_parser.add_argument(
-        "--file",
-        required=True,
+        "file",
         help="Calea catre fisierul cu log-uri (o linie = un log)",
     )
     replay_parser.add_argument(
@@ -404,6 +719,33 @@ def main() -> None:
         help="Delay intre batch-uri in secunde (default: 0.1)",
     )
     replay_parser.add_argument(
+        "--batch",
+        type=int,
+        default=1,
+        help="Linii per pachet UDP (default: 1)",
+    )
+
+    # --- sample ---
+    sample_parser = subparsers.add_parser(
+        "sample",
+        help="Citeste log-uri reale dintr-un fisier si le trimite in multiple formate",
+    )
+    sample_parser.add_argument(
+        "file",
+        help="Calea catre fisierul cu log-uri GAIA reale",
+    )
+    sample_parser.add_argument(
+        "mode",
+        choices=["raw-gaia", "raw-cef", "scan-gaia", "scan-cef", "fast-gaia", "fast-cef"],
+        help="Modul de trimitere: raw-gaia, raw-cef, scan-gaia, scan-cef, fast-gaia, fast-cef",
+    )
+    sample_parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="Delay intre batch-uri in secunde (default: 0.5)",
+    )
+    sample_parser.add_argument(
         "--batch",
         type=int,
         default=1,
@@ -423,7 +765,17 @@ def main() -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     try:
-        if args.command == "fast-scan":
+        if args.command in ("fast", "slow", "normal"):
+            run_preset(
+                sock=sock,
+                host=args.host,
+                port=args.port,
+                preset=args.command,
+                cef=args.cef,
+                delay=args.delay,
+                batch_size=args.batch,
+            )
+        elif args.command == "fast-scan":
             simulate_fast_scan(
                 sock=sock,
                 host=args.host,
@@ -445,21 +797,22 @@ def main() -> None:
                 batch_size=args.batch,
                 fmt=args.format,
             )
-        elif args.command == "normal":
-            simulate_normal(
-                sock=sock,
-                host=args.host,
-                port=args.port,
-                source_ip=args.source,
-                count=args.count,
-                fmt=args.format,
-            )
         elif args.command == "replay":
             replay_file(
                 sock=sock,
                 host=args.host,
                 port=args.port,
                 file_path=args.file,
+                delay=args.delay,
+                batch_size=args.batch,
+            )
+        elif args.command == "sample":
+            run_sample(
+                sock=sock,
+                host=args.host,
+                port=args.port,
+                file_path=args.file,
+                mode=args.mode,
                 delay=args.delay,
                 batch_size=args.batch,
             )
