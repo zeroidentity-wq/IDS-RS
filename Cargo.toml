@@ -1,0 +1,57 @@
+[package]
+name = "ids-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Intrusion Detection System - Network Scan Detector"
+
+# ============================================================================
+# DEPENDENTE
+# ============================================================================
+# In Rust, dependentele se declara in [dependencies] si Cargo le descarca
+# automat de pe crates.io (registry-ul central). Versiunile folosesc semver:
+#   "1"     = orice versiune compatibila 1.x.x
+#   "0.11"  = orice versiune compatibila 0.11.x
+# Fisierul Cargo.lock (generat automat) blocheaza versiunile exacte.
+# ============================================================================
+
+[dependencies]
+# Runtime asincron - tokio este standardul de facto pentru async I/O in Rust.
+# "full" activeaza toate feature-urile: runtime multi-threaded, I/O, timers,
+# channels, signal handling, etc.
+tokio = { version = "1", features = ["full"] }
+
+# Serializare / Deserializare - serde este framework-ul universal.
+# "derive" permite #[derive(Serialize, Deserialize)] pe structuri.
+serde = { version = "1", features = ["derive"] }
+
+# Parser TOML - folosit pentru fisierul de configurare config.toml.
+toml = "0.8"
+
+# Logging structurat - tracing este succesorul lui `log`, suporta spans,
+# campuri structurate si integrare cu ecosistemul async.
+tracing = "0.1"
+
+# Subscriber pentru tracing - formateaza si afiseaza log-urile.
+# "env-filter" permite filtrarea log-urilor prin variabila RUST_LOG.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Culori ANSI in terminal - ofera metode pe &str / String: "text".red().bold()
+colored = "2"
+
+# HashMap thread-safe, lock-free per shard - alternativa performanta la
+# Arc<RwLock<HashMap>>. Permite acces concurent fara lock global.
+dashmap = "6"
+
+# Client SMTP async pentru trimiterea email-urilor de alerta.
+# "tokio1-native-tls" = transport async cu TLS prin libraria nativa a OS-ului.
+lettre = { version = "0.11", features = ["tokio1-native-tls"] }
+
+# Lucru cu date si ore - Local::now(), formatare timestamps.
+chrono = "0.4"
+
+# Expresii regulate compilate - folosite pentru parsing log-uri Gaia.
+regex = "1"
+
+# Error handling ergonomic - anyhow::Result permite propagarea oricarei erori
+# cu context aditional, fara a defini tipuri de eroare custom.
+anyhow = "1"

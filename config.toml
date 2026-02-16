@@ -1,0 +1,69 @@
+# =============================================================================
+# IDS-RS - Fisier de Configurare
+# =============================================================================
+# Toate valorile sunt configurabile. Niciunul nu este hardcodat in cod.
+# Formatul TOML: https://toml.io/
+# =============================================================================
+
+[network]
+# Adresa IP pe care asculta serverul UDP. "0.0.0.0" = toate interfetele.
+listen_address = "0.0.0.0"
+# Portul UDP pe care se primesc log-urile de la firewall.
+listen_port = 5555
+# Tipul de parser activ: "gaia" (Checkpoint Gaia Raw) sau "cef" (ArcSight CEF).
+parser = "gaia"
+
+# -----------------------------------------------------------------------------
+# Praguri de detectie pentru scanari de retea
+# -----------------------------------------------------------------------------
+
+[detection]
+# Perioada de cooldown (secunde) intre alerte repetate pentru acelasi IP.
+# Previne spam-ul de alerte cand un atac este deja detectat.
+alert_cooldown_secs = 300
+
+[detection.fast_scan]
+# Numar de porturi unice care declanseaza alerta de Fast Scan.
+# Alerta se emite cand un IP acceseaza > port_threshold porturi unice
+# in time_window_secs secunde.
+port_threshold = 15
+time_window_secs = 10
+
+[detection.slow_scan]
+# Numar de porturi unice care declanseaza alerta de Slow Scan.
+# Alerta se emite cand un IP acceseaza > port_threshold porturi unice
+# in time_window_mins minute.
+port_threshold = 30
+time_window_mins = 5
+
+# -----------------------------------------------------------------------------
+# Configurare alerte
+# -----------------------------------------------------------------------------
+
+[alerting.siem]
+# Trimite alerte catre SIEM (ArcSight) prin UDP syslog.
+enabled = true
+host = "127.0.0.1"
+port = 514
+
+[alerting.email]
+# Trimite alerte prin email catre echipa IT/Security.
+enabled = false
+smtp_server = "smtp.example.com"
+smtp_port = 587
+smtp_tls = true
+from = "ids-rs@example.com"
+to = ["it-security@example.com"]
+username = "ids-rs@example.com"
+password = "changeme"
+
+# -----------------------------------------------------------------------------
+# Mentenanta memorie
+# -----------------------------------------------------------------------------
+
+[cleanup]
+# Intervalul (secunde) la care ruleaza task-ul de cleanup.
+interval_secs = 60
+# Varsta maxima (secunde) a inregistrarilor din memorie. Dupa acest interval,
+# datele de port-hit pentru un IP sunt sterse, eliberand memoria.
+max_entry_age_secs = 600
