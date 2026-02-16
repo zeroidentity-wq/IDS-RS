@@ -9,6 +9,7 @@
 //   4. Gestioneaza cooldown-ul alertelor (anti-spam)
 //   5. Curata periodic datele vechi din memorie
 //
+
 // CONCEPTE RUST EXPLICATE:
 //
 // 1. THREAD SAFETY (Send + Sync)

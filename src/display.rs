@@ -265,14 +265,20 @@ pub fn log_alert_sent(destination: &str, alert_type: &str) {
 }
 
 /// Logarea unui eveniment de pachet primit (drop firewall) - albastru subtil.
-pub fn log_drop_event(ip: &std::net::IpAddr, port: u16) {
+///
+/// Afiseaza IP sursa, portul destinatie, protocolul si actiunea firewall-ului.
+/// Aceasta consuma campurile `protocol` si `action` din `LogEvent`,
+/// oferind vizibilitate completa asupra evenimentelor procesate.
+pub fn log_drop_event(ip: &std::net::IpAddr, port: u16, protocol: &str, action: &str) {
     let ts = timestamp();
     println!(
-        "{} {} Src={} DstPort={}",
+        "{} {} Src={} DstPort={} Proto={} Action={}",
         ts.dimmed(),
         " DROP ".on_blue().white().bold(),
         format!("{}", ip).bright_blue(),
-        format!("{}", port).bright_blue()
+        format!("{}", port).bright_blue(),
+        protocol.bright_blue(),
+        action.bright_blue()
     );
 }
 

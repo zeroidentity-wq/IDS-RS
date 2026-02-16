@@ -37,6 +37,7 @@
 
 use crate::config::AlertingConfig;
 use crate::detector::Alert;
+use crate::display;
 use anyhow::{Context, Result};
 use lettre::{
     transport::smtp::authentication::Credentials, AsyncSmtpTransport, AsyncTransport, Message,
@@ -73,16 +74,13 @@ impl Alerter {
     pub async fn send_alert(&self, alert: &Alert) {
         if self.config.siem.enabled {
             if let Err(e) = self.send_siem_alert(alert).await {
-                // `tracing::error!` logheaza la nivel ERROR.
-                // Diferenta fata de eprintln!: tracing este structurat,
-                // poate fi filtrat, redirectionat, si include metadata.
-                tracing::error!("Eroare trimitere alerta SIEM: {:#}", e);
+                display::log_error(&format!("Eroare trimitere alerta SIEM: {:#}", e));
             }
         }
 
         if self.config.email.enabled {
             if let Err(e) = self.send_email_alert(alert).await {
-                tracing::error!("Eroare trimitere email: {:#}", e);
+                display::log_error(&format!("Eroare trimitere email: {:#}", e));
             }
         }
     }
@@ -130,7 +128,7 @@ impl Alerter {
             .await
             .with_context(|| format!("Nu pot trimite catre SIEM {}", dest))?;
 
-        tracing::debug!("Alerta SIEM trimisa catre {}", dest);
+        display::log_alert_sent(&dest, &format!("{}", alert.scan_type));
         Ok(())
     }
 
@@ -192,13 +190,17 @@ impl Alerter {
         //
         // `.relay()` = conectare cu TLS implicit (port 465 default)
         // `.builder_dangerous()` = fara TLS (doar pentru retele interne!)
+        // `.port()` seteaza portul SMTP din configurare (ex: 465, 587, 25).
+        // Fara `.port()`, lettre foloseste default-ul protocolului.
         let mailer = if cfg.smtp_tls {
             AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.smtp_server)
                 .context("Nu pot configura SMTP relay")?
+                .port(cfg.smtp_port)
                 .credentials(creds)
                 .build()
         } else {
             AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_server)
+                .port(cfg.smtp_port)
                 .credentials(creds)
                 .build()
         };
@@ -228,7 +230,7 @@ impl Alerter {
                 .with_context(|| format!("Nu pot trimite email catre {}", recipient))?;
         }
 
-        tracing::debug!("Email trimis catre {:?}", cfg.to);
+        display::log_alert_sent("Email", &format!("{}", alert.scan_type));
         Ok(())
     }
 }

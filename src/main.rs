@@ -218,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
     let socket = UdpSocket::bind(&bind_addr).await?;
     display::log_info(&format!("Ascult pe UDP {}", bind_addr));
     display::log_info("Astept log-uri de la firewall... (Ctrl+C pentru oprire)");
+    display::print_separator();
 
     // =========================================================================
     // 7. MAIN LOOP - Receptie si Procesare Log-uri
@@ -293,11 +294,17 @@ async fn main() -> anyhow::Result<()> {
 
                             // Parsam linia cu parser-ul activ (dynamic dispatch).
                             if let Some(event) = parser.parse(line) {
-                                tracing::debug!(
-                                    ip = %event.source_ip,
-                                    port = event.dest_port,
-                                    "Eveniment procesat"
+                                // Afisam evenimentul de drop in terminal (albastru subtil).
+                                // Folosim source_ip, dest_port, protocol si action din LogEvent.
+                                display::log_drop_event(
+                                    &event.source_ip,
+                                    event.dest_port,
+                                    &event.protocol,
+                                    &event.action,
                                 );
+
+                                // Pastram log-ul original la nivel debug pentru audit/troubleshooting.
+                                tracing::debug!(raw = %event.raw_log, "Log original");
 
                                 // Procesam evenimentul in detector.
                                 // NOTA RUST: `&event` = imprumut imutabil.
@@ -317,8 +324,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         // Erorile de receptie UDP sunt de obicei tranzitorii.
-                        // Le logam si continuam - nu oprim procesul.
-                        display::log_error(&format!("Eroare receptie UDP: {}", e));
+                        // Le logam ca warning si continuam - nu oprim procesul.
+                        display::log_warning(&format!("Eroare receptie UDP: {}", e));
                     }
                 }
             }
