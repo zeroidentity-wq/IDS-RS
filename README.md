@@ -202,21 +202,25 @@ RUST_LOG=debug ./target/release/ids-rs
 Scriptul `tester.py` simuleaza log-uri de firewall trimise pe UDP.
 
 ```bash
-  python tester.py fast-scan --format gaia --ports 20 --delay 0.1
+python tester.py fast-scan --format gaia --ports 20 --delay 0.1
 
-  python tester.py fast-scan --format cef --ports 25 --batch 5
+python tester.py slow-scan --format gaia --ports 40
 
-  python tester.py slow-scan --format gaia --ports 40
+python tester.py normal --format gaia --count 5
 
-  python tester.py slow-scan --format cef --ports 35 --delay 8
+##########
 
-  python tester.py normal --format gaia --count 5
+python tester.py fast-scan --format cef --ports 25 --batch 5
 
-  python tester.py normal --format cef --count 3
+python tester.py slow-scan --format cef --ports 35 --delay 8
 
-  python tester.py replay --file /path/to/logs.txt
-  
-  python tester.py replay --file /path/to/logs.txt --delay 0.05
+python tester.py normal --format cef --count 3
+
+##########
+
+python tester.py replay --file /path/to/logs.txt
+
+python tester.py replay --file /path/to/logs.txt --delay 0.05
 ```
 
 ### Parametri tester.py
