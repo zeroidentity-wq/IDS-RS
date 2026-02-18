@@ -35,7 +35,7 @@
 // =============================================================================
 
 use crate::config::AlertingConfig;
-use crate::detector::Alert;
+use crate::detector::{Alert, ScanType};
 use crate::display;
 use anyhow::{Context, Result};
 use lettre::{
@@ -98,8 +98,33 @@ impl Alerter {
     /// dar Rust/tokio ne forteaza sa tratam ca async - consistenta API.
     ///
     async fn send_siem_alert(&self, alert: &Alert) -> Result<()> {
-        // Formatam mesajul in stil syslog/SIEM.
-        // Folosim campuri cheie=valoare pentru parsare usoara in SIEM.
+        // Formatam mesajul in format CEF peste Syslog RFC 3164 pentru ArcSight.
+        //
+        // Structura completa:
+        //   <PRIORITY>TIMESTAMP HOSTNAME CEF:0|Vendor|Product|Ver|SigID|Name|Sev|Extensions
+        //
+        // Prioritate syslog: facility=4 (security) × 8 + severity=6 (info) = 38
+        // Campuri CEF Extensions: rt, src, cnt, act, msg, cs1Label, cs1
+
+        let (sig_id, event_name, msg_text) = match alert.scan_type {
+            ScanType::Fast => (
+                "1001",
+                "Fast Port Scan Detected",
+                format!(
+                    "Fast Scan detectat: {} porturi unice in 10 secunde",
+                    alert.unique_ports.len()
+                ),
+            ),
+            ScanType::Slow => (
+                "1002",
+                "Slow Port Scan Detected",
+                format!(
+                    "Slow Scan detectat: {} porturi unice in fereastra de 5 minute",
+                    alert.unique_ports.len()
+                ),
+            ),
+        };
+
         let port_list: String = alert
             .unique_ports
             .iter()
@@ -107,13 +132,22 @@ impl Alerter {
             .collect::<Vec<_>>()
             .join(",");
 
+        let syslog_ts = alert.timestamp.format("%b %e %H:%M:%S");
+        let rt_ms = alert.timestamp.timestamp_millis();
+
         let message = format!(
-            "[IDS-RS ALERT] type={} src={} unique_ports={} time={} ports={}",
-            alert.scan_type,
-            alert.source_ip,
-            alert.unique_ports.len(),
-            alert.timestamp.format("%Y-%m-%dT%H:%M:%S"),
-            port_list,
+            "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
+             |{sig_id}|{event_name}|7\
+             |rt={rt_ms} src={src} cnt={cnt} act=alert \
+             msg={msg} cs1Label=ScannedPorts cs1={ports}",
+            syslog_ts = syslog_ts,
+            sig_id = sig_id,
+            event_name = event_name,
+            rt_ms = rt_ms,
+            src = alert.source_ip,
+            cnt = alert.unique_ports.len(),
+            msg = msg_text,
+            ports = port_list,
         );
 
         // Cream un socket UDP efemer (port 0 = OS alege automat).

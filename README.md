@@ -12,6 +12,7 @@ Detecteaza scanari de retea (Fast Scan si Slow Scan) si trimite alerte catre SIE
 - [Compilare](#compilare)
 - [Configurare](#configurare)
 - [Formate de log — Anatomie si flux](#formate-de-log--anatomie-si-flux)
+- [Calatoria unui eveniment — De la firewall la SIEM](#calatoria-unui-eveniment--de-la-firewall-la-siem)
 - [Rulare](#rulare)
 - [Testare](#testare)
 - [Structura proiect](#structura-proiect)
@@ -318,6 +319,211 @@ parser = "cef"    # Scenariul B: ArcSight Forwarder trimite CEF la IDS-RS
 In productie reala vei folosi cel mai probabil `parser = "cef"` daca ai deja
 un ArcSight SmartConnector instalat, deoarece acesta normalizeaza totul la CEF.
 Modul `"gaia"` este util cand conectezi firewall-ul **direct** la IDS-RS, fara intermediar.
+
+---
+
+## Calatoria unui eveniment — De la firewall la SIEM
+
+Aceasta sectiune urmareste un eveniment real pas cu pas, de la momentul in care
+firewall-ul blocheaza o conexiune pana cand alerta apare in interfata ArcSight.
+
+---
+
+### Etapa 1 — Firewall trimite log-ul, IDS-RS il primeste
+
+Un atacator de la `192.168.11.7` bate la 20 de porturi diferite. Firewall-ul
+Checkpoint blocheaza fiecare conexiune si trimite cate un log pe UDP:
+
+```
+Sep 3 15:12:08 192.168.99.1 Checkpoint: 3Sep2007 15:12:08 drop 192.168.11.7 >eth8
+rule: 113; src: 192.168.11.7; dst: 10.0.0.1; proto: tcp; service: 443; s_port: 2854;
+```
+
+Pachetul UDP ajunge la IDS-RS pe portul 5555. In `main.rs`:
+
+```rust
+result = socket.recv_from(&mut buf)          // primim bytes bruti
+let data = String::from_utf8_lossy(&buf[..len]); // bytes -> text
+for line in data.lines() { ... }            // separam log-urile pe \n (buffer coalescing)
+```
+
+Daca in acelasi pachet UDP au venit mai multe log-uri lipite (batch), `.lines()`
+le separa si le proceseaza pe rand.
+
+---
+
+### Etapa 2 — Parserul extrage ce ne intereseaza
+
+Fiecare linie trece prin parser (`main.rs:306`):
+
+```rust
+if let Some(event) = parser.parse(line) { ... }
+```
+
+Parser-ul GAIA (`gaia.rs`) face doua lucruri:
+1. Gaseste cuvantul `drop` dupa `Checkpoint:` cu un regex
+2. Extrage campurile `src:`, `proto:`, `service:` prin split dupa `;`
+
+- Daca actiunea este `accept` → returneaza `None`, linia este ignorata complet
+- Daca actiunea este `drop` → returneaza un `LogEvent`:
+
+```rust
+LogEvent {
+    source_ip:  192.168.11.7,    // atacatorul
+    dest_port:  443,              // portul pe care a batut
+    protocol:   "tcp",
+    action:     "drop",
+    raw_log:    "Sep 3 15:12..."  // linia originala, pastrata pentru audit
+}
+```
+
+---
+
+### Etapa 3 — Detectorul numara si decide
+
+`LogEvent`-ul intra in detector (`main.rs:324`):
+
+```rust
+let alerts = detector.process_event(&event);
+```
+
+Detectorul tine in memorie (DashMap) un jurnal per IP sursa:
+
+```
+192.168.11.7  →  [ port:80 la t=0s, port:443 la t=1s, port:22 la t=2s, ... ]
+```
+
+La fiecare eveniment nou verifica **doua ferestre de timp** independente:
+
+```
+Fast Scan: cate porturi UNICE a atins acest IP in ultimele 10 secunde?
+           daca > 15  →  ALERTA Fast Scan
+
+Slow Scan: cate porturi UNICE a atins acest IP in ultimele 5 minute?
+           daca > 30  →  ALERTA Slow Scan
+```
+
+Cand pragul este depasit, creeaza un struct `Alert`:
+
+```rust
+Alert {
+    scan_type:    ScanType::Fast,
+    source_ip:    192.168.11.7,
+    unique_ports: [21, 22, 23, 25, 53, 80, 110, 443, ...],
+    timestamp:    2026-02-18T12:06:16
+}
+```
+
+Dupa prima alerta, seteaza un **cooldown de 5 minute** pentru acel IP — daca
+atacatorul continua, nu se genereaza sute de alerte identice.
+
+---
+
+### Etapa 4 — Construim mesajul CEF si il trimitem
+
+Alerta intra in `alerter.rs` (`main.rs:332`):
+
+```rust
+alerter.send_alert(&alert).await;
+```
+
+Functia `send_siem_alert()` construieste mesajul in trei pasi:
+
+**Pas 1** — Determina tipul scanarii si alege Signature ID si textul:
+
+```rust
+match alert.scan_type {
+    ScanType::Fast => sig_id = "1001", name = "Fast Port Scan Detected"
+    ScanType::Slow => sig_id = "1002", name = "Slow Port Scan Detected"
+}
+```
+
+**Pas 2** — Construieste lista de porturi:
+```
+port_list = "21,22,23,25,53,80,110,443,445,3389,..."
+```
+
+**Pas 3** — Asambleaza mesajul CEF complet. Acesta este **exact ce zboara
+pe retea** ca pachet UDP catre `127.0.0.1:514`:
+
+```
+<38>Feb 18 12:06:16 ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0|1001|Fast Port Scan Detected|7|rt=1739876776000 src=192.168.11.7 cnt=20 act=alert msg=Fast Scan detectat: 20 porturi unice in 10 secunde cs1Label=ScannedPorts cs1=21,22,23,25,53,80,110,443,445,3389,8080,8443,3306,1433,5432,27017,6379,11211,9200,5601
+```
+
+---
+
+### Etapa 5 — ArcSight primeste si parseaza
+
+ArcSight asculta pe UDP 514. Cand primeste pachetul, il proceseaza in straturi:
+
+**Stratul 1 — Syslog header (RFC 3164):**
+
+```
+<38>             → facility=4 (security) × 8 + severity=6 → categoria evenimentului
+Feb 18 12:06:16  → timestamp syslog
+ids-rs           → hostname-ul sursei (cine a trimis alerta)
+```
+
+**Stratul 2 — CEF header (7 campuri separate prin `|`):**
+
+```
+CEF:0                    → versiunea formatului CEF
+IDS-RS                   → Device Vendor
+Network Scanner Detector → Device Product
+1.0                      → Device Version
+1001                     → Signature ID (1001=Fast, 1002=Slow) — folosit in reguli
+Fast Port Scan Detected  → Event Name
+7                        → Severity → apare ca "Priority: High" in ArcSight
+```
+
+**Stratul 3 — CEF Extensions (campuri key=value separate prin spatiu):**
+
+```
+rt=1739876776000    → Receipt Time in ms — ArcSight sorteaza evenimentele dupa asta
+src=192.168.11.7    → Source Address    → "Attacker Address" in ArcSight
+cnt=20              → Event Count       → numarul de porturi unice detectate
+act=alert           → Device Action     → folosit pentru filtrare si categorisire
+msg=Fast Scan...    → Message           → textul vizibil in coloana "Message"
+cs1Label=Scanned... → numele coloanei custom cs1
+cs1=21,22,23,80...  → ScannedPorts      → lista completa porturi, vizibila la detalii
+```
+
+**Cum arata in interfata ArcSight (Active Channel / Event List):**
+
+```
+┌──────────────────┬─────────────────┬──────┬─────────────────────┬───────┬───────────────────────────┐
+│ Time             │ Source Address  │ Cnt  │ Name                │ Prio  │ Message                   │
+├──────────────────┼─────────────────┼──────┼─────────────────────┼───────┼───────────────────────────┤
+│ Feb 18 12:06:16  │ 192.168.11.7   │  20  │ Fast Port Scan      │ High  │ Fast Scan detectat: 20    │
+│                  │                 │      │ Detected            │       │ porturi unice in 10s      │
+└──────────────────┴─────────────────┴──────┴─────────────────────┴───────┴───────────────────────────┘
+```
+
+Click pe eveniment → detalii complete, inclusiv coloana **ScannedPorts** cu
+lista tuturor porturilor vizate de atacator.
+
+---
+
+### Rezumat vizual al intregului flux
+
+```
+Firewall                IDS-RS                              ArcSight SIEM
+────────                ──────                              ─────────────
+
+drop tcp                recv_from()     ← UDP :5555
+src: 192.168.11.7:443   parse()         → LogEvent
+                        process_event() → Alert
+                        build CEF msg
+                        send_to()       → UDP :514   →     parse syslog header
+                                                           parse CEF header
+                                                           parse extensions
+                                                           map to schema
+                                                           show in Active Channel
+```
+
+Fiecare componenta face un singur lucru bine:
+`main.rs` orchestreaza, `parser/` intelege formatele, `detector.rs` decide,
+`alerter.rs` comunica cu lumea exterioara.
 
 ---
 
@@ -673,3 +879,37 @@ Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
 - [ ] **Debug mode disk fill** — modul debug afiseaza fiecare pachet in stdout. In productie cu volum mare si stdout redirectat la fisier, poate umple disk-ul. *Mitigare: dezactivare automata dupa N minute sau limita de linii.*
 
 - [ ] **Lipsa rate-limiting pe receptie UDP** (`main.rs`) — main loop-ul proceseaza pachete fara limita. Un flood UDP poate satura CPU-ul. *Mitigare: token bucket / rate limiter pe receptie.*
+
+---
+
+## TODO — Functionalitati viitoare
+
+Idei de extindere planificate, ordonate dupa impact operational.
+
+### Impact ridicat
+
+- [ ] **Detectie scanare porturi deschise (accept scan)** — in prezent IDS-RS
+  analizeaza exclusiv evenimentele `drop`. Un atacator sofisticat poate scana
+  **porturile deschise** (servicii active) generand exclusiv trafic `accept`,
+  trecand complet neobservat. Exemplu: un tool care bate metodic porturile
+  22, 80, 443, 3306 ale tuturor host-urilor din retea va genera doar accept-uri.
+  *Implementare: extinde `LogParser` si `Detector` sa proceseze si actiunea*
+  *`accept`; adauga praguri separate pentru accept-scan in `config.toml`;*
+  *creeaza `ScanType::AcceptScan` in `detector.rs`; alerta distincta in SIEM*
+  *cu Signature ID nou (ex: 1003) pentru diferentiere fata de drop-scan.*
+
+- [ ] **Raport zilnic prin email catre echipa IT/Security** — un task async
+  programat sa ruleze o data pe zi (ex: la 08:00) care compileaza si trimite
+  un email de sinteza cu activitatea din ultimele 24 de ore. Raportul include:
+  - Lista IP-urilor care au generat alerte (Fast/Slow Scan, Accept Scan)
+  - Numarul total de porturi unice scanate per IP si tipul actiunii (accept/drop)
+  - IP-urile cele mai active (top 10 atacatori)
+  - Comparatie cu ziua precedenta (IP-uri noi vs. recurente)
+  - Starea sistemului: uptime IDS-RS, pachete procesate, alerte generate
+
+  *Implementare: adauga `[alerting.daily_report]` in `config.toml` cu*
+  *`enabled`, `send_at = "08:00"`, `recipients = [...]`; creeaza un task*
+  *tokio cu `tokio::time::interval` de 24h sau calcul pana la urmatorul HH:MM;*
+  *stocheaza statisticile zilnice intr-un struct protejat de `Arc<Mutex<...>>`*
+  *actualizat de `Detector` la fiecare eveniment; genereaza corpul emailului*
+  *in `alerter.rs` si trimite prin SMTP-ul deja configurat.*
