@@ -5,7 +5,6 @@
 // Responsabilitati:
 //   1. Trimite alerte catre SIEM (ArcSight) prin UDP syslog
 //   2. Trimite notificari email catre echipa IT/Security
-//
 // CONCEPTE RUST EXPLICATE:
 //
 // 1. ASYNC/AWAIT (Asincronicitate)

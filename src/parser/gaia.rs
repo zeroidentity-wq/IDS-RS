@@ -172,6 +172,10 @@ impl LogParser for GaiaParser {
     fn name(&self) -> &str {
         "Checkpoint Gaia (Raw)"
     }
+
+    fn expected_format(&self) -> &str {
+        "Mon  D HH:MM:SS host Checkpoint: DDMmmYYYY HH:MM:SS action src >iface rule: N; src: IP; dst: IP; proto: PROTO; service: PORT;"
+    }
 }
 
 // =============================================================================

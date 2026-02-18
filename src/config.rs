@@ -51,6 +51,8 @@ pub struct NetworkConfig {
     pub listen_address: String,
     pub listen_port: u16,
     pub parser: String,
+    #[serde(default)]
+    pub debug: bool,
 }
 
 /// Configurare detectie - contine sub-structuri pentru fiecare tip de scan.

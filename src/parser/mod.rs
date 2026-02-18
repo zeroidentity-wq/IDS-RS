@@ -96,6 +96,9 @@ pub trait LogParser: Send + Sync {
 
     /// Returneaza numele uman al parser-ului (pentru afisare).
     fn name(&self) -> &str;
+
+    /// Returneaza un exemplu de format valid (pentru debug/diagnostic).
+    fn expected_format(&self) -> &str;
 }
 
 /// Factory function - creeaza parser-ul potrivit pe baza configurarii.

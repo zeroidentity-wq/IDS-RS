@@ -54,10 +54,10 @@ impl LogParser for CefParser {
     /// Sunt lazy - nu fac nimic pana nu sunt consumati (collect, for, etc).
     ///
     fn parse(&self, line: &str) -> Option<LogEvent> {
-        // Verificam prefixul CEF rapid (short-circuit).
-        if !line.starts_with("CEF:") {
-            return None;
-        }
+        // Gasim offset-ul "CEF:" in linie. Log-urile reale vin adesea cu un
+        // prefix syslog (ex: "Feb 17 11:32:44 gw-hostname CEF:0|..."),
+        // deci nu putem folosi starts_with.
+        let cef_start = line.find("CEF:")?;
 
         // Separam headerul CEF in maxim 8 parti (7 delimitatori '|').
         // `splitn(8, '|')` produce maxim 8 segmente.
@@ -66,7 +66,7 @@ impl LogParser for CefParser {
         // specifica explicit tipul in care colectam. Necesar cand compilatorul
         // nu poate infera tipul (collect este generic si poate produce
         // Vec, String, HashMap, etc).
-        let parts: Vec<&str> = line.splitn(8, '|').collect();
+        let parts: Vec<&str> = line[cef_start..].splitn(8, '|').collect();
 
         // Validam ca avem toate cele 8 campuri CEF.
         if parts.len() < 8 {
@@ -133,6 +133,10 @@ impl LogParser for CefParser {
     fn name(&self) -> &str {
         "CEF (ArcSight)"
     }
+
+    fn expected_format(&self) -> &str {
+        "<PRI>Mon DD HH:MM:SS hostname CEF:0|Vendor|Product|Version|ID|Name|Severity|src=IP dst=IP dpt=PORT proto=PROTO act=ACTION"
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +161,30 @@ mod tests {
         let log = "CEF:0|CheckPoint|VPN-1|R81|100|Accept|3|src=10.0.0.5 dst=10.0.0.1 dpt=80 proto=TCP act=accept";
 
         assert!(parser.parse(log).is_none());
+    }
+
+    #[test]
+    fn test_parse_cef_with_syslog_header() {
+        let parser = CefParser::new();
+        let log = "Feb 17 11:32:44 gw-hostname CEF:0|Check Point|VPN-1 & FireWall-1|Check Point|Log|Drop|5|src=11.11.11.11 dst=22.22.22.22 spt=444 dpt=444 proto=udp act=Drop";
+
+        let event = parser.parse(log).unwrap();
+        assert_eq!(event.source_ip.to_string(), "11.11.11.11");
+        assert_eq!(event.dest_port, 444);
+        assert_eq!(event.protocol, "udp");
+        assert_eq!(event.action, "drop");
+    }
+
+    #[test]
+    fn test_parse_cef_with_syslog_priority_header() {
+        let parser = CefParser::new();
+        let log = "<134>Feb 17 11:32:44 gw-hostname CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|Drop|5|src=10.0.0.5 dst=10.0.0.1 dpt=8080 proto=TCP act=Drop";
+
+        let event = parser.parse(log).unwrap();
+        assert_eq!(event.source_ip.to_string(), "10.0.0.5");
+        assert_eq!(event.dest_port, 8080);
+        assert_eq!(event.protocol, "tcp");
+        assert_eq!(event.action, "drop");
     }
 
     #[test]

@@ -114,6 +114,7 @@ Toate setarile sunt in `config.toml`. Nicio valoare nu este hardcodata.
 listen_address = "0.0.0.0"    # Interfata de ascultare
 listen_port = 5555             # Port UDP pentru receptie log-uri
 parser = "gaia"                # Parser activ: "gaia" sau "cef"
+# debug = true                 # Mod debug: afiseaza fiecare pachet cu validare parsare
 
 [detection]
 alert_cooldown_secs = 300      # Cooldown intre alerte pentru acelasi IP
@@ -153,9 +154,9 @@ max_entry_age_secs = 600      # Sterge date mai vechi de N secunde
 Sep 3 15:12:20 192.168.99.1 Checkpoint: 3Sep2007 15:12:08 drop 192.168.11.7 >eth8 rule: 113; rule_uid: {AAAA-...}; service_id: http; src: 192.168.11.34; dst: 4.23.34.126; proto: tcp; product: VPN-1 & FireWall-1; service: 80; s_port: 2854;
 ```
 
-**CEF / ArcSight:**
+**CEF / ArcSight** (cu syslog header):
 ```
-CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|Drop|5|src=192.168.11.7 dst=10.0.0.1 dpt=443 proto=TCP act=drop
+<134>Feb 17 11:32:44 gw-hostname CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|Drop|5|src=192.168.11.7 dst=10.0.0.1 dpt=443 proto=TCP act=drop
 ```
 
 ---
@@ -169,8 +170,30 @@ CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|Drop|5|src=192.168.11.7 dst=10.0.
 # Cu cale explicita catre config
 ./target/release/ids-rs /etc/ids-rs/config.toml
 
-# Cu debug logging activat (vede fiecare eveniment procesat)
+# Cu debug logging intern (tracing)
 RUST_LOG=debug ./target/release/ids-rs
+```
+
+### Mod Debug (diagnostic parsare)
+
+Pentru a vedea exact ce vine pe port si daca parsarea reuseste, seteaza `debug = true` in `config.toml`:
+
+```toml
+[network]
+debug = true
+```
+
+Output-ul arata fiecare pachet primit (RAW), rezultatul parsarii (OK/FAIL) si, in caz de esec, formatul asteptat:
+
+```
+[2026-02-18 12:00:01]  RAW   <134>Feb 17 12:00:01 gw CEF:0|CheckPoint|VPN-1|R81|100|Drop|5|src=1.2.3.4 dst=10.0.0.1 dpt=443 proto=TCP act=Drop
+[2026-02-18 12:00:01]   OK   src=1.2.3.4 dpt=443 proto=tcp action=drop
+[2026-02-18 12:00:01]  DROP  Src=1.2.3.4 DstPort=443 Proto=tcp Action=drop
+
+[2026-02-18 12:00:02]  RAW   17Feb2026 11:32:44 ethx.x Log Drop 11.11.11.11 ...
+[2026-02-18 12:00:02]  FAIL  Parsare esuata! (parser: CEF (ArcSight))
+                              Primit:   "17Feb2026 11:32:44 ethx.x Log Drop 11.11.11.11 ..."
+                              Asteptat: "<PRI>Mon DD HH:MM:SS hostname CEF:0|Vendor|...|src=IP dst=IP dpt=PORT proto=PROTO act=ACTION"
 ```
 
 ### Exemplu output
@@ -221,11 +244,11 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 15 passed`
+Rezultat asteptat: `test result: ok. 17 passed`
 
 Testele acopera:
 - Parser GAIA: drop valid, accept ignorat, broadcast fara src, ICMP fara service, format invalid
-- Parser CEF: drop valid, accept ignorat, non-CEF, campuri incomplete
+- Parser CEF: drop valid, accept ignorat, syslog header, syslog priority header, non-CEF, campuri incomplete
 - Detector: fast scan alert, sub prag, cooldown, cleanup, IP-uri separate
 
 ---
@@ -452,7 +475,7 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
 ### Adaugare parser nou
 
 1. Creeaza `src/parser/noul_format.rs`
-2. Implementeaza `trait LogParser` (`parse` + `name`)
+2. Implementeaza `trait LogParser` (`parse` + `name` + `expected_format`)
 3. Adauga `pub mod noul_format;` in `src/parser/mod.rs`
 4. Adauga o intrare in `match` din `create_parser()`
 5. Seteaza `parser = "noul_format"` in `config.toml`
@@ -462,3 +485,31 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
 1. Adauga sectiunea in `config.rs` si `config.toml`
 2. Implementeaza metoda async in `alerter.rs`
 3. Apeleaz-o din `send_alert()`
+
+---
+
+## TODO — Securitate si hardening
+
+Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
+
+### Critica
+
+- [ ] **Memorie neboundata per IP** (`detector.rs`) — `Vec<PortHit>` creste nelimitat pentru fiecare IP sursa pana la urmatorul cleanup cycle. Un atacator care trimite ~100k pachete/s cu porturi unice poate consuma GB de RAM in 60s. *Mitigare: limita max entries per IP (ex: 10.000, drop oldest).*
+
+- [ ] **IP spoofing -> DashMap flood** (`detector.rs`) — un atacator care spoofs milioane de IP-uri sursa diferite umple `DashMap`-ul fara limita. Cleanup-ul sterge doar entries vechi, nu limiteaza numarul total. *Mitigare: limita globala pe numarul de IP-uri tracked (ex: 100.000, LRU eviction).*
+
+### Medie
+
+- [ ] **Parola SMTP in plaintext** (`config.toml`) — credentialele SMTP sunt stocate in clar in fisierul de configurare. Oricine cu acces read la fisier le poate citi. *Mitigare: citire din environment variable (`SMTP_PASSWORD`) sau secrets manager.*
+
+- [ ] **SMTP fara TLS** (`alerter.rs`) — cand `smtp_tls = false`, se foloseste `builder_dangerous()` care trimite credentiale (username + password) in clar pe retea. *Mitigare: warning la startup cand TLS e dezactivat; forteaza STARTTLS.*
+
+- [ ] **Lipsa validare config** (`config.rs`) — nu exista validare post-deserializare. Valori ca `port_threshold = 0` (alerte la fiecare pachet), `alert_cooldown_secs = 0` (flood de alerte) sau `listen_port = 0` pot cauza comportament imprevizibil. *Mitigare: validare cu limite rezonabile dupa incarcare.*
+
+### Scazuta
+
+- [ ] **SIEM alert injection** (`alerter.rs`) — mesajul SIEM este construit cu `format!()`. Daca in viitor se adauga campuri text din log-ul raw (hostname, etc.), un atacator ar putea injecta mesaje syslog false in SIEM. *Mitigare: sanitizare/escape campuri text inainte de includere in mesajul SIEM.*
+
+- [ ] **Debug mode disk fill** — modul debug afiseaza fiecare pachet in stdout. In productie cu volum mare si stdout redirectat la fisier, poate umple disk-ul. *Mitigare: dezactivare automata dupa N minute sau limita de linii.*
+
+- [ ] **Lipsa rate-limiting pe receptie UDP** (`main.rs`) — main loop-ul proceseaza pachete fara limita. Un flood UDP poate satura CPU-ul. *Mitigare: token bucket / rate limiter pe receptie.*

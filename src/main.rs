@@ -117,7 +117,12 @@ async fn main() -> anyhow::Result<()> {
     // =========================================================================
     // 3. BANNER DE START
     // =========================================================================
+    let debug_mode = config.network.debug;
     display::print_banner(&config);
+
+    if debug_mode {
+        display::log_warning("Mod DEBUG activ - toate pachetele vor fi afisate");
+    }
 
     // =========================================================================
     // 4. INITIALIZARE COMPONENTE
@@ -292,10 +297,19 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }
 
+                            // Debug: afiseaza linia raw primita.
+                            if debug_mode {
+                                display::log_debug_raw(line);
+                            }
+
                             // Parsam linia cu parser-ul activ (dynamic dispatch).
                             if let Some(event) = parser.parse(line) {
+                                // Debug: afiseaza campurile extrase.
+                                if debug_mode {
+                                    display::log_debug_parse_ok(&event);
+                                }
+
                                 // Afisam evenimentul de drop in terminal (albastru subtil).
-                                // Folosim source_ip, dest_port, protocol si action din LogEvent.
                                 display::log_drop_event(
                                     &event.source_ip,
                                     event.dest_port,
@@ -307,8 +321,6 @@ async fn main() -> anyhow::Result<()> {
                                 tracing::debug!(raw = %event.raw_log, "Log original");
 
                                 // Procesam evenimentul in detector.
-                                // NOTA RUST: `&event` = imprumut imutabil.
-                                // Detector-ul doar citeste event-ul, nu il consuma.
                                 let alerts = detector.process_event(&event);
 
                                 // Procesam alertele generate (daca exista).
@@ -319,6 +331,13 @@ async fn main() -> anyhow::Result<()> {
                                     // Trimitem alerta catre SIEM si email (async).
                                     alerter.send_alert(&alert).await;
                                 }
+                            } else if debug_mode {
+                                // Debug: afiseaza detalii despre esecul parsarii.
+                                display::log_debug_parse_fail(
+                                    line,
+                                    parser.name(),
+                                    parser.expected_format(),
+                                );
                             }
                         }
                     }

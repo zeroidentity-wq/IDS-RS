@@ -12,6 +12,8 @@ listen_address = "0.0.0.0"
 listen_port = 5555
 # Tipul de parser activ: "gaia" (Checkpoint Gaia Raw) sau "cef" (ArcSight CEF).
 parser = "gaia"
+# Mod debug: afiseaza fiecare pachet primit cu validare parsare.
+# debug = true
 
 # -----------------------------------------------------------------------------
 # Praguri de detectie pentru scanari de retea

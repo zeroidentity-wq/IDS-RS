@@ -29,6 +29,7 @@ import sys
 import time
 import random
 from collections import Counter
+from typing import Optional
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -53,11 +54,12 @@ def generate_gaia_log(source_ip: str, dst_port: int, action: str = "drop") -> st
 
 
 def generate_cef_log(source_ip: str, dst_port: int, action: str = "drop") -> str:
-    """Genereaza un log CEF (Common Event Format) realist."""
+    """Genereaza un log CEF (Common Event Format) realist cu syslog header."""
     severity = 5 if action == "drop" else 3
     name = "Drop" if action == "drop" else "Accept"
+    ts = time.strftime("%b %d %H:%M:%S")
     return (
-        f"CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|{name}|{severity}|"
+        f"<134>{ts} gw-checkpoint CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|{name}|{severity}|"
         f"src={source_ip} dst=192.168.1.1 dpt={dst_port} proto=TCP act={action}"
     )
 
@@ -79,7 +81,7 @@ _GAIA_HEADER_RE = re.compile(
 )
 
 
-def parse_gaia_line(line: str) -> dict | None:
+def parse_gaia_line(line: str) -> Optional[dict]:
     """
     Parseaza o linie de log GAIA si extrage campurile relevante.
 
@@ -113,7 +115,7 @@ def parse_gaia_line(line: str) -> dict | None:
     return result
 
 
-def gaia_to_cef(parsed: dict) -> str | None:
+def gaia_to_cef(parsed: dict) -> Optional[str]:
     """
     Converteste campurile parsate din GAIA in format CEF.
 
@@ -132,8 +134,9 @@ def gaia_to_cef(parsed: dict) -> str | None:
     severity = 5 if action == "drop" else 3
     name = action.capitalize()
 
+    ts = time.strftime("%b %d %H:%M:%S")
     parts = [
-        f"CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|{rule}|{name}|{severity}|",
+        f"<134>{ts} gw-checkpoint CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|{rule}|{name}|{severity}|",
         f"src={src} dst={dst}",
     ]
     if service:
