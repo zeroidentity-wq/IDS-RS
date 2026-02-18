@@ -11,6 +11,7 @@ Detecteaza scanari de retea (Fast Scan si Slow Scan) si trimite alerte catre SIE
 - [Cerinte sistem](#cerinte-sistem)
 - [Compilare](#compilare)
 - [Configurare](#configurare)
+- [Formate de log — Anatomie si flux](#formate-de-log--anatomie-si-flux)
 - [Rulare](#rulare)
 - [Testare](#testare)
 - [Structura proiect](#structura-proiect)
@@ -158,6 +159,165 @@ Sep 3 15:12:20 192.168.99.1 Checkpoint: 3Sep2007 15:12:08 drop 192.168.11.7 >eth
 ```
 <134>Feb 17 11:32:44 gw-hostname CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|Drop|5|src=192.168.11.7 dst=10.0.0.1 dpt=443 proto=TCP act=drop
 ```
+
+---
+
+## Formate de log — Anatomie si flux
+
+Aceasta sectiune explica structura exacta a fiecarui format suportat si cum ajung
+datele de la firewall pana la IDS-RS.
+
+---
+
+### Formatul Checkpoint GAIA (Raw)
+
+Checkpoint GAIA este un firewall enterprise. Cand blocheaza sau permite o conexiune,
+genereaza un eveniment pe care il trimite prin **syslog** (UDP, port 514 implicit)
+catre un server de logging. Un rand arata astfel:
+
+```
+Sep  3 15:12:20 192.168.99.1 Checkpoint: 3Sep2007 15:12:08 drop 192.168.11.7 >eth8 rule: 113; src: 192.168.11.34; dst: 4.23.34.126; proto: tcp; service: 80; s_port: 2854;
+```
+
+Anatomia unui rand GAIA:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         UN RAND DE LOG GAIA                             │
+├───────────────────┬──────────────┬──────────────────────────────────────┤
+│   HEADER SYSLOG   │              │         CORPUL CHECKPOINT            │
+│  (adaugat de      │              │   (generat de firewall)              │
+│   syslog daemon)  │              │                                      │
+├───────────────────┤              ├──────────┬──────────┬────┬───────────┤
+│ Sep  3 15:12:20   │ 192.168.99.1 │ 3Sep2007 │ 15:12:08 │drop│ src: ... │
+│ (cand a PRIMIT    │ (cine a      │ (cand a  │          │    │ dst: ... │
+│  serverul log-ul) │  trimis)     │  GENERAT │          │    │ service: │
+│                   │              │  fw-ul)  │          │    │ 80       │
+└───────────────────┴──────────────┴──────────┴──────────┴────┴───────────┘
+```
+
+**Diferenta dintre cele doua timestamp-uri** este intentionata si normala:
+- Header syslog (`15:12:20`) — momentul in care serverul de logging a **primit** mesajul
+- Timestamp Checkpoint (`15:12:08`) — momentul in care firewall-ul a **generat** evenimentul
+
+Diferenta de ~12 secunde reprezinta latenta de retea si buffering-ul syslog. In log-uri
+reale (ex: `sample2_gaia.log`) vei vedea ca secundele difera tocmai din acest motiv.
+
+**Formatul datei `3Sep2007`** este formatul intern compact al Checkpoint:
+`<zi><LunăAbreviere><an>` concatenat fara separatori. Nu este o greseala.
+
+Campurile cheie-valoare din coada liniei sunt separate prin `;` si parsate de `gaia.rs`:
+
+| Camp | Exemplu | Semnificatie |
+|------|---------|--------------|
+| `src` | `192.168.11.34` | IP-ul care a initiat conexiunea (atacatorul) |
+| `dst` | `4.23.34.126` | IP-ul destinatie |
+| `proto` | `tcp` | Protocolul |
+| `service` | `80` | Portul destinatie (cel scanat) |
+| `s_port` | `2854` | Portul sursa (ales aleator de OS) |
+
+---
+
+### Formatul CEF (Common Event Format)
+
+CEF a fost creat de ArcSight pentru a **standardiza** log-urile de la zeci de
+producatori diferiti (Checkpoint, Cisco, Palo Alto, etc.) intr-un format unic,
+usor de parsat de SIEM-uri.
+
+Structura este fixa, cu `|` ca separator intre campuri:
+
+```
+<prefix_syslog> CEF:Versiune|Vendor|Produs|VersiuneProdus|SignatureID|Nume|Severitate|Extensii
+```
+
+Un exemplu concret:
+
+```
+<134>Feb 17 11:32:44 gw-checkpoint CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|Drop|5|src=192.168.11.34 dst=4.23.34.126 dpt=80 proto=TCP act=drop
+```
+
+Anatomia unui rand CEF:
+
+```
+<134>            → prioritate syslog (facility=16, severity=6)
+Feb 17 11:32:44  → timestamp syslog
+gw-checkpoint    → hostname-ul dispozitivului
+CEF:0            → versiunea formatului (0 = prima versiune)
+CheckPoint       → vendor (producatorul)
+VPN-1 & FW-1    → produsul
+R81.20           → versiunea produsului
+100              → ID-ul regulii / evenimentului
+Drop             → numele evenimentului
+5                → severitatea (0=scazuta ... 10=critica)
+                 → extensii (key=value, separate prin spatiu):
+  src=192.168.11.34  → IP sursa
+  dst=4.23.34.126    → IP destinatie
+  dpt=80             → destination port (portul scanat)
+  proto=TCP          → protocolul
+  act=drop           → actiunea firewall-ului
+```
+
+Parsatorul nostru (`cef.rs`) cauta `CEF:` oriunde in linie (prefix-ul syslog poate
+lipsi sau varia), apoi desparte cu `|` si itereaza extensiile ca perechi `cheie=valoare`.
+
+---
+
+### Cum ajung datele pe portul 5555 — Fluxul real cu ArcSight Forwarder
+
+In productie, exista doua scenarii posibile:
+
+#### Scenariul A — Firewall direct catre IDS-RS (format GAIA)
+
+```
+Checkpoint          syslog GAIA          IDS-RS
+Firewall     ──────────────────────▶    UDP :5555
+             UDP :514 (sau alt port)    parser = "gaia"
+```
+
+Firewall-ul este configurat sa trimita log-urile direct pe portul 5555 al IDS-RS.
+IDS-RS le primeste in format GAIA si le parseaza cu `GaiaParser`.
+
+#### Scenariul B — Prin ArcSight SmartConnector / Forwarder (format CEF)
+
+```
+Checkpoint     syslog GAIA    ArcSight         CEF           IDS-RS
+Firewall  ───────────────▶  SmartConnector ───────────────▶  UDP :5555
+          UDP :514           (normalizeaza)   UDP :5555       parser = "cef"
+```
+
+**ArcSight SmartConnector** (numit si Forwarder) este un agent software care:
+1. **Primeste** log-urile raw GAIA de la firewall pe UDP 514
+2. **Normalizeaza** — le converteste in format CEF standard
+3. **Retrimite** in CEF catre destinatia configurata (IDS-RS) pe UDP 5555
+
+Acesta este scenariul tipic in organizatii cu SIEM ArcSight deja instalat.
+IDS-RS-ul nostru vede doar CEF, nu stie ca log-urile au venit initial in GAIA.
+
+**Ce ajunge efectiv in buffer-ul UDP pe portul 5555:**
+
+Fiecare pachet UDP contine unul sau mai multe randuri de log, separate prin `\n`
+(parametrul `--batch` din tester controleaza cate randuri intra intr-un pachet):
+
+```
+Pachet UDP #1  →  <134>Feb 17 11:32:44 gw CEF:0|...|src=10.0.0.1 dpt=80 act=drop\n
+
+Pachet UDP #2  →  <134>Feb 17 11:32:45 gw CEF:0|...|src=10.0.0.1 dpt=443 act=drop\n
+                  <134>Feb 17 11:32:45 gw CEF:0|...|src=10.0.0.2 dpt=22 act=accept\n
+```
+
+IDS-RS primeste pachetul, il imparte pe `\n`, si parseaza fiecare linie independent.
+
+#### Cum alegi scenariul in config.toml
+
+```toml
+[network]
+parser = "gaia"   # Scenariul A: firewall trimite GAIA direct la IDS-RS
+parser = "cef"    # Scenariul B: ArcSight Forwarder trimite CEF la IDS-RS
+```
+
+In productie reala vei folosi cel mai probabil `parser = "cef"` daca ai deja
+un ArcSight SmartConnector instalat, deoarece acesta normalizeaza totul la CEF.
+Modul `"gaia"` este util cand conectezi firewall-ul **direct** la IDS-RS, fara intermediar.
 
 ---
 
