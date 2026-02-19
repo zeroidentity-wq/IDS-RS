@@ -450,6 +450,11 @@ pe retea** ca pachet UDP catre `127.0.0.1:514`:
 <38>Feb 18 12:06:16 ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0|1001|Fast Port Scan Detected|7|rt=1739876776000 src=192.168.11.7 cnt=20 act=alert msg=Fast Scan detectat: 20 porturi unice in 10 secunde cs1Label=ScannedPorts cs1=21,22,23,25,53,80,110,443,445,3389,8080,8443,3306,1433,5432,27017,6379,11211,9200,5601
 ```
 
+> **Nota:** Valorile din mesaj (`10 secunde`, `5 minute`) sunt citite din `config.toml`
+> (`detection.fast_scan.time_window_secs` / `detection.slow_scan.time_window_mins`),
+> nu sunt hardcodate. Daca modifici pragurile in configurare, mesajele SIEM reflecta
+> automat noile valori.
+
 ---
 
 ### Etapa 5 — ArcSight primeste si parseaza
@@ -851,6 +856,20 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
 1. Adauga sectiunea in `config.rs` si `config.toml`
 2. Implementeaza metoda async in `alerter.rs`
 3. Apeleaz-o din `send_alert()`
+
+---
+
+## Changelog
+
+### [Nerealizat] — Imbunatatiri in curs de implementare
+
+- [x] **Mesaje SIEM hardcodate** (`alerter.rs`) — valorile ferestrei de timp (`10 secunde`,
+  `5 minute`) din mesajul CEF trimis catre SIEM erau hardcodate. Acum `Alerter` primeste
+  `DetectionConfig` si citeste `time_window_secs` / `time_window_mins` direct din configurare.
+
+- [x] **Cleanup task: primul tick imediat** (`main.rs`) — `tokio::time::interval()` face
+  primul tick imediat la creare, rulând un cleanup inutil la startup. Inlocuit cu un loop
+  simplu `sleep`-first: asteapta intai intervalul complet, apoi curata.
 
 ---
 

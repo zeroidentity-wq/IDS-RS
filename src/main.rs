@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
     // pot rula pe thread-uri diferite -> TREBUIE Arc, nu Rc.
     //
     let detector = Arc::new(Detector::new(config.detection.clone()));
-    let alerter = Arc::new(Alerter::new(config.alerting.clone()));
+    let alerter = Arc::new(Alerter::new(config.alerting.clone(), config.detection.clone()));
 
     display::log_info("Detector initializat (DashMap thread-safe)");
 
@@ -184,12 +184,13 @@ async fn main() -> anyhow::Result<()> {
     let max_age = config.cleanup.max_entry_age_secs;
 
     tokio::spawn(async move {
-        // `interval` tick-uie la fiecare N secunde.
-        // Primul tick este IMEDIAT (la creare), apoi periodic.
-        let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval));
-
+        // NOTA RUST: `tokio::time::interval()` face primul tick IMEDIAT la creare,
+        // ceea ce ar rula un cleanup inutil la startup (cand memoria e goala).
+        // Folosim `sleep` intr-un loop simplu: asteapta intai, curata dupa.
+        // Pattern: sleep-first loop garanteaza ca primul cleanup are loc abia
+        // dupa `cleanup_interval` secunde de la pornire.
         loop {
-            interval.tick().await;
+            tokio::time::sleep(Duration::from_secs(cleanup_interval)).await;
 
             let tracked_before = cleanup_detector.tracked_ips();
             cleanup_detector.cleanup(Duration::from_secs(max_age));

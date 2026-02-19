@@ -34,7 +34,7 @@
 //
 // =============================================================================
 
-use crate::config::AlertingConfig;
+use crate::config::{AlertingConfig, DetectionConfig};
 use crate::detector::{Alert, ScanType};
 use crate::display;
 use anyhow::{Context, Result};
@@ -52,11 +52,12 @@ use tokio::net::UdpSocket;
 /// a mai avea nevoie de referinta la config-ul original.
 pub struct Alerter {
     config: AlertingConfig,
+    detection: DetectionConfig,
 }
 
 impl Alerter {
-    pub fn new(config: AlertingConfig) -> Self {
-        Self { config }
+    pub fn new(config: AlertingConfig, detection: DetectionConfig) -> Self {
+        Self { config, detection }
     }
 
     /// Trimite alerta catre toate destinatiile configurate.
@@ -111,16 +112,18 @@ impl Alerter {
                 "1001",
                 "Fast Port Scan Detected",
                 format!(
-                    "Fast Scan detectat: {} porturi unice in 10 secunde",
-                    alert.unique_ports.len()
+                    "Fast Scan detectat: {} porturi unice in {} secunde",
+                    alert.unique_ports.len(),
+                    self.detection.fast_scan.time_window_secs,
                 ),
             ),
             ScanType::Slow => (
                 "1002",
                 "Slow Port Scan Detected",
                 format!(
-                    "Slow Scan detectat: {} porturi unice in fereastra de 5 minute",
-                    alert.unique_ports.len()
+                    "Slow Scan detectat: {} porturi unice in {} minute",
+                    alert.unique_ports.len(),
+                    self.detection.slow_scan.time_window_mins,
                 ),
             ),
         };
