@@ -117,7 +117,12 @@ async fn main() -> anyhow::Result<()> {
     // =========================================================================
     // 3. BANNER DE START
     // =========================================================================
+    let debug_mode = config.network.debug;
     display::print_banner(&config);
+
+    if debug_mode {
+        display::log_warning("Mod DEBUG activ - toate pachetele vor fi afisate");
+    }
 
     // =========================================================================
     // 4. INITIALIZARE COMPONENTE
@@ -152,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
     // pot rula pe thread-uri diferite -> TREBUIE Arc, nu Rc.
     //
     let detector = Arc::new(Detector::new(config.detection.clone()));
-    let alerter = Arc::new(Alerter::new(config.alerting.clone()));
+    let alerter = Arc::new(Alerter::new(config.alerting.clone(), config.detection.clone()));
 
     display::log_info("Detector initializat (DashMap thread-safe)");
 
@@ -179,12 +184,13 @@ async fn main() -> anyhow::Result<()> {
     let max_age = config.cleanup.max_entry_age_secs;
 
     tokio::spawn(async move {
-        // `interval` tick-uie la fiecare N secunde.
-        // Primul tick este IMEDIAT (la creare), apoi periodic.
-        let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval));
-
+        // NOTA RUST: `tokio::time::interval()` face primul tick IMEDIAT la creare,
+        // ceea ce ar rula un cleanup inutil la startup (cand memoria e goala).
+        // Folosim `sleep` intr-un loop simplu: asteapta intai, curata dupa.
+        // Pattern: sleep-first loop garanteaza ca primul cleanup are loc abia
+        // dupa `cleanup_interval` secunde de la pornire.
         loop {
-            interval.tick().await;
+            tokio::time::sleep(Duration::from_secs(cleanup_interval)).await;
 
             let tracked_before = cleanup_detector.tracked_ips();
             cleanup_detector.cleanup(Duration::from_secs(max_age));
@@ -292,10 +298,19 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }
 
+                            // Debug: afiseaza linia raw primita.
+                            if debug_mode {
+                                display::log_debug_raw(line);
+                            }
+
                             // Parsam linia cu parser-ul activ (dynamic dispatch).
                             if let Some(event) = parser.parse(line) {
+                                // Debug: afiseaza campurile extrase.
+                                if debug_mode {
+                                    display::log_debug_parse_ok(&event);
+                                }
+
                                 // Afisam evenimentul de drop in terminal (albastru subtil).
-                                // Folosim source_ip, dest_port, protocol si action din LogEvent.
                                 display::log_drop_event(
                                     &event.source_ip,
                                     event.dest_port,
@@ -307,8 +322,6 @@ async fn main() -> anyhow::Result<()> {
                                 tracing::debug!(raw = %event.raw_log, "Log original");
 
                                 // Procesam evenimentul in detector.
-                                // NOTA RUST: `&event` = imprumut imutabil.
-                                // Detector-ul doar citeste event-ul, nu il consuma.
                                 let alerts = detector.process_event(&event);
 
                                 // Procesam alertele generate (daca exista).
@@ -319,6 +332,13 @@ async fn main() -> anyhow::Result<()> {
                                     // Trimitem alerta catre SIEM si email (async).
                                     alerter.send_alert(&alert).await;
                                 }
+                            } else if debug_mode {
+                                // Debug: afiseaza detalii despre esecul parsarii.
+                                display::log_debug_parse_fail(
+                                    line,
+                                    parser.name(),
+                                    parser.expected_format(),
+                                );
                             }
                         }
                     }

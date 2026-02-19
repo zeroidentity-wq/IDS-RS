@@ -23,6 +23,15 @@
 //    String-uri care poate creste/scadea. Este owned - cand structura este
 //    dropata, toate String-urile din Vec sunt la randul lor dealocate.
 //
+// 4. VALIDARE POST-DESERIALIZARE
+//    serde/toml verifica doar tipurile (u64, String, bool) si campurile
+//    obligatorii. Nu stie nimic despre semantica valorilor. De aceea avem
+//    AppConfig::validate() care verifica constrangerile logice dupa parsare:
+//    valori zero invalide, consistenta intre ferestre de timp, campuri
+//    obligatorii conditionale (email enabled -> smtp_server nenul etc.).
+//    Toate erorile sunt colectate intr-un Vec<String> si raportate simultan,
+//    pentru a nu forta utilizatorul sa reporneasca aplicatia de N ori.
+//
 // =============================================================================
 
 use anyhow::{Context, Result};
@@ -51,6 +60,8 @@ pub struct NetworkConfig {
     pub listen_address: String,
     pub listen_port: u16,
     pub parser: String,
+    #[serde(default)]
+    pub debug: bool,
 }
 
 /// Configurare detectie - contine sub-structuri pentru fiecare tip de scan.
@@ -153,6 +164,169 @@ impl AppConfig {
         let config: AppConfig = toml::from_str(&content)
             .context("Eroare la parsarea fisierului TOML")?;
 
+        // Validare semantica post-deserializare.
+        // serde verifica doar tipurile; validate() verifica logica si valorile.
+        config.validate()?;
+
         Ok(config)
+    }
+
+    /// Valideaza constrangerile semantice ale configuratiei.
+    ///
+    /// NOTA RUST: Colectam TOATE erorile intr-un Vec<String> inainte de a esua,
+    /// astfel utilizatorul vede dintr-o singura rulare tot ce trebuie corectat,
+    /// fara sa reporneasca aplicatia de N ori pentru fiecare eroare in parte.
+    ///
+    /// `anyhow::bail!` este echivalent cu `return Err(anyhow::anyhow!(...))`.
+    /// Macro-ul bail! accepta acelasi format ca println!, cu {} interpolation.
+    fn validate(&self) -> Result<()> {
+        let mut errors: Vec<String> = Vec::new();
+
+        // --- Network ---
+
+        if self.network.listen_port == 0 {
+            errors.push(
+                "network.listen_port = 0: portul 0 lasa OS-ul sa aleaga aleatoriu la fiecare pornire"
+                    .to_string(),
+            );
+        }
+        if self.network.listen_address.is_empty() {
+            errors.push("network.listen_address nu poate fi gol".to_string());
+        }
+        if !matches!(self.network.parser.as_str(), "gaia" | "cef") {
+            errors.push(format!(
+                "network.parser = {:?} este invalid. Valori acceptate: \"gaia\", \"cef\"",
+                self.network.parser
+            ));
+        }
+
+        // --- Detection ---
+
+        if self.detection.alert_cooldown_secs == 0 {
+            errors.push(
+                "detection.alert_cooldown_secs = 0: fara cooldown, acelasi IP va genera alerte la fiecare eveniment"
+                    .to_string(),
+            );
+        }
+        if self.detection.fast_scan.port_threshold == 0 {
+            errors.push(
+                "detection.fast_scan.port_threshold = 0: orice pachet va declansa alerta Fast Scan"
+                    .to_string(),
+            );
+        }
+        if self.detection.fast_scan.time_window_secs == 0 {
+            errors.push(
+                "detection.fast_scan.time_window_secs = 0: fereastra de timp zero face detectia imposibila"
+                    .to_string(),
+            );
+        }
+        if self.detection.slow_scan.port_threshold == 0 {
+            errors.push(
+                "detection.slow_scan.port_threshold = 0: orice pachet va declansa alerta Slow Scan"
+                    .to_string(),
+            );
+        }
+        if self.detection.slow_scan.time_window_mins == 0 {
+            errors.push(
+                "detection.slow_scan.time_window_mins = 0: fereastra de timp zero face detectia imposibila"
+                    .to_string(),
+            );
+        }
+
+        // Consistenta logica: fereastra Slow Scan trebuie sa fie mai mare decat Fast Scan.
+        // Altfel cele doua detectii se suprapun si Slow Scan nu are sens.
+        let fast_secs = self.detection.fast_scan.time_window_secs;
+        let slow_secs = self.detection.slow_scan.time_window_mins * 60;
+        if fast_secs > 0 && slow_secs > 0 && slow_secs <= fast_secs {
+            errors.push(format!(
+                "detection.slow_scan.time_window_mins ({} min = {}s) trebuie sa fie \
+                 mai mare decat detection.fast_scan.time_window_secs ({}s)",
+                self.detection.slow_scan.time_window_mins, slow_secs, fast_secs
+            ));
+        }
+
+        // --- Cleanup ---
+
+        if self.cleanup.interval_secs == 0 {
+            errors.push(
+                "cleanup.interval_secs = 0: cleanup continuu va bloca procesarea evenimentelor"
+                    .to_string(),
+            );
+        }
+        if self.cleanup.max_entry_age_secs == 0 {
+            errors.push(
+                "cleanup.max_entry_age_secs = 0: toate datele sunt sterse la fiecare cleanup, \
+                 detectia devine imposibila"
+                    .to_string(),
+            );
+        }
+
+        // max_entry_age trebuie sa acopere cel putin fereastra Slow Scan,
+        // altfel datele necesare detectiei sunt sterse inainte de a fi evaluate.
+        if self.cleanup.max_entry_age_secs > 0
+            && slow_secs > 0
+            && self.cleanup.max_entry_age_secs < slow_secs
+        {
+            errors.push(format!(
+                "cleanup.max_entry_age_secs ({}) este mai mic decat fereastra Slow Scan \
+                 ({} min = {}s): datele necesare detectiei Slow Scan vor fi sterse prematur",
+                self.cleanup.max_entry_age_secs,
+                self.detection.slow_scan.time_window_mins,
+                slow_secs
+            ));
+        }
+
+        // --- Alerting: SIEM ---
+
+        if self.alerting.siem.enabled {
+            if self.alerting.siem.port == 0 {
+                errors.push("alerting.siem.port = 0 este invalid".to_string());
+            }
+            if self.alerting.siem.host.is_empty() {
+                errors.push("alerting.siem.host nu poate fi gol cand SIEM este activat".to_string());
+            }
+        }
+
+        // --- Alerting: Email ---
+
+        if self.alerting.email.enabled {
+            if self.alerting.email.smtp_port == 0 {
+                errors.push("alerting.email.smtp_port = 0 este invalid".to_string());
+            }
+            if self.alerting.email.smtp_server.is_empty() {
+                errors.push(
+                    "alerting.email.smtp_server nu poate fi gol cand email este activat"
+                        .to_string(),
+                );
+            }
+            if self.alerting.email.from.is_empty() {
+                errors.push(
+                    "alerting.email.from nu poate fi gol cand email este activat".to_string(),
+                );
+            }
+            if self.alerting.email.to.is_empty() {
+                errors.push(
+                    "alerting.email.to nu poate fi goala: adauga cel putin un destinatar"
+                        .to_string(),
+                );
+            }
+        }
+
+        // Raportam toate erorile dintr-o singura data.
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let listing = errors
+                .iter()
+                .enumerate()
+                .map(|(i, e)| format!("  {}. {}", i + 1, e))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::bail!(
+                "config.toml contine {} erori de configurare:\n{}",
+                errors.len(),
+                listing
+            );
+        }
     }
 }

@@ -147,6 +147,11 @@ impl LogParser for GaiaParser {
         let src_str = Self::extract_field(extensions, "src")?;
         let source_ip: IpAddr = src_str.parse().ok()?;
 
+        // Extragem dest_ip din "dst: <IP>" (tinta atacului).
+        // Option<> - unele log-uri pot lipsi campul dst.
+        let dest_ip: Option<IpAddr> = Self::extract_field(extensions, "dst")
+            .and_then(|s| s.parse().ok());
+
         // Extragem protocolul din "proto: <proto>".
         let protocol = Self::extract_field(extensions, "proto")
             .unwrap_or("tcp")
@@ -162,6 +167,7 @@ impl LogParser for GaiaParser {
         // trebuie sa fie independent de buffer-ul original.
         Some(LogEvent {
             source_ip,
+            dest_ip,
             dest_port,
             protocol,
             action,
@@ -171,6 +177,10 @@ impl LogParser for GaiaParser {
 
     fn name(&self) -> &str {
         "Checkpoint Gaia (Raw)"
+    }
+
+    fn expected_format(&self) -> &str {
+        "Mon  D HH:MM:SS host Checkpoint: DDMmmYYYY HH:MM:SS action src >iface rule: N; src: IP; dst: IP; proto: PROTO; service: PORT;"
     }
 }
 

@@ -22,6 +22,7 @@ Generare dinamica (avansat):
 """
 
 import argparse
+import ipaddress
 import os
 import re
 import socket
@@ -29,6 +30,7 @@ import sys
 import time
 import random
 from collections import Counter
+from typing import Optional
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -53,11 +55,12 @@ def generate_gaia_log(source_ip: str, dst_port: int, action: str = "drop") -> st
 
 
 def generate_cef_log(source_ip: str, dst_port: int, action: str = "drop") -> str:
-    """Genereaza un log CEF (Common Event Format) realist."""
+    """Genereaza un log CEF (Common Event Format) realist cu syslog header."""
     severity = 5 if action == "drop" else 3
     name = "Drop" if action == "drop" else "Accept"
+    ts = time.strftime("%b %d %H:%M:%S")
     return (
-        f"CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|{name}|{severity}|"
+        f"<134>{ts} gw-checkpoint CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|{name}|{severity}|"
         f"src={source_ip} dst=192.168.1.1 dpt={dst_port} proto=TCP act={action}"
     )
 
@@ -79,7 +82,7 @@ _GAIA_HEADER_RE = re.compile(
 )
 
 
-def parse_gaia_line(line: str) -> dict | None:
+def parse_gaia_line(line: str) -> Optional[dict]:
     """
     Parseaza o linie de log GAIA si extrage campurile relevante.
 
@@ -113,7 +116,7 @@ def parse_gaia_line(line: str) -> dict | None:
     return result
 
 
-def gaia_to_cef(parsed: dict) -> str | None:
+def gaia_to_cef(parsed: dict) -> Optional[str]:
     """
     Converteste campurile parsate din GAIA in format CEF.
 
@@ -132,8 +135,9 @@ def gaia_to_cef(parsed: dict) -> str | None:
     severity = 5 if action == "drop" else 3
     name = action.capitalize()
 
+    ts = time.strftime("%b %d %H:%M:%S")
     parts = [
-        f"CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|{rule}|{name}|{severity}|",
+        f"<134>{ts} gw-checkpoint CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|{rule}|{name}|{severity}|",
         f"src={src} dst={dst}",
     ]
     if service:
@@ -577,6 +581,384 @@ def run_preset(
 
 
 # =============================================================================
+# Meniu Interactiv
+# =============================================================================
+
+def _prompt(question: str, default: str = None) -> str:
+    """Intreaba utilizatorul o intrebare cu optional default. Repeta la input gol obligatoriu."""
+    if default is not None:
+        prompt_str = f"  {question} [{default}]: "
+    else:
+        prompt_str = f"  {question}: "
+    while True:
+        answer = input(prompt_str).strip()
+        if answer == "" and default is not None:
+            return default
+        if answer == "" and default is None:
+            print("  [!] Camp obligatoriu. Incearca din nou.")
+            continue
+        return answer
+
+
+def _prompt_int(question: str, default: int) -> int:
+    """Intreaba utilizatorul un numar intreg cu retry la input invalid."""
+    while True:
+        raw = _prompt(question, str(default))
+        try:
+            return int(raw)
+        except ValueError:
+            print("  [!] Valoare invalida. Introdu un numar intreg.")
+
+
+def _prompt_float(question: str, default: float) -> float:
+    """Intreaba utilizatorul un numar real cu retry la input invalid."""
+    while True:
+        raw = _prompt(question, str(default))
+        try:
+            return float(raw)
+        except ValueError:
+            print("  [!] Valoare invalida. Introdu un numar real (ex: 0.1).")
+
+
+def _prompt_choice(valid: list, default: str = None) -> str:
+    """Intreaba utilizatorul sa aleaga dintr-o lista de optiuni valide."""
+    while True:
+        if default is not None:
+            raw = input(f"  Alegere [{default}]: ").strip()
+            if raw == "":
+                return default
+        else:
+            raw = input("  Alegere: ").strip()
+        if raw in valid:
+            return raw
+        print(f"  [!] Alegere invalida. Optiuni: {', '.join(valid)}")
+
+
+def _prompt_host_port(default: str = "127.0.0.1:5555") -> tuple:
+    """Intreaba host:port si returneaza (host, port). Repeta la format invalid."""
+    while True:
+        raw = _prompt("Destinatie (host:port)", default)
+        if ":" not in raw:
+            print("  [!] Format invalid. Foloseste host:port (ex: 127.0.0.1:5555)")
+            continue
+        host_part, _, port_part = raw.rpartition(":")
+        try:
+            port = int(port_part)
+            if not (1 <= port <= 65535):
+                raise ValueError
+            return host_part, port
+        except ValueError:
+            print("  [!] Port invalid. Trebuie sa fie intre 1 si 65535.")
+
+
+def _random_ip_from_cidr(cidr: str) -> str:
+    """Genereaza un IP random dintr-un subnet CIDR folosind aritmetica directa."""
+    network = ipaddress.IPv4Network(cidr, strict=False)
+    first = int(network.network_address) + 1
+    last = int(network.broadcast_address) - 1
+    if first > last:
+        raise ValueError(f"Subnet-ul {cidr} este prea mic (mai putin de 2 adrese utilizabile).")
+    return str(ipaddress.IPv4Address(random.randint(first, last)))
+
+
+def _get_ip_from_choice(choice: str) -> str:
+    """
+    Rezolva selectia IP pentru optiunile 1-5.
+    Returneaza un singur IP ca string.
+    """
+    CLASS_A = "10.0.0.0/8"
+    CLASS_B = "172.16.0.0/12"
+    CLASS_C = "192.168.0.0/16"
+
+    if choice == "1":
+        ip = _random_ip_from_cidr(CLASS_A)
+        print(f"  [*] IP generat (Clasa A): {ip}")
+        return ip
+    elif choice == "2":
+        ip = _random_ip_from_cidr(CLASS_B)
+        print(f"  [*] IP generat (Clasa B): {ip}")
+        return ip
+    elif choice == "3":
+        ip = _random_ip_from_cidr(CLASS_C)
+        print(f"  [*] IP generat (Clasa C): {ip}")
+        return ip
+    elif choice == "4":
+        while True:
+            cidr = _prompt("Prefix CIDR", "192.168.0.0/24")
+            try:
+                network = ipaddress.IPv4Network(cidr, strict=False)
+                first = int(network.network_address) + 1
+                last = int(network.broadcast_address) - 1
+                if first > last:
+                    print("  [!] Subnet prea mic (minim /30). Incearca din nou.")
+                    continue
+                ip = _random_ip_from_cidr(cidr)
+                print(f"  [*] IP generat din {cidr}: {ip}")
+                return ip
+            except ValueError:
+                print("  [!] CIDR invalid. Exemplu valid: 10.20.0.0/16")
+    else:  # choice == "5"
+        while True:
+            ip_str = _prompt("IP sursa")
+            try:
+                ipaddress.IPv4Address(ip_str)
+                return ip_str
+            except ValueError:
+                print("  [!] IP invalid. Exemplu: 192.168.1.100")
+
+
+def _prompt_single_ip_menu(label: str = "") -> str:
+    """
+    Afiseaza sub-meniu IP cu optiunile 1-5 (fara Multi-IP).
+    Folosit pentru fiecare atacator in cadrul optiunii Multi-IP.
+    """
+    if label:
+        print(f"\n  {label}")
+    print()
+    print("  ── Sursa IP ──────────────────────────────")
+    print("    1) Clasa A      (10.x.x.x)")
+    print("    2) Clasa B      (172.16-31.x.x)")
+    print("    3) Clasa C      (192.168.x.x)")
+    print("    4) CIDR custom  (ex: 10.20.0.0/16)")
+    print("    5) IP fix       (introduceti manual)")
+    print("  ──────────────────────────────────────────")
+    choice = _prompt_choice(["1", "2", "3", "4", "5"])
+    return _get_ip_from_choice(choice)
+
+
+def _prompt_ip_source() -> list:
+    """
+    Afiseaza sub-meniu complet pentru selectarea sursei IP (optiunile 1-6).
+    Returneaza o lista de IP-uri (un element sau mai multe pentru Multi-IP).
+    """
+    print()
+    print("  ── Sursa IP ──────────────────────────────")
+    print("    1) Clasa A      (10.x.x.x)")
+    print("    2) Clasa B      (172.16-31.x.x)")
+    print("    3) Clasa C      (192.168.x.x)")
+    print("    4) CIDR custom  (ex: 10.20.0.0/16)")
+    print("    5) IP fix       (introduceti manual)")
+    print("    6) Multi-IP     (N atacatori diferiti)")
+    print("  ──────────────────────────────────────────")
+    choice = _prompt_choice(["1", "2", "3", "4", "5", "6"])
+
+    if choice == "6":
+        n = _prompt_int("Numar de atacatori", 3)
+        return [
+            _prompt_single_ip_menu(f"[Atacator {i + 1}/{n}]")
+            for i in range(n)
+        ]
+    return [_get_ip_from_choice(choice)]
+
+
+def _ask_format() -> str:
+    """Intreaba utilizatorul formatul de log dorit. Returneaza 'gaia' sau 'cef'."""
+    print()
+    print("  Format:")
+    print("    1) GAIA")
+    print("    2) CEF")
+    c = _prompt_choice(["1", "2"], "1")
+    return "gaia" if c == "1" else "cef"
+
+
+def _print_summary(items: list) -> None:
+    """Afiseaza un sumar formatat al configuratiei inainte de rulare."""
+    print()
+    print("  ── Configuratie ──────────────────────────")
+    for label, value in items:
+        print(f"    {label:<12}: {value}")
+    print("  ──────────────────────────────────────────")
+
+
+def run_interactive_menu() -> None:
+    """
+    Meniu interactiv principal.
+    Activat automat cand scriptul este rulat fara argumente CLI.
+    """
+    print()
+    print("=" * 60)
+    print("  IDS-RS Tester — Meniu Principal")
+    print("=" * 60)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        while True:
+            print()
+            print("  1) Fast Scan      (declanseaza alerta)")
+            print("  2) Slow Scan      (declanseaza alerta lent)")
+            print("  3) Trafic Normal  (fara alerta)")
+            print("  4) Replay fisier  (trimite log-uri dintr-un fisier)")
+            print("  5) Random         (generare aleatorie cu IP custom)")
+            print("  0) Iesire")
+            print()
+
+            choice = _prompt_choice(["0", "1", "2", "3", "4", "5"])
+
+            if choice == "0":
+                print("\nIesire.")
+                break
+
+            try:
+                if choice == "1":
+                    fmt = _ask_format()
+                    host, port = _prompt_host_port()
+                    num_ports = _prompt_int("Numar porturi", 20)
+                    delay = _prompt_float("Delay intre pachete (s)", 0.1)
+                    source = _prompt("IP sursa simulat", "192.168.11.7")
+                    _print_summary([
+                        ("Scenariu", "Fast Scan"),
+                        ("Format", fmt.upper()),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("IP sursa", source),
+                        ("Porturi", num_ports),
+                        ("Delay", f"{delay}s"),
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+                    simulate_fast_scan(
+                        sock=sock, host=host, port=port,
+                        source_ip=source, num_ports=num_ports,
+                        delay=delay, batch_size=1, fmt=fmt,
+                    )
+
+                elif choice == "2":
+                    fmt = _ask_format()
+                    host, port = _prompt_host_port()
+                    num_ports = _prompt_int("Numar porturi", 40)
+                    delay = _prompt_float("Delay intre pachete (s)", 7.0)
+                    source = _prompt("IP sursa simulat", "192.168.11.7")
+                    _print_summary([
+                        ("Scenariu", "Slow Scan"),
+                        ("Format", fmt.upper()),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("IP sursa", source),
+                        ("Porturi", num_ports),
+                        ("Delay", f"{delay}s"),
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+                    simulate_slow_scan(
+                        sock=sock, host=host, port=port,
+                        source_ip=source, num_ports=num_ports,
+                        delay=delay, batch_size=1, fmt=fmt,
+                    )
+
+                elif choice == "3":
+                    fmt = _ask_format()
+                    host, port = _prompt_host_port()
+                    count = _prompt_int("Numar log-uri", 10)
+                    source = _prompt("IP sursa simulat", "192.168.11.7")
+                    _print_summary([
+                        ("Scenariu", "Trafic Normal"),
+                        ("Format", fmt.upper()),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("IP sursa", source),
+                        ("Log-uri", count),
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+                    simulate_normal(
+                        sock=sock, host=host, port=port,
+                        source_ip=source, count=count, fmt=fmt,
+                    )
+
+                elif choice == "4":
+                    host, port = _prompt_host_port()
+                    file_path = _prompt("Cale fisier")
+                    delay = _prompt_float("Delay intre pachete (s)", 0.1)
+                    _print_summary([
+                        ("Scenariu", "Replay"),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("Fisier", file_path),
+                        ("Delay", f"{delay}s"),
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+                    replay_file(
+                        sock=sock, host=host, port=port,
+                        file_path=file_path, delay=delay, batch_size=1,
+                    )
+
+                elif choice == "5":
+                    ips = _prompt_ip_source()
+
+                    print()
+                    print("  Tip scenariu:")
+                    print("    1) Fast Scan")
+                    print("    2) Slow Scan")
+                    print("    3) Normal")
+                    scan_choice = _prompt_choice(["1", "2", "3"], "1")
+
+                    fmt = _ask_format()
+                    host, port = _prompt_host_port()
+
+                    if scan_choice in ("1", "2"):
+                        default_ports = 20 if scan_choice == "1" else 40
+                        default_delay = 0.1 if scan_choice == "1" else 7.0
+                        num_ports = _prompt_int("Numar porturi", default_ports)
+                        delay = _prompt_float("Delay intre pachete (s)", default_delay)
+                        extra_items = [("Porturi", num_ports), ("Delay", f"{delay}s")]
+                    else:
+                        count = _prompt_int("Numar log-uri", 10)
+                        extra_items = [("Log-uri", count)]
+
+                    scan_names = {"1": "Fast Scan", "2": "Slow Scan", "3": "Normal"}
+                    _print_summary([
+                        ("Scenariu", f"Random — {scan_names[scan_choice]}"),
+                        ("Format", fmt.upper()),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("Atacatori", len(ips)),
+                        ("IP(uri)", ", ".join(ips)),
+                        *extra_items,
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+
+                    for i, ip in enumerate(ips):
+                        if len(ips) > 1:
+                            print(f"\n[Atacator {i + 1}/{len(ips)}] IP: {ip}\n")
+                        if scan_choice == "1":
+                            simulate_fast_scan(
+                                sock=sock, host=host, port=port,
+                                source_ip=ip, num_ports=num_ports,
+                                delay=delay, batch_size=1, fmt=fmt,
+                            )
+                        elif scan_choice == "2":
+                            simulate_slow_scan(
+                                sock=sock, host=host, port=port,
+                                source_ip=ip, num_ports=num_ports,
+                                delay=delay, batch_size=1, fmt=fmt,
+                            )
+                        else:
+                            simulate_normal(
+                                sock=sock, host=host, port=port,
+                                source_ip=ip, count=count, fmt=fmt,
+                            )
+                        if len(ips) > 1 and i < len(ips) - 1:
+                            time.sleep(1.0)
+
+            except KeyboardInterrupt:
+                print("\n  [!] Scenariu anulat.")
+
+            print()
+            try:
+                again = input("  Rulezi alt scenariu? [D/n]: ").strip().lower()
+                if again == "n":
+                    print("\nIesire.")
+                    break
+            except KeyboardInterrupt:
+                print("\nIesire.")
+                break
+            print()
+
+    except KeyboardInterrupt:
+        print("\nIesire.")
+    finally:
+        sock.close()
+
+
+# =============================================================================
 # CLI - Argparse
 # =============================================================================
 
@@ -602,6 +984,10 @@ def add_common_scan_args(parser: argparse.ArgumentParser) -> None:
 
 
 def main() -> None:
+    if len(sys.argv) == 1:
+        run_interactive_menu()
+        return
+
     root_parser = argparse.ArgumentParser(
         description="Tester IDS-RS - Simuleaza log-uri de firewall pe UDP",
         formatter_class=argparse.RawDescriptionHelpFormatter,

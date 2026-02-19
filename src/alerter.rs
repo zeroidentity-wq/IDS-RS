@@ -5,7 +5,6 @@
 // Responsabilitati:
 //   1. Trimite alerte catre SIEM (ArcSight) prin UDP syslog
 //   2. Trimite notificari email catre echipa IT/Security
-//
 // CONCEPTE RUST EXPLICATE:
 //
 // 1. ASYNC/AWAIT (Asincronicitate)
@@ -35,8 +34,8 @@
 //
 // =============================================================================
 
-use crate::config::AlertingConfig;
-use crate::detector::Alert;
+use crate::config::{AlertingConfig, DetectionConfig};
+use crate::detector::{Alert, ScanType};
 use crate::display;
 use anyhow::{Context, Result};
 use lettre::{
@@ -53,11 +52,12 @@ use tokio::net::UdpSocket;
 /// a mai avea nevoie de referinta la config-ul original.
 pub struct Alerter {
     config: AlertingConfig,
+    detection: DetectionConfig,
 }
 
 impl Alerter {
-    pub fn new(config: AlertingConfig) -> Self {
-        Self { config }
+    pub fn new(config: AlertingConfig, detection: DetectionConfig) -> Self {
+        Self { config, detection }
     }
 
     /// Trimite alerta catre toate destinatiile configurate.
@@ -99,22 +99,82 @@ impl Alerter {
     /// dar Rust/tokio ne forteaza sa tratam ca async - consistenta API.
     ///
     async fn send_siem_alert(&self, alert: &Alert) -> Result<()> {
-        // Formatam mesajul in stil syslog/SIEM.
-        // Folosim campuri cheie=valoare pentru parsare usoara in SIEM.
-        let port_list: String = alert
+        // Formatam mesajul in format CEF peste Syslog RFC 3164 pentru ArcSight.
+        //
+        // Structura completa:
+        //   <PRIORITY>TIMESTAMP HOSTNAME CEF:0|Vendor|Product|Ver|SigID|Name|Sev|Extensions
+        //
+        // Prioritate syslog: facility=4 (security) × 8 + severity=6 (info) = 38
+        // Campuri CEF Extensions: rt, src, cnt, act, msg, cs1Label, cs1
+
+        let (sig_id, event_name, scan_label) = match alert.scan_type {
+            ScanType::Fast => (
+                "1001",
+                "Fast Port Scan Detected",
+                format!(
+                    "Fast Scan detectat: {} porturi unice in {} secunde",
+                    alert.unique_ports.len(),
+                    self.detection.fast_scan.time_window_secs,
+                ),
+            ),
+            ScanType::Slow => (
+                "1002",
+                "Slow Port Scan Detected",
+                format!(
+                    "Slow Scan detectat: {} porturi unice in {} minute",
+                    alert.unique_ports.len(),
+                    self.detection.slow_scan.time_window_mins,
+                ),
+            ),
+        };
+
+        // Lista completa de porturi pentru campul cs1 (ArcSight suporta pana la 4000 chars).
+        let port_list_full: String = alert
             .unique_ports
             .iter()
             .map(|p| p.to_string())
             .collect::<Vec<_>>()
             .join(",");
 
+        // Lista de porturi pentru campul msg — trunchiem la 512 caractere pentru
+        // compatibilitate cu syslog RFC 3164 si vizibilitate in Active Channel ArcSight.
+        // Daca lista completa incape, o folosim integral; altfel adaugam "...".
+        let port_list_msg = if port_list_full.len() <= 512 {
+            port_list_full.clone()
+        } else {
+            // Construim lista pana la limita, taind la ultimul ',' complet.
+            let truncated = &port_list_full[..512];
+            let cut = truncated.rfind(',').unwrap_or(512);
+            format!("{}...", &port_list_full[..cut])
+        };
+
+        // Mesajul campului msg: descriere + lista porturi (vizibila direct in ArcSight Event List).
+        let msg_text = format!("{} | ports: {}", scan_label, port_list_msg);
+
+        // Campul dst (Target Address in ArcSight) — IP-ul tinta al scanarii.
+        // Prezent doar daca log-ul sursa l-a furnizat.
+        let dst_field = match alert.dest_ip {
+            Some(ip) => format!(" dst={}", ip),
+            None => String::new(),
+        };
+
+        let syslog_ts = alert.timestamp.format("%b %e %H:%M:%S");
+        let rt_ms = alert.timestamp.timestamp_millis();
+
         let message = format!(
-            "[IDS-RS ALERT] type={} src={} unique_ports={} time={} ports={}",
-            alert.scan_type,
-            alert.source_ip,
-            alert.unique_ports.len(),
-            alert.timestamp.format("%Y-%m-%dT%H:%M:%S"),
-            port_list,
+            "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
+             |{sig_id}|{event_name}|7\
+             |rt={rt_ms} src={src}{dst} cnt={cnt} act=alert \
+             msg={msg} cs1Label=ScannedPorts cs1={ports}",
+            syslog_ts = syslog_ts,
+            sig_id = sig_id,
+            event_name = event_name,
+            rt_ms = rt_ms,
+            src = alert.source_ip,
+            dst = dst_field,
+            cnt = alert.unique_ports.len(),
+            msg = msg_text,
+            ports = port_list_full,
         );
 
         // Cream un socket UDP efemer (port 0 = OS alege automat).

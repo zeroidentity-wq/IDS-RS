@@ -32,6 +32,7 @@
 
 use crate::config::AppConfig;
 use crate::detector::{Alert, ScanType};
+use crate::parser::LogEvent;
 use chrono::Local;
 use colored::*;
 
@@ -293,6 +294,59 @@ pub fn log_stats(tracked_ips: usize, cleaned_ips: usize) {
         " STAT ".on_cyan().black().bold(),
         tracked_ips.to_string().white().bold(),
         cleaned_ips.to_string().white().bold()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Functii de debug/diagnostic - afiseaza detalii despre parsare
+// ---------------------------------------------------------------------------
+
+/// Afiseaza linia raw primita pe port (mod debug).
+pub fn log_debug_raw(line: &str) {
+    let ts = timestamp();
+    println!(
+        "{} {} {}",
+        ts.bold().white(),
+        " RAW  ".on_magenta().white().bold(),
+        line.dimmed()
+    );
+}
+
+/// Afiseaza confirmarea parsarii reusite cu campurile extrase (mod debug).
+pub fn log_debug_parse_ok(event: &LogEvent) {
+    let ts = timestamp();
+    println!(
+        "{} {}  src={} dpt={} proto={} action={}",
+        ts.bold().white(),
+        "  OK  ".on_green().black().bold(),
+        event.source_ip.to_string().green(),
+        event.dest_port.to_string().green(),
+        event.protocol.green(),
+        event.action.green()
+    );
+}
+
+/// Afiseaza detalii despre esecul parsarii (mod debug).
+pub fn log_debug_parse_fail(line: &str, parser_name: &str, expected: &str) {
+    let ts = timestamp();
+    println!(
+        "{} {} Parsare esuata! (parser: {})",
+        ts.bold().white(),
+        " FAIL ".on_red().white().bold(),
+        parser_name.red().bold()
+    );
+    println!(
+        "                              Primit:   \"{}\"",
+        if line.len() > 120 {
+            format!("{}...", &line[..120])
+        } else {
+            line.to_string()
+        }
+        .yellow()
+    );
+    println!(
+        "                              Asteptat: \"{}\"",
+        expected.dimmed()
     );
 }
 
