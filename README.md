@@ -111,6 +111,41 @@ Binarele se gasesc in:
 
 Toate setarile sunt in `config.toml`. Nicio valoare nu este hardcodata.
 
+### Validare automata la pornire
+
+La incarcare, `AppConfig::validate()` verifica semantic toate valorile din configurare.
+Daca exista erori, aplicatia nu porneste si listeaza **toate problemele** dintr-o singura data:
+
+```
+FATAL: config.toml contine 3 erori de configurare:
+  1. detection.fast_scan.port_threshold = 0: orice pachet va declansa alerta Fast Scan
+  2. detection.slow_scan.time_window_mins (1 min = 60s) trebuie sa fie mai mare decat
+     detection.fast_scan.time_window_secs (300s)
+  3. cleanup.max_entry_age_secs (30) este mai mic decat fereastra Slow Scan (5 min = 300s):
+     datele necesare detectiei Slow Scan vor fi sterse prematur
+```
+
+Constrangerile validate:
+
+| Camp | Constrangere |
+|------|-------------|
+| `network.listen_port` | ≠ 0 |
+| `network.parser` | `"gaia"` sau `"cef"` |
+| `detection.alert_cooldown_secs` | ≥ 1 |
+| `detection.fast_scan.port_threshold` | ≥ 1 |
+| `detection.fast_scan.time_window_secs` | ≥ 1 |
+| `detection.slow_scan.port_threshold` | ≥ 1 |
+| `detection.slow_scan.time_window_mins` | ≥ 1 |
+| Fereastra Slow Scan | > fereastra Fast Scan |
+| `cleanup.interval_secs` | ≥ 1 |
+| `cleanup.max_entry_age_secs` | ≥ fereastra Slow Scan |
+| `alerting.siem.port` (daca enabled) | ≠ 0 |
+| `alerting.siem.host` (daca enabled) | nenul |
+| `alerting.email.smtp_port` (daca enabled) | ≠ 0 |
+| `alerting.email.smtp_server` (daca enabled) | nenul |
+| `alerting.email.from` (daca enabled) | nenul |
+| `alerting.email.to` (daca enabled) | cel putin un destinatar |
+
 ```toml
 [network]
 listen_address = "0.0.0.0"    # Interfata de ascultare
@@ -871,6 +906,11 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
   primul tick imediat la creare, rulând un cleanup inutil la startup. Inlocuit cu un loop
   simplu `sleep`-first: asteapta intai intervalul complet, apoi curata.
 
+- [x] **Validare config post-deserializare** (`config.rs`) — adaugata `AppConfig::validate()`
+  apelata automat din `load()`. Verifica 16 constrangeri semantice (valori zero invalide,
+  consistenta ferestre de timp, campuri obligatorii conditionale) si raporteaza toate
+  erorile simultan la pornire, inainte ca aplicatia sa inceapa sa asculte pe UDP.
+
 ---
 
 ## TODO — Securitate si hardening
@@ -889,7 +929,7 @@ Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
 
 - [ ] **SMTP fara TLS** (`alerter.rs`) — cand `smtp_tls = false`, se foloseste `builder_dangerous()` care trimite credentiale (username + password) in clar pe retea. *Mitigare: warning la startup cand TLS e dezactivat; forteaza STARTTLS.*
 
-- [ ] **Lipsa validare config** (`config.rs`) — nu exista validare post-deserializare. Valori ca `port_threshold = 0` (alerte la fiecare pachet), `alert_cooldown_secs = 0` (flood de alerte) sau `listen_port = 0` pot cauza comportament imprevizibil. *Mitigare: validare cu limite rezonabile dupa incarcare.*
+- [x] **Lipsa validare config** (`config.rs`) — rezolvat. `AppConfig::validate()` verifica toate constrangerile semantice la pornire. Vezi sectiunea [Validare automata la pornire](#validare-automata-la-pornire).
 
 ### Scazuta
 
