@@ -63,6 +63,10 @@ pub struct LogEvent {
     /// IpAddr este un enum: poate fi V4(Ipv4Addr) sau V6(Ipv6Addr).
     pub source_ip: IpAddr,
 
+    /// Adresa IP destinatie (tinta atacului). Option<> deoarece
+    /// unele log-uri (ex: broadcast, ICMP malformat) nu au dst valid.
+    pub dest_ip: Option<IpAddr>,
+
     /// Portul destinatie care a fost scanat / accesat.
     pub dest_port: u16,
 

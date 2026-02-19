@@ -489,6 +489,10 @@ pe retea** ca pachet UDP catre `127.0.0.1:514`:
 > (`detection.fast_scan.time_window_secs` / `detection.slow_scan.time_window_mins`),
 > nu sunt hardcodate. Daca modifici pragurile in configurare, mesajele SIEM reflecta
 > automat noile valori.
+>
+> Campul `dst` (Target Address) este populat din informatia `dst` a log-ului firewall.
+> Campul `msg` include porturile scanate (trunchiat la 512 caractere).
+> Campul `cs1=ScannedPorts` contine intotdeauna lista completa de porturi.
 
 ---
 
@@ -521,22 +525,26 @@ Fast Port Scan Detected  → Event Name
 ```
 rt=1739876776000    → Receipt Time in ms — ArcSight sorteaza evenimentele dupa asta
 src=192.168.11.7    → Source Address    → "Attacker Address" in ArcSight
+dst=10.0.0.1        → Target Address    → IP-ul tinta al scanarii (din campul dst al log-ului)
 cnt=20              → Event Count       → numarul de porturi unice detectate
 act=alert           → Device Action     → folosit pentru filtrare si categorisire
-msg=Fast Scan...    → Message           → textul vizibil in coloana "Message"
+msg=Fast Scan...    → Message           → descriere + lista porturi (vizibila direct in Event List)
 cs1Label=Scanned... → numele coloanei custom cs1
-cs1=21,22,23,80...  → ScannedPorts      → lista completa porturi, vizibila la detalii
+cs1=21,22,23,80...  → ScannedPorts      → lista completa porturi (pana la 4000 chars)
 ```
+
+Campul `msg` include porturile scanate direct, trunchiate la 512 caractere pentru
+compatibilitate cu syslog RFC 3164. Campul `cs1` contine intotdeauna lista completa.
 
 **Cum arata in interfata ArcSight (Active Channel / Event List):**
 
 ```
-┌──────────────────┬─────────────────┬──────┬─────────────────────┬───────┬───────────────────────────┐
-│ Time             │ Source Address  │ Cnt  │ Name                │ Prio  │ Message                   │
-├──────────────────┼─────────────────┼──────┼─────────────────────┼───────┼───────────────────────────┤
-│ Feb 18 12:06:16  │ 192.168.11.7   │  20  │ Fast Port Scan      │ High  │ Fast Scan detectat: 20    │
-│                  │                 │      │ Detected            │       │ porturi unice in 10s      │
-└──────────────────┴─────────────────┴──────┴─────────────────────┴───────┴───────────────────────────┘
+┌──────────────────┬─────────────────┬─────────────────┬──────┬──────────┬─────────────────────────────────────────────┐
+│ Time             │ Source Address  │ Target Address  │ Cnt  │ Priority │ Message                                     │
+├──────────────────┼─────────────────┼─────────────────┼──────┼──────────┼─────────────────────────────────────────────┤
+│ Feb 18 12:06:16  │ 192.168.11.7   │ 10.0.0.1        │  20  │ High     │ Fast Scan detectat: 20 porturi unice in 10s │
+│                  │                 │                 │      │          │ | ports: 21,22,23,80,443,8080,...            │
+└──────────────────┴─────────────────┴─────────────────┴──────┴──────────┴─────────────────────────────────────────────┘
 ```
 
 Click pe eveniment → detalii complete, inclusiv coloana **ScannedPorts** cu
@@ -905,6 +913,12 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
 - [x] **Cleanup task: primul tick imediat** (`main.rs`) — `tokio::time::interval()` face
   primul tick imediat la creare, rulând un cleanup inutil la startup. Inlocuit cu un loop
   simplu `sleep`-first: asteapta intai intervalul complet, apoi curata.
+
+- [x] **Target Address si porturi in mesajul SIEM** — campul `dst` (Target Address in ArcSight)
+  adaugat in extensiile CEF din informatia `dst` a log-ului firewall. Campul `msg` include
+  acum si lista porturilor scanate (trunchiat la 512 caractere pentru compatibilitate syslog).
+  Campul `cs1=ScannedPorts` contine in continuare lista completa. `dest_ip` adaugat in
+  `LogEvent` si `Alert`; extras de ambii parseri (Gaia si CEF).
 
 - [x] **Validare config post-deserializare** (`config.rs`) — adaugata `AppConfig::validate()`
   apelata automat din `load()`. Verifica 16 constrangeri semantice (valori zero invalide,

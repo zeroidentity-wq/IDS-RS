@@ -91,6 +91,9 @@ impl std::fmt::Display for ScanType {
 pub struct Alert {
     pub scan_type: ScanType,
     pub source_ip: IpAddr,
+    /// IP-ul tinta al scanarii — din campul `dst` al log-ului care a
+    /// declansat alerta. Option<> deoarece unele log-uri nu au dst valid.
+    pub dest_ip: Option<IpAddr>,
     pub unique_ports: Vec<u16>,
     pub timestamp: DateTime<Local>,
 }
@@ -218,6 +221,7 @@ impl Detector {
                 alerts.push(Alert {
                     scan_type: ScanType::Fast,
                     source_ip: ip,
+                    dest_ip: event.dest_ip,
                     unique_ports: ports,
                     timestamp: Local::now(),
                 });
@@ -234,6 +238,7 @@ impl Detector {
                 alerts.push(Alert {
                     scan_type: ScanType::Slow,
                     source_ip: ip,
+                    dest_ip: event.dest_ip,
                     unique_ports: ports,
                     timestamp: Local::now(),
                 });
@@ -385,6 +390,7 @@ mod tests {
     fn make_event(ip: &str, port: u16) -> LogEvent {
         LogEvent {
             source_ip: ip.parse().unwrap(),
+            dest_ip: Some("10.0.0.1".parse().unwrap()),
             dest_port: port,
             protocol: "tcp".to_string(),
             action: "drop".to_string(),

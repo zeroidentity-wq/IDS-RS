@@ -84,6 +84,7 @@ impl LogParser for CefParser {
         // Aceasta este o decizie de design: previne modificari accidentale
         // si face codul mai usor de rationat (mai putine stari posibile).
         let mut source_ip: Option<IpAddr> = None;
+        let mut dest_ip: Option<IpAddr> = None;
         let mut dest_port: Option<u16> = None;
         let mut protocol = String::from("tcp");
         let mut action = String::new();
@@ -102,6 +103,7 @@ impl LogParser for CefParser {
             if kv.len() == 2 {
                 match kv[0] {
                     "src" => source_ip = kv[1].parse().ok(),
+                    "dst" => dest_ip = kv[1].parse().ok(),
                     "dpt" => dest_port = kv[1].parse().ok(),
                     "proto" => protocol = kv[1].to_lowercase(),
                     "act" => action = kv[1].to_lowercase(),
@@ -123,6 +125,7 @@ impl LogParser for CefParser {
 
         Some(LogEvent {
             source_ip,
+            dest_ip,
             dest_port,
             protocol,
             action,

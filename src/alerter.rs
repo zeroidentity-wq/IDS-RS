@@ -107,7 +107,7 @@ impl Alerter {
         // Prioritate syslog: facility=4 (security) × 8 + severity=6 (info) = 38
         // Campuri CEF Extensions: rt, src, cnt, act, msg, cs1Label, cs1
 
-        let (sig_id, event_name, msg_text) = match alert.scan_type {
+        let (sig_id, event_name, scan_label) = match alert.scan_type {
             ScanType::Fast => (
                 "1001",
                 "Fast Port Scan Detected",
@@ -128,12 +128,35 @@ impl Alerter {
             ),
         };
 
-        let port_list: String = alert
+        // Lista completa de porturi pentru campul cs1 (ArcSight suporta pana la 4000 chars).
+        let port_list_full: String = alert
             .unique_ports
             .iter()
             .map(|p| p.to_string())
             .collect::<Vec<_>>()
             .join(",");
+
+        // Lista de porturi pentru campul msg — trunchiem la 512 caractere pentru
+        // compatibilitate cu syslog RFC 3164 si vizibilitate in Active Channel ArcSight.
+        // Daca lista completa incape, o folosim integral; altfel adaugam "...".
+        let port_list_msg = if port_list_full.len() <= 512 {
+            port_list_full.clone()
+        } else {
+            // Construim lista pana la limita, taind la ultimul ',' complet.
+            let truncated = &port_list_full[..512];
+            let cut = truncated.rfind(',').unwrap_or(512);
+            format!("{}...", &port_list_full[..cut])
+        };
+
+        // Mesajul campului msg: descriere + lista porturi (vizibila direct in ArcSight Event List).
+        let msg_text = format!("{} | ports: {}", scan_label, port_list_msg);
+
+        // Campul dst (Target Address in ArcSight) — IP-ul tinta al scanarii.
+        // Prezent doar daca log-ul sursa l-a furnizat.
+        let dst_field = match alert.dest_ip {
+            Some(ip) => format!(" dst={}", ip),
+            None => String::new(),
+        };
 
         let syslog_ts = alert.timestamp.format("%b %e %H:%M:%S");
         let rt_ms = alert.timestamp.timestamp_millis();
@@ -141,16 +164,17 @@ impl Alerter {
         let message = format!(
             "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
              |{sig_id}|{event_name}|7\
-             |rt={rt_ms} src={src} cnt={cnt} act=alert \
+             |rt={rt_ms} src={src}{dst} cnt={cnt} act=alert \
              msg={msg} cs1Label=ScannedPorts cs1={ports}",
             syslog_ts = syslog_ts,
             sig_id = sig_id,
             event_name = event_name,
             rt_ms = rt_ms,
             src = alert.source_ip,
+            dst = dst_field,
             cnt = alert.unique_ports.len(),
             msg = msg_text,
-            ports = port_list,
+            ports = port_list_full,
         );
 
         // Cream un socket UDP efemer (port 0 = OS alege automat).
