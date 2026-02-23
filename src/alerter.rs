@@ -42,6 +42,7 @@ use lettre::{
     transport::smtp::authentication::Credentials, AsyncSmtpTransport, AsyncTransport, Message,
     Tokio1Executor,
 };
+use std::time::Duration;
 use tokio::net::UdpSocket;
 
 /// Componenta de alertare - trimite notificari catre SIEM si email.
@@ -239,30 +240,40 @@ impl Alerter {
             ts = alert.timestamp.format("%Y-%m-%d %H:%M:%S"),
         );
 
-        // Configuram credentialele SMTP.
-        // `.clone()` deoarece Credentials::new() preia ownership.
-        let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
-
         // Construim transportul SMTP async.
         //
         // NOTA RUST - MATCH pe bool:
         // In loc de if/else, putem folosi match. Dar aici if este mai clar.
         //
-        // `.relay()` = conectare cu TLS implicit (port 465 default)
-        // `.builder_dangerous()` = fara TLS (doar pentru retele interne!)
-        // `.port()` seteaza portul SMTP din configurare (ex: 465, 587, 25).
-        // Fara `.port()`, lettre foloseste default-ul protocolului.
+        // `.relay()` = conectare cu STARTTLS (recomandat pentru port 587)
+        // `.builder_dangerous()` = fara TLS (pentru retele interne, port 25)
+        // `.port()` seteaza portul SMTP din configurare.
+        // `.timeout()` = timeout explicit pentru a evita asteptare infinita.
+        //
+        // Credentialele sunt optionale: pe servere interne (port 25 relay),
+        // autentificarea nu este de obicei necesara. Daca username este gol,
+        // nu trimitem AUTH — serverul va relaya pe baza IP-ului sursa.
+        let smtp_timeout = Some(Duration::from_secs(30));
+
         let mailer = if cfg.smtp_tls {
-            AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.smtp_server)
+            let mut builder = AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.smtp_server)
                 .context("Nu pot configura SMTP relay")?
                 .port(cfg.smtp_port)
-                .credentials(creds)
-                .build()
+                .timeout(smtp_timeout);
+            if !cfg.username.is_empty() {
+                let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
+                builder = builder.credentials(creds);
+            }
+            builder.build()
         } else {
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_server)
+            let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_server)
                 .port(cfg.smtp_port)
-                .credentials(creds)
-                .build()
+                .timeout(smtp_timeout);
+            if !cfg.username.is_empty() {
+                let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
+                builder = builder.credentials(creds);
+            }
+            builder.build()
         };
 
         // Trimitem un email catre fiecare destinatar.
