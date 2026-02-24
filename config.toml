@@ -1,7 +1,6 @@
 # =============================================================================
 # IDS-RS - Fisier de Configurare
 # =============================================================================
-# Toate valorile sunt configurabile. Niciunul nu este hardcodat in cod.
 # Formatul TOML: https://toml.io/
 # =============================================================================
 
@@ -23,6 +22,18 @@ parser = "gaia"
 # Perioada de cooldown (secunde) intre alerte repetate pentru acelasi IP.
 # Previne spam-ul de alerte cand un atac este deja detectat.
 alert_cooldown_secs = 300
+
+# Maxim port-hit-uri tinute in memorie per IP sursa.
+# Un scanner de porturi la viteza mare poate genera mii de hit-uri intre doua
+# cleanup cycle-uri. Fara aceasta limita, un singur IP rau-intentionat ar putea
+# consuma sute de MB de RAM. La 10.000 intrari x ~24 bytes = ~240 KB per IP.
+max_hits_per_ip = 10000
+
+# Maxim IP-uri urmarite simultan in memorie.
+# Fara aceasta limita, un atacator care spoofs milioane de IP-uri sursa diferite
+# ar putea umple RAM-ul serverului. Cand se atinge limita, IP-ul cel mai vechi
+# (LRU — Least Recently Used) este eliminat pentru a face loc celui nou.
+max_tracked_ips = 100000
 
 [detection.fast_scan]
 # Numar de porturi unice care declanseaza alerta de Fast Scan.
@@ -50,14 +61,14 @@ port = 514
 
 [alerting.email]
 # Trimite alerte prin email catre echipa IT/Security.
-enabled = false
+enabled = true
 smtp_server = "smtp.example.com"
-smtp_port = 587
-smtp_tls = true
+smtp_port = 25
+smtp_tls = false
 from = "ids-rs@example.com"
 to = ["it-security@example.com"]
-username = "ids-rs@example.com"
-password = "changeme"
+username = ""
+password = ""
 
 # -----------------------------------------------------------------------------
 # Mentenanta memorie

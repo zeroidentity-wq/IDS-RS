@@ -148,6 +148,14 @@ pub struct Detector {
     /// Cooldown alerte Slow Scan per IP.
     slow_cooldowns: DashMap<IpAddr, Instant>,
 
+    /// Ultimul moment cand fiecare IP a fost vazut.
+    /// Folosit pentru LRU eviction: cand DashMap-ul ajunge la max_tracked_ips,
+    /// IP-ul cu cel mai vechi `last_seen` este eliminat pentru a face loc celui nou.
+    ///
+    /// NOTA RUST: Mentinem aceasta structura separata (in loc sa parcurgem port_hits)
+    /// pentru a gasi rapid LRU-ul fara a tine write-lock-uri pe port_hits in acelasi timp.
+    last_seen: DashMap<IpAddr, Instant>,
+
     /// Configurarea pragurilor de detectie (owned, cloned din AppConfig).
     config: DetectionConfig,
 }
@@ -162,6 +170,7 @@ impl Detector {
             port_hits: DashMap::new(),
             fast_cooldowns: DashMap::new(),
             slow_cooldowns: DashMap::new(),
+            last_seen: DashMap::new(),
             config,
         }
     }
@@ -187,7 +196,53 @@ impl Detector {
         let now = Instant::now();
         let ip = event.source_ip;
 
-        // --- 1. Inregistram port hit-ul ---
+        // --- 1. Limitare globala IP-uri (anti-IP-spoofing flood) ---
+        //
+        // NOTA #4 - LRU EVICTION:
+        //
+        // Un atacator poate trimite pachete cu milioane de IP-uri sursa false (spoofed).
+        // Fara limita, fiecare IP nou creeaza o intrare noua in DashMap → memory exhaustion.
+        //
+        // Solutia: cand DashMap-ul ajunge la max_tracked_ips si soseste un IP NOU,
+        // eliminam IP-ul cel mai vechi (LRU = Least Recently Used) inainte de a insera.
+        //
+        // Algoritmul:
+        //   1. Verificam daca IP-ul este nou (nu exista in port_hits)
+        //   2. Daca da si am atins limita → parcurgem last_seen si gasim minimul
+        //   3. Eliminam acel IP din toate structurile
+        //
+        // NOTA RUST - `.iter().min_by_key()`:
+        // Parcurge intregul DashMap si returneaza elementul cu valoarea minima.
+        // Returneaza Option<Ref<K,V>> — None daca map-ul e gol, Some altfel.
+        // `.map(|e| *e.key())` extrage cheia (IpAddr e Copy → * dereferentiaza si copiaza).
+        // Ref-ul este dropit inainte de `.remove()` → fara deadlock.
+        //
+        // Complexitate: O(n) per evictie. Evictia apare rar (doar la IP-uri noi dupa
+        // atingerea limitei). In practica, un flood de IP-uri spoofed este cel mai
+        // rau caz — dar atunci O(n) eviction este acceptabil vs. OOM.
+        //
+        let is_new_ip = !self.port_hits.contains_key(&ip);
+        if is_new_ip && self.port_hits.len() >= self.config.max_tracked_ips {
+            // Gasim IP-ul cu cel mai vechi last_seen (Least Recently Used).
+            let lru_ip: Option<IpAddr> = self
+                .last_seen
+                .iter()
+                .min_by_key(|e| *e.value())
+                .map(|e| *e.key());
+
+            if let Some(old_ip) = lru_ip {
+                // Eliminam IP-ul LRU din toate structurile care il retin.
+                self.port_hits.remove(&old_ip);
+                self.last_seen.remove(&old_ip);
+                self.fast_cooldowns.remove(&old_ip);
+                self.slow_cooldowns.remove(&old_ip);
+            }
+        }
+
+        // Actualizam last_seen pentru IP-ul curent (nou sau existent).
+        self.last_seen.insert(ip, now);
+
+        // --- 2. Inregistram port hit-ul (cu limitare memorie per IP) ---
         //
         // NOTA RUST - ENTRY API:
         // `.entry(key)` este pattern-ul standard pentru "get or insert":
@@ -196,21 +251,38 @@ impl Detector {
         //
         // `.or_default()` foloseste Default::default() care pentru Vec este Vec::new().
         //
-        // NOTA RUST - DEREF si AUTO-DEREF:
-        // `.push()` este apelat pe `&mut Vec<PortHit>`, nu pe entry guard.
-        // Rust aplica auto-deref: entry_guard -> &mut Vec -> Vec.push().
-        // Acest mecanism face codul mai ergonomic fara pierdere de control.
-        self.port_hits
-            .entry(ip)
-            .or_default()
-            .push(PortHit {
+        // NOTA RUST - SCOP (SCOPE) EXPLICIT cu `{}`:
+        // Folosim un bloc `{}` pentru a limita durata de viata a `entry` (RefMut).
+        // RefMut tine un write-lock pe shard-ul DashMap. Daca nu il eliberam explicit
+        // inainte de urmatoarele operatii (care si ele acceseaza DashMap), am putea
+        // ajunge la un deadlock sau eroare de compilare (daca Rust detecteaza overlapping borrows).
+        // Blocul `{}` garanteaza ca RefMut este dropit (si lock-ul eliberat) la final.
+        //
+        // NOTA #3 - LIMITARE MEMORIE PER IP:
+        // Vec<PortHit> creste la fiecare eveniment. Fara limita, un scanner la viteza
+        // mare poate genera mii/zeci-de-mii de intrari intre doua cleanup-uri (la 60s interval).
+        // Solutia: dupa push, daca len() > max_hits_per_ip, stergem de la inceput (oldest first).
+        // `.drain(..N)` sterge primele N elemente (cele mai vechi) in-place.
+        //
+        {
+            let mut hits = self.port_hits.entry(ip).or_default();
+            hits.push(PortHit {
                 port: event.dest_port,
                 seen_at: now,
             });
 
+            // Cap la max_hits_per_ip: pastram doar cele mai recente intrari.
+            let max_hits = self.config.max_hits_per_ip;
+            if hits.len() > max_hits {
+                // drain(..N) sterge primele N elemente (oldest); restul raman in ordine.
+                let overflow = hits.len() - max_hits;
+                hits.drain(..overflow);
+            }
+        }
+
         let mut alerts = Vec::new();
 
-        // --- 2. Verificam Fast Scan ---
+        // --- 3. Verificam Fast Scan ---
         let fast_window = Duration::from_secs(self.config.fast_scan.time_window_secs);
         if let Some(ports) = self.unique_ports_in_window(ip, fast_window, now) {
             if ports.len() > self.config.fast_scan.port_threshold
@@ -228,7 +300,7 @@ impl Detector {
             }
         }
 
-        // --- 3. Verificam Slow Scan ---
+        // --- 4. Verificam Slow Scan ---
         let slow_window = Duration::from_secs(self.config.slow_scan.time_window_mins * 60);
         if let Some(ports) = self.unique_ports_in_window(ip, slow_window, now) {
             if ports.len() > self.config.slow_scan.port_threshold
@@ -350,6 +422,9 @@ impl Detector {
         // iteratorul). De aceea colectam cheile si le stergem separat.
         for ip in &empty_keys {
             self.port_hits.remove(ip);
+            // Curatam si last_seen pentru IP-urile eliminate → evitam acumularea
+            // de intrari stale care ar fi selectate incorect ca LRU in viitor.
+            self.last_seen.remove(ip);
         }
 
         // Curatam cooldown-urile expirate.
@@ -376,6 +451,8 @@ mod tests {
     fn test_config() -> DetectionConfig {
         DetectionConfig {
             alert_cooldown_secs: 5,
+            max_hits_per_ip: 1_000,
+            max_tracked_ips: 10_000,
             fast_scan: FastScanConfig {
                 port_threshold: 3,
                 time_window_secs: 10,
@@ -463,5 +540,70 @@ mod tests {
         // Cleanup cu max_age = 0 -> sterge totul.
         detector.cleanup(Duration::from_secs(0));
         assert_eq!(detector.tracked_ips(), 0);
+    }
+
+    // =========================================================================
+    // Teste pentru #3 — MAX_HITS_PER_IP si #4 — MAX_TRACKED_IPS
+    // =========================================================================
+
+    #[test]
+    fn test_max_hits_per_ip_cap() {
+        // Configuram o limita mica (5 hits) pentru a testa usor.
+        let mut config = test_config();
+        config.max_hits_per_ip = 5;
+        let detector = Detector::new(config);
+
+        // Trimitem 10 evenimente pe acelasi IP (porturi 1..=10).
+        for port in 1..=10u16 {
+            detector.process_event(&make_event("10.0.0.1", port));
+        }
+
+        // Vec-ul nu trebuie sa depaseasca limita de 5.
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let entry = detector.port_hits.get(&ip).unwrap();
+        assert!(
+            entry.len() <= 5,
+            "Vec-ul a depasit max_hits_per_ip: are {} intrari",
+            entry.len()
+        );
+
+        // Trebuie sa contina porturile CELE MAI RECENTE (6..=10), nu pe cele vechi (1..5).
+        let ports: Vec<u16> = entry.iter().map(|h| h.port).collect();
+        assert!(ports.contains(&10), "Portul cel mai recent (10) trebuie sa fie prezent");
+        assert!(!ports.contains(&1), "Portul cel mai vechi (1) trebuia eliminat");
+    }
+
+    #[test]
+    fn test_max_tracked_ips_eviction() {
+        // Configuram limita mica (2 IP-uri) pentru a testa usor.
+        let mut config = test_config();
+        config.max_tracked_ips = 2;
+        let detector = Detector::new(config);
+
+        // Adaugam 3 IP-uri diferite. Al treilea trebuie sa provoace evictia primului.
+        detector.process_event(&make_event("10.0.0.1", 80));
+        detector.process_event(&make_event("10.0.0.2", 80));
+        detector.process_event(&make_event("10.0.0.3", 80)); // depaseste limita → evictie LRU
+
+        // Trebuie sa avem maxim max_tracked_ips IP-uri urmarite.
+        assert!(
+            detector.tracked_ips() <= 2,
+            "DashMap a depasit max_tracked_ips: urmareste {} IP-uri",
+            detector.tracked_ips()
+        );
+
+        // IP-ul 10.0.0.1 a fost cel mai vechi → trebuie evictat.
+        let ip1: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(
+            !detector.port_hits.contains_key(&ip1),
+            "IP-ul cel mai vechi (10.0.0.1) trebuia evictat"
+        );
+
+        // IP-ul 10.0.0.3 (cel mai recent) trebuie sa fie prezent.
+        let ip3: std::net::IpAddr = "10.0.0.3".parse().unwrap();
+        assert!(
+            detector.port_hits.contains_key(&ip3),
+            "IP-ul cel mai recent (10.0.0.3) trebuie sa fie prezent"
+        );
     }
 }

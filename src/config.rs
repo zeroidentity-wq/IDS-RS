@@ -69,11 +69,39 @@ pub struct NetworkConfig {
 /// NOTA RUST: Structurile imbricate (nested) se mapeaza pe sectiuni TOML
 /// imbricate. `[detection.fast_scan]` in TOML -> campul `fast_scan` aici.
 /// serde + toml fac aceasta mapare automat datorita derive(Deserialize).
+///
+/// NOTA RUST - SERDE DEFAULT VALUES:
+/// `#[serde(default = "fn_name")]` permite campuri optionale in TOML:
+///   - Daca lipseste din fisier, serde apeleaza functia specificata pentru valoare default
+///   - Retrocompatibil: configuratii vechi fara campul nou continua sa functioneze
+///   - Functiile de default trebuie sa returneze acelasi tip ca si campul
 #[derive(Debug, Clone, Deserialize)]
 pub struct DetectionConfig {
     pub alert_cooldown_secs: u64,
+
+    /// Numarul maxim de PortHit-uri tinute in memorie per IP sursa.
+    /// Previne cresterea nelimitata a Vec<PortHit> intre cleanup cycle-uri.
+    /// Implicit: 10.000 intrari (~240 KB per IP in cel mai rau caz).
+    #[serde(default = "default_max_hits_per_ip")]
+    pub max_hits_per_ip: usize,
+
+    /// Numarul maxim de IP-uri urmarite simultan in DashMap.
+    /// Previne flood-ul de IP-uri spoofed care umplea memoria nelimitat.
+    /// Cand limita este atinsa, IP-ul cel mai vechi (LRU) este eliminat.
+    /// Implicit: 100.000 IP-uri.
+    #[serde(default = "default_max_tracked_ips")]
+    pub max_tracked_ips: usize,
+
     pub fast_scan: FastScanConfig,
     pub slow_scan: SlowScanConfig,
+}
+
+fn default_max_hits_per_ip() -> usize {
+    10_000
+}
+
+fn default_max_tracked_ips() -> usize {
+    100_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,6 +233,18 @@ impl AppConfig {
         if self.detection.alert_cooldown_secs == 0 {
             errors.push(
                 "detection.alert_cooldown_secs = 0: fara cooldown, acelasi IP va genera alerte la fiecare eveniment"
+                    .to_string(),
+            );
+        }
+        if self.detection.max_hits_per_ip == 0 {
+            errors.push(
+                "detection.max_hits_per_ip = 0: nicio inregistrare nu poate fi stocata per IP, detectia devine imposibila"
+                    .to_string(),
+            );
+        }
+        if self.detection.max_tracked_ips == 0 {
+            errors.push(
+                "detection.max_tracked_ips = 0: niciun IP nu poate fi urmarit, detectia devine imposibila"
                     .to_string(),
             );
         }

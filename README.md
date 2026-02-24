@@ -16,6 +16,8 @@ Detecteaza scanari de retea (Fast Scan si Slow Scan) si trimite alerte catre SIE
 - [Rulare](#rulare)
 - [Testare](#testare)
 - [Structura proiect](#structura-proiect)
+- [Protectie memorie — MAX\_HITS\_PER\_IP](#protectie-memorie--max_hits_per_ip)
+- [Protectie DashMap — MAX\_TRACKED\_IPS si LRU Eviction](#protectie-dashmap--max_tracked_ips-si-lru-eviction)
 - [Concepte Rust acoperite](#concepte-rust-acoperite)
 
 ---
@@ -925,6 +927,281 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
   consistenta ferestre de timp, campuri obligatorii conditionale) si raporteaza toate
   erorile simultan la pornire, inainte ca aplicatia sa inceapa sa asculte pe UDP.
 
+- [x] **Limitare memorie per IP — MAX_HITS_PER_IP** (`detector.rs`, `config.rs`) — `Vec<PortHit>`
+  era nelimitata intre cleanup cycle-uri. Adaugat camp `max_hits_per_ip` in `DetectionConfig`
+  (implicit 10.000). La depasire, cele mai vechi intrari sunt eliminate (FIFO via `drain(..N)`).
+  Retrocompatibil prin `#[serde(default)]`. Adaugat test unitar `test_max_hits_per_ip_cap`.
+
+- [x] **Limitare globala IP-uri — MAX_TRACKED_IPS cu LRU Eviction** (`detector.rs`, `config.rs`)
+  — DashMap-ul creste nelimitat la IP spoofing flood. Adaugat camp `max_tracked_ips` (implicit
+  100.000) si structura auxiliara `last_seen: DashMap<IpAddr, Instant>`. Cand limita e atinsa,
+  IP-ul cel mai vechi (LRU) este evictat din toate structurile interne. Cleanup actualizat sa
+  sincronizeze `last_seen`. Adaugat test unitar `test_max_tracked_ips_eviction`.
+
+---
+
+## Protectie memorie — MAX_HITS_PER_IP
+
+### Ce problema rezolva
+
+Fiecare IP sursa are in memorie un `Vec<PortHit>` — o lista cu toate porturile accesate
+si momentul in care le-a accesat. Fara limita, un scanner agresiv care trimite zeci de
+mii de pachete pe secunda ar umple aceasta lista nelimitat intre doua cleanup cycle-uri
+(implicit: 60 de secunde).
+
+**Calcul worst-case fara limita:**
+
+```
+Un scanner trimite 10.000 pachete/s cu porturi unice.
+In 60s (un cleanup interval) = 600.000 PortHit-uri per IP.
+Fiecare PortHit = port (u16, 2 bytes) + Instant (~16 bytes) = ~18-24 bytes.
+600.000 × 24 bytes = ~14 MB per IP atacator.
+10 IP-uri atacatoare simultan = ~140 MB. 1000 IP-uri = ~14 GB → OOM.
+```
+
+### Cum functioneaza solutia
+
+In `config.toml`:
+```toml
+[detection]
+max_hits_per_ip = 10000   # maxim port-hits in memorie per IP sursa
+```
+
+In `detector.rs`, dupa fiecare `push()`:
+```rust
+let max_hits = self.config.max_hits_per_ip;
+if hits.len() > max_hits {
+    let overflow = hits.len() - max_hits;
+    hits.drain(..overflow);   // sterge de la inceput (oldest first)
+}
+```
+
+**Principiul FIFO (First In, First Out):** Vec-ul este ordonat cronologic —
+noile intrari sunt adaugate la final (`.push()`), iar cele vechi sunt eliminate
+de la inceput (`.drain(..N)`). Astfel pastrezi mereu cele **mai recente** `max_hits_per_ip`
+accesuri — exact cele relevante pentru detectie (fereastra de 10s / 5min).
+
+### Concepte Rust explicate
+
+#### `.drain(..N)` — stergere in-place eficienta
+
+`drain(range)` sterge elementele din range si le returneaza ca iterator.
+Elementele ramase sunt **compactate in stanga** (nu se realoca Vec-ul).
+
+```rust
+let mut v = vec![1, 2, 3, 4, 5];
+v.drain(..2);       // sterge primele 2 elemente
+// v == [3, 4, 5]  (compactat, fara realocare daca capacitatea o permite)
+```
+
+Alternative si de ce nu le-am ales:
+- `v.remove(0)` repetat N ori — O(n²), muta elementele de fiecare data
+- `v.truncate(max)` — sterge de la final (am pierde cele MAI RECENTE, invers de ce vrem)
+- `Vec::new()` si reconstruct — mai costisitor, realoca
+
+#### Blocul `{}` explicit — eliberarea lock-ului DashMap
+
+```rust
+{
+    let mut hits = self.port_hits.entry(ip).or_default(); // ia write-lock pe shard
+    hits.push(...);
+    hits.drain(..);
+}  // <-- hits (RefMut) este dropit AICI → lock-ul este eliberat
+// Urmatoarele operatii pe DashMap pot rula fara conflict
+```
+
+`entry()` pe DashMap returneaza un `RefMut` — un guard care tine un **write-lock**
+pe shard-ul intern. In Rust, lock-urile sunt eliberate automat (RAII) cand
+variabila iese din scope. Blocul `{}` forteaza iesirea din scope mai devreme.
+
+#### `usize` — tipul natural pentru marimi de colectii
+
+`max_hits_per_ip: usize` (nu `u32` sau `u64`) pentru ca:
+- `.len()` returneaza `usize` — comparatia `hits.len() > max_hits` nu necesita conversie
+- `usize` are dimensiunea unui pointer (32-bit pe sisteme 32-bit, 64-bit pe sisteme 64-bit)
+- Conventional in Rust: toate indexarile si marimile colectiilor sunt `usize`
+
+#### `#[serde(default = "fn")]` — campuri optionale in TOML
+
+```rust
+#[serde(default = "default_max_hits_per_ip")]
+pub max_hits_per_ip: usize,
+
+fn default_max_hits_per_ip() -> usize { 10_000 }
+```
+
+Fara acest atribut, daca lipseste `max_hits_per_ip` din `config.toml`,
+serde ar returna o eroare. Cu `default`, serde apeleaza functia si foloseste
+valoarea returnata — **retrocompatibil** cu configuratii vechi.
+
+### Impactul asupra detectiei
+
+Limita nu afecteaza acuratetea detectiei in scenarii normale:
+- **Fast Scan** cauta porturi in fereastra de **10 secunde** — cel mult cateva sute de hits
+- **Slow Scan** cauta porturi in fereastra de **5 minute** — cateva mii de hits
+- Limita de 10.000 este cu mult peste ce genereaza un scanner real in aceste ferestre
+
+Daca un scanner este **extrem** de agresiv (>10.000 porturi in fereastra),
+alerta va fi oricum generata — cele mai vechi hits (in afara ferestrei)
+sunt primele eliminate, deci detectia nu este afectata.
+
+---
+
+## Protectie DashMap — MAX_TRACKED_IPS si LRU Eviction
+
+### Ce problema rezolva
+
+`DashMap<IpAddr, Vec<PortHit>>` tine in memorie cate o intrare per IP sursa vazut.
+In mod normal, cleanup-ul periodic sterge IP-urile fara activitate recenta. Dar cleanup-ul
+nu limiteaza **numarul total** de IP-uri simultane.
+
+**Atacul IP Spoofing Flood:**
+Un atacator poate trimite pachete UDP cu IP-uri sursa false (spoofate), generate aleatoriu.
+Fiecare IP nou creeaza o intrare noua in DashMap. Cu 1 milion de IP-uri spoofate:
+
+```
+1.000.000 intrari × (IpAddr ~16B + Vec overhead ~24B) = ~40 MB doar pentru cheile DashMap
++ hit-urile per IP = potential GB de RAM → Out Of Memory / crash server IDS
+```
+
+Cleanup-ul nu ajuta: sterge doar entries **vechi**, nu limiteaza numarul total.
+Daca atacatorul trimite cate 1 pachet per IP nou la fiecare secunda, cleanup-ul
+(la 60s interval) nu va sterge nimic — toate intrarile sunt "recente".
+
+### Algoritmul LRU Eviction
+
+**LRU = Least Recently Used** — strategia de a elimina elementul care nu a mai
+fost accesat de cel mai mult timp.
+
+```
+Situatie: max_tracked_ips = 3, avem deja IP-urile A, B, C.
+
+         last_seen:
+           A → t=1s  ← cel mai vechi (LRU)
+           B → t=5s
+           C → t=9s
+
+Soseste IP nou D (t=10s):
+  1. Detectam: D nu exista AND len(3) >= max(3)  → evictie necesara
+  2. Gasim minimul din last_seen: A (t=1s)
+  3. Stergem A din port_hits, last_seen, fast_cooldowns, slow_cooldowns
+  4. Inseram D
+
+Rezultat:
+  B → t=5s
+  C → t=9s
+  D → t=10s  ← nou inserat
+```
+
+### Implementarea in Rust
+
+In `config.toml`:
+```toml
+max_tracked_ips = 100000   # maxim IP-uri urmarite simultan
+```
+
+Structura noua in `Detector`:
+```rust
+last_seen: DashMap<IpAddr, Instant>,  // ultimul moment cand IP-ul a fost vazut
+```
+
+In `process_event()`:
+```rust
+let is_new_ip = !self.port_hits.contains_key(&ip);
+if is_new_ip && self.port_hits.len() >= self.config.max_tracked_ips {
+
+    // Gasim IP-ul cu cel mai vechi last_seen (LRU)
+    let lru_ip: Option<IpAddr> = self.last_seen
+        .iter()
+        .min_by_key(|e| *e.value())
+        .map(|e| *e.key());
+
+    if let Some(old_ip) = lru_ip {
+        self.port_hits.remove(&old_ip);
+        self.last_seen.remove(&old_ip);
+        self.fast_cooldowns.remove(&old_ip);
+        self.slow_cooldowns.remove(&old_ip);
+    }
+}
+// Actualizam last_seen pentru IP-ul curent
+self.last_seen.insert(ip, now);
+```
+
+### Concepte Rust explicate
+
+#### `!self.port_hits.contains_key(&ip)` — short-circuit evaluation
+
+Verificam mai intai daca IP-ul este nou (`is_new_ip`) **inainte** de a verifica
+limita. Motivul: evictia are sens doar pentru IP-uri **noi** — un IP existent
+nu creste numarul de intrari, deci nu necesita evictie.
+
+In Rust (ca si in C/Java), `&&` evalueaza lazy (short-circuit):
+- Daca `is_new_ip` e `false` → a doua conditie **nu se evalueaza** → fara overhead
+
+#### `.iter().min_by_key(...)` pe DashMap — parcurgere O(n)
+
+```rust
+self.last_seen
+    .iter()                         // iterator peste toate (key, value) perechile
+    .min_by_key(|entry| *entry.value())  // gaseste minimul dupa valoare (Instant)
+    .map(|entry| *entry.key())      // extrage cheia (IpAddr este Copy → * copiaza)
+```
+
+`min_by_key` parcurge **tot** DashMap-ul — O(n). Dar:
+- Se apeleaza **rar**: doar cand `port_hits.len() >= max_tracked_ips` SI soseste IP nou
+- In functionare normala (trafic real, nu flood), limita nu este atinsa
+- Chiar si la flood: O(100.000) operatii atomice DashMap < 1ms pe hardware modern
+
+#### De ce `last_seen` este o structura separata?
+
+Alternativa: pentru a gasi LRU-ul, am putea parcurge `port_hits` si sa luam
+`hits.last().seen_at` pentru fiecare IP. Dezavantaj:
+- Necesita read-lock pe FIECARE shard al `port_hits` in timp ce cautam minimul
+- Conflicte de lock posibile cu thread-ul care scrie in `port_hits`
+
+Cu `last_seen` separat:
+- Scriem in `last_seen` dupa ce eliberam lock-ul pe `port_hits` (blocuri `{}` separate)
+- Citim din `last_seen` pentru LRU fara a bloca `port_hits`
+- Overhead: ~50 bytes per IP in plus (IpAddr + Instant in DashMap)
+
+#### De ce stergem din `fast_cooldowns` si `slow_cooldowns` la evictie?
+
+Daca nu am sterge cooldown-ul unui IP evictat, urmatoarea data cand acel IP
+reapare (dupa ce a fost re-inserat), cooldown-ul sau expirat ar mai fi in memorie.
+Asta nu cauzeaza o eroare — `in_cooldown()` verifica si `elapsed()` — dar
+lasa date "zombie" care se acumuleaza in cooldown maps.
+
+Curatand la evictie: consistenta completa, fara date orfane.
+
+#### Cleanup actualizat pentru `last_seen`
+
+In `cleanup()`, cand un IP este sters din `port_hits` (hits vechi), il stergem
+si din `last_seen`:
+
+```rust
+for ip in &empty_keys {
+    self.port_hits.remove(ip);
+    self.last_seen.remove(ip);  // evitam acumularea de intrari stale
+}
+```
+
+Fara aceasta linie, `last_seen` ar retine intrari pentru IP-uri sterse din
+`port_hits`. La urmatoarea evictie, algoritmul LRU ar putea selecta un IP
+deja sters — `remove()` ar fi no-op, dar am pierde o evictie reala.
+
+### Trade-off: LRU O(n) vs. structuri dedicate
+
+O implementare LRU "perfecta" ar folosi o structura dedicata (ex: `linked_hash_map`,
+crate `lru`) cu O(1) pentru get/insert/evict. Avantaj major la volume mari.
+
+Am ales O(n) scan pentru simplitate si fara dependente noi:
+- La 100.000 IP-uri, `min_by_key` = ~100k comparatii de `Instant` (< 1ms)
+- Evictia apare **cel mult** o data per pachet, si doar dupa atingerea limitei
+- Codul ramane simplu, usor de inteles si de testat
+
+Daca in viitor se doreste O(1) LRU: se poate adauga crate-ul `lru` si inlocui
+`DashMap<IpAddr, Instant>` cu `LruCache<IpAddr, ()>` (thread-safe cu Mutex).
+
 ---
 
 ## TODO — Securitate si hardening
@@ -933,9 +1210,9 @@ Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
 
 ### Critica
 
-- [ ] **Memorie neboundata per IP** (`detector.rs`) — `Vec<PortHit>` creste nelimitat pentru fiecare IP sursa pana la urmatorul cleanup cycle. Un atacator care trimite ~100k pachete/s cu porturi unice poate consuma GB de RAM in 60s. *Mitigare: limita max entries per IP (ex: 10.000, drop oldest).*
+- [x] **Memorie neboundata per IP** (`detector.rs`) — rezolvat. `Vec<PortHit>` este acum limitat la `max_hits_per_ip` intrari (implicit: 10.000). La depasire, cele mai vechi intrari sunt eliminate (FIFO). Vezi sectiunea [Protectie memorie — MAX\_HITS\_PER\_IP](#protectie-memorie--max_hits_per_ip).
 
-- [ ] **IP spoofing -> DashMap flood** (`detector.rs`) — un atacator care spoofs milioane de IP-uri sursa diferite umple `DashMap`-ul fara limita. Cleanup-ul sterge doar entries vechi, nu limiteaza numarul total. *Mitigare: limita globala pe numarul de IP-uri tracked (ex: 100.000, LRU eviction).*
+- [x] **IP spoofing -> DashMap flood** (`detector.rs`) — rezolvat. Cand numarul de IP-uri urmarite atinge `max_tracked_ips` (implicit: 100.000), IP-ul cel mai vechi (LRU) este evictat automat inainte de inserarea celui nou. Vezi sectiunea [Protectie DashMap — MAX\_TRACKED\_IPS si LRU Eviction](#protectie-dashmap--max_tracked_ips-si-lru-eviction).
 
 ### Medie
 
