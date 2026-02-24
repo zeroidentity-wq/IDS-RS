@@ -18,6 +18,7 @@ Detecteaza scanari de retea (Fast Scan si Slow Scan) si trimite alerte catre SIE
 - [Structura proiect](#structura-proiect)
 - [Protectie memorie — MAX\_HITS\_PER\_IP](#protectie-memorie--max_hits_per_ip)
 - [Protectie DashMap — MAX\_TRACKED\_IPS si LRU Eviction](#protectie-dashmap--max_tracked_ips-si-lru-eviction)
+- [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection)
 - [Concepte Rust acoperite](#concepte-rust-acoperite)
 
 ---
@@ -1204,6 +1205,91 @@ Daca in viitor se doreste O(1) LRU: se poate adauga crate-ul `lru` si inlocui
 
 ---
 
+## Securitate — Sanitizare campuri CEF anti-injection
+
+> **SECURITATE ANTI-INJECTION** — Implementat in `src/alerter.rs`, functia `sanitize_cef()`.
+
+### Problema
+
+Mesajul trimis la SIEM este construit cu `format!()` in format **CEF peste Syslog RFC 3164**:
+
+```
+<38>Feb 18 12:06:16 ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0|1001|Fast Port Scan Detected|7|rt=... msg=... cs1=...
+```
+
+Formatul CEF foloseste caractere speciale cu semnificatie structurala:
+
+| Caracter | Rol in CEF | Risc daca neescape |
+|----------|------------|--------------------|
+| `\|` | Separator intre campurile header | Injecteaza camp header fals |
+| `\n` | Separator intre linii syslog | Injecteaza o linie syslog complet noua |
+| `\r` | Carriage return | Trunchieaza linia, injecteaza continut fals |
+| `\\` | Caracter de escape CEF | Interpretat gresit de parser-ul SIEM |
+
+### Vector de atac concret
+
+Un firewall poate include in log-ul sau campuri text controlate indirect de atacator
+(hostname sursa, useragent, etc.). Daca aceste campuri ar fi incluse neescapate in
+mesajul SIEM, un atacator ar putea injecta:
+
+```
+# Input malitios intr-un camp text din log:
+"evil_host\nFeb 18 00:00:00 ids-rs CEF:0|FAKE_VENDOR|Fake|1.0|9999|Breach|10|src=10.0.0.1"
+```
+
+Fara sanitizare, mesajul UDP trimis la SIEM ar contine **doua linii syslog**:
+- Linia 1: alerta reala (trunchiat la `\n`)
+- Linia 2: alerta falsa complet fabricata de atacator
+
+### Solutia implementata
+
+Functia `sanitize_cef(input: &str) -> String` in `alerter.rs` aplica escape-uri
+in urmatoarea ordine (ordinea conteaza — backslash **primul**):
+
+```rust
+fn sanitize_cef(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")   // 1. backslash  ->  \\
+        .replace('|',  "\\|")    // 2. pipe       ->  \|
+        .replace('\n', "\\n")    // 3. newline     ->  \n  (literal)
+        .replace('\r', "\\r")    // 4. CR          ->  \r  (literal)
+}
+```
+
+**De ce backslash primul?** Daca am escapa `|` primul, `\|` devine `\\|` in pasul
+urmator — dublu-escape incorect. Escapand `\` primul, toate secventele de escape
+ulterioare raman corecte.
+
+### Campuri sanitizate
+
+| Camp CEF | Zona mesaj | De ce este sanitizat |
+|----------|-----------|----------------------|
+| `event_name` | Header (`\|` separator) | `\|` neescape = camp header fals |
+| `msg=` | Extensie | `\n`/`\r` = injectie linie syslog; `\|` = confuzie parser |
+| `cs1=` (ScannedPorts) | Extensie | **Nu sanitizat** — porturile sunt `Vec<u16>` → cifre+virgule, imposibil de contiut caractere speciale |
+
+### Campuri sigure prin tip (nu necesita sanitizare)
+
+- `src` / `dst` — `IpAddr` (tip Rust, nu poate contine caractere speciale)
+- `rt` — `i64` timestamp milisecunde
+- `cnt` — `usize` numar intregi
+- `sig_id` — literal static (`"1001"`, `"1002"`)
+
+### Teste unitare
+
+7 teste in `alerter::tests` acopera:
+- escape `\n`, `\r`, `|`, `\\` individual
+- atac combinat (linie syslog injectata)
+- string curat (fara modificari nedorite)
+- backslash urmat de pipe (ordine corecta a escape-urilor)
+
+```bash
+cargo test sanitize
+# running 7 tests ... ok
+```
+
+---
+
 ## TODO — Securitate si hardening
 
 Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
@@ -1224,7 +1310,7 @@ Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
 
 ### Scazuta
 
-- [ ] **SIEM alert injection** (`alerter.rs`) — mesajul SIEM este construit cu `format!()`. Daca in viitor se adauga campuri text din log-ul raw (hostname, etc.), un atacator ar putea injecta mesaje syslog false in SIEM. *Mitigare: sanitizare/escape campuri text inainte de includere in mesajul SIEM.*
+- [x] **SIEM alert injection** (`alerter.rs`) — rezolvat. Campurile string incluse in mesajul CEF (`event_name`, `msg`, `cs1`) sunt sanitizate prin `sanitize_cef()` inainte de trimitere. Sunt escapate `\`, `|`, `\n`, `\r`. Vezi sectiunea [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection).
 
 - [ ] **Debug mode disk fill** — modul debug afiseaza fiecare pachet in stdout. In productie cu volum mare si stdout redirectat la fisier, poate umple disk-ul. *Mitigare: dezactivare automata dupa N minute sau limita de linii.*
 

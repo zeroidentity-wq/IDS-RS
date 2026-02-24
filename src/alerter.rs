@@ -45,6 +45,52 @@ use lettre::{
 use std::time::Duration;
 use tokio::net::UdpSocket;
 
+// =============================================================================
+// SECURITATE — Sanitizare campuri CEF (anti-injection)
+// =============================================================================
+//
+// Un mesaj CEF are doua zone cu caractere speciale diferite:
+//
+//   Header:  CEF:0|Vendor|Product|Ver|SigID|Name|Sev|
+//            Separatorul este '|'. Un '|' neescape intr-un camp header
+//            injecteaza un camp nou fals in SIEM.
+//
+//   Extensii: key1=val1 key2=val2 ...
+//             Separatorul intre perechi este spatiul. Un '=' neescape
+//             intr-o valoare poate falsifica o noua pereche key=value.
+//             Un '\n' sau '\r' poate injecta o linie syslog complet noua.
+//
+// Vector de atac concret:
+//   Daca un log de firewall contine un hostname sau camp text controlat
+//   de atacator, acesta poate include caractere speciale. Exemplu:
+//
+//     hostname: "evil\nFeb 18 00:00:00 ids-rs CEF:0|FAKE|..."
+//
+//   Fara sanitizare, '\n' sparge mesajul in doua linii syslog distincte,
+//   a doua fiind un mesaj CEF complet fals trimis catre SIEM.
+//
+// Escape-uri aplicate (ordinea conteaza — backslash PRIMUL):
+//   '\'  →  '\\'   backslash propriu (trebuie escapeat primul, altfel
+//                  s-ar dubla escape-urile aplicate ulterior)
+//   '|'  →  '\|'   separator header CEF
+//   '\n' →  '\\n'  line injection in syslog / CEF
+//   '\r' →  '\\r'  carriage return injection
+//
+/// Sanitizeaza un camp CEF impotriva injectiei de mesaje false in SIEM.
+///
+/// Aplica escape conform standardului CEF (ArcSight) pentru a preveni
+/// injectia de caractere speciale din campuri controlate extern.
+fn sanitize_cef(input: &str) -> String {
+    // NOTA: ordinea replace-urilor este critica.
+    // Backslash-ul trebuie escapeat primul; altfel secventele '\\n' deja
+    // escapate anterior ar fi dublu-escapate incorect.
+    input
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// Componenta de alertare - trimite notificari catre SIEM si email.
 ///
 /// NOTA RUST: Acest struct DETINE (owns) configurarea. Clonarea s-a facut
@@ -150,7 +196,11 @@ impl Alerter {
         };
 
         // Mesajul campului msg: descriere + lista porturi (vizibila direct in ArcSight Event List).
-        let msg_text = format!("{} | ports: {}", scan_label, port_list_msg);
+        // Sanitizare anti-injection: escape caractere speciale CEF inainte de inserare in mesaj.
+        let msg_text = sanitize_cef(&format!("{} | ports: {}", scan_label, port_list_msg));
+
+        // Sanitizare anti-injection pentru event_name (camp header CEF, separator '|').
+        let event_name_safe = sanitize_cef(event_name);
 
         // Campul dst (Target Address in ArcSight) — IP-ul tinta al scanarii.
         // Prezent doar daca log-ul sursa l-a furnizat.
@@ -169,7 +219,7 @@ impl Alerter {
              msg={msg} cs1Label=ScannedPorts cs1={ports}",
             syslog_ts = syslog_ts,
             sig_id = sig_id,
-            event_name = event_name,
+            event_name = event_name_safe,
             rt_ms = rt_ms,
             src = alert.source_ip,
             dst = dst_field,
@@ -303,5 +353,63 @@ impl Alerter {
 
         display::log_alert_sent("Email", &format!("{}", alert.scan_type));
         Ok(())
+    }
+}
+
+// =============================================================================
+// Teste unitare — sanitize_cef()
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_cef;
+
+    #[test]
+    fn test_sanitize_newline() {
+        assert_eq!(sanitize_cef("text\nfals"), "text\\nfals");
+    }
+
+    #[test]
+    fn test_sanitize_carriage_return() {
+        assert_eq!(sanitize_cef("text\rfals"), "text\\rfals");
+    }
+
+    #[test]
+    fn test_sanitize_pipe() {
+        assert_eq!(sanitize_cef("camp|fals"), "camp\\|fals");
+    }
+
+    #[test]
+    fn test_sanitize_backslash() {
+        assert_eq!(sanitize_cef("c:\\path"), "c:\\\\path");
+    }
+
+    #[test]
+    fn test_sanitize_combinat() {
+        // Atac complet: injectie linie syslog noua cu camp CEF fals
+        let input = "evil\nFeb 18 00:00:00 ids-rs CEF:0|FAKE|Product|1.0|999|Fake|10|";
+        let output = sanitize_cef(input);
+        // Nu trebuie sa contina newline neescape
+        assert!(!output.contains('\n'));
+        // Nu trebuie sa contina pipe neescape (in afara de cele din escape)
+        assert!(!output.contains("CEF:0|FAKE"));
+        // Trebuie sa contina versiunea escapata
+        assert!(output.contains("\\n"));
+        assert!(output.contains("\\|"));
+    }
+
+    #[test]
+    fn test_sanitize_string_curat() {
+        // Textul normal nu trebuie modificat
+        assert_eq!(sanitize_cef("Fast Scan detectat: 20 porturi"), "Fast Scan detectat: 20 porturi");
+    }
+
+    #[test]
+    fn test_sanitize_backslash_inainte_de_pipe() {
+        // Backslash urmat de pipe: trebuie escapeat corect, nu dublu-escapeat
+        // Input: "a\|b" => Output: "a\\\\\\|b"  (backslash si pipe ambele escapate)
+        let input = "a\\|b";
+        let output = sanitize_cef(input);
+        assert_eq!(output, "a\\\\\\|b");
     }
 }
