@@ -196,8 +196,10 @@ impl Alerter {
         };
 
         // Mesajul campului msg: descriere + lista porturi (vizibila direct in ArcSight Event List).
-        // Sanitizare anti-injection: escape caractere speciale CEF inainte de inserare in mesaj.
-        let msg_text = sanitize_cef(&format!("{} | ports: {}", scan_label, port_list_msg));
+        // Sanitizare anti-injection: sanitizam scan_label (date interne, dar cu text dinamic),
+        // NU intregul format — separatorul " | " este al nostru si nu trebuie escapeat.
+        // port_list_msg contine doar cifre si virgule (u16), nu necesita sanitizare.
+        let msg_text = format!("{} | ports: {}", sanitize_cef(&scan_label), port_list_msg);
 
         // Sanitizare anti-injection pentru event_name (camp header CEF, separator '|').
         let event_name_safe = sanitize_cef(event_name);

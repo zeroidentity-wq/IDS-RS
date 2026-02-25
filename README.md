@@ -1265,8 +1265,8 @@ ulterioare raman corecte.
 | Camp CEF | Zona mesaj | De ce este sanitizat |
 |----------|-----------|----------------------|
 | `event_name` | Header (`\|` separator) | `\|` neescape = camp header fals |
-| `msg=` | Extensie | `\n`/`\r` = injectie linie syslog; `\|` = confuzie parser |
-| `cs1=` (ScannedPorts) | Extensie | **Nu sanitizat** — porturile sunt `Vec<u16>` → cifre+virgule, imposibil de contiut caractere speciale |
+| `scan_label` (parte din `msg=`) | Extensie | `\n`/`\r` = injectie linie syslog. **Separatorul ` \| ports:` este al nostru si nu se sanitizeaza** — altfel apare `\|` in ArcSight |
+| `cs1=` (ScannedPorts) | Extensie | **Nu sanitizat** — porturile sunt `Vec<u16>` → cifre+virgule, imposibil sa contina caractere speciale |
 
 ### Campuri sigure prin tip (nu necesita sanitizare)
 
@@ -1310,7 +1310,7 @@ Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
 
 ### Scazuta
 
-- [x] **SIEM alert injection** (`alerter.rs`) — rezolvat. Campurile string incluse in mesajul CEF (`event_name`, `msg`, `cs1`) sunt sanitizate prin `sanitize_cef()` inainte de trimitere. Sunt escapate `\`, `|`, `\n`, `\r`. Vezi sectiunea [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection).
+- [x] **SIEM alert injection** (`alerter.rs`) — rezolvat. Functia `sanitize_cef()` escapeaza `\`, `|`, `\n`, `\r` pe campurile cu text dinamic: `event_name` (header CEF) si `scan_label` (textul descriptiv din `msg=`). Separatoarele proprii ale mesajului si listele de porturi (`u16`) nu sunt sanitizate. Vezi sectiunea [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection).
 
 - [ ] **Debug mode disk fill** — modul debug afiseaza fiecare pachet in stdout. In productie cu volum mare si stdout redirectat la fisier, poate umple disk-ul. *Mitigare: dezactivare automata dupa N minute sau limita de linii.*
 
