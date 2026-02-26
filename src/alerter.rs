@@ -39,8 +39,9 @@ use crate::detector::{Alert, ScanType};
 use crate::display;
 use anyhow::{Context, Result};
 use lettre::{
-    transport::smtp::authentication::Credentials, AsyncSmtpTransport, AsyncTransport, Message,
-    Tokio1Executor,
+    message::header::ContentType,
+    transport::smtp::authentication::Credentials,
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -89,6 +90,134 @@ fn sanitize_cef(input: &str) -> String {
         .replace('|', "\\|")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+/// Construieste body-ul HTML al email-ului de alerta.
+///
+/// Folosim template cu placeholder-e `__VAR__` in loc de `format!` pentru a evita
+/// escaping-ul acoladelor CSS (`{` → `{{`). Textul din `email_footer` este HTML-escapeat
+/// pentru a preveni injectia de tag-uri din valori controlate extern.
+fn build_html_body(
+    scan_type: &str,
+    severity: &str,
+    src_ip: &str,
+    dst_ip: &str,
+    port_count: usize,
+    timestamp: &str,
+    ports: &str,
+    footer: &str,
+) -> String {
+    // HTML-escape pentru campuri care pot contine caractere speciale (footer ASCII art).
+    let footer_safe = footer
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+
+    let template = r#"<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, Helvetica, sans-serif; background: #f0f2f5; padding: 20px; }
+  .wrap { max-width: 620px; margin: 0 auto; background: #fff; border-radius: 6px;
+          overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.12); }
+  /* HEADER */
+  .hdr { background: linear-gradient(135deg, #c0392b 0%, #96281b 100%);
+         color: #fff; padding: 24px 28px; }
+  .hdr-label { font-size: 10px; text-transform: uppercase; letter-spacing: 2px;
+               opacity: 0.7; margin-bottom: 10px; }
+  .hdr h1 { font-size: 21px; font-weight: 700; margin-bottom: 12px; }
+  .badge { display: inline-block; background: rgba(255,255,255,0.18);
+           color: #fff; padding: 3px 11px; border-radius: 12px;
+           font-size: 11px; font-weight: bold; margin-right: 6px; }
+  /* SECTIUNI */
+  .sec { padding: 18px 28px; border-bottom: 1px solid #ecf0f1; }
+  .sec-title { font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px;
+               color: #95a5a6; font-weight: bold; margin-bottom: 12px; }
+  /* TABEL DETALII */
+  .tbl { width: 100%; border-collapse: collapse; }
+  .tbl td { padding: 7px 0; border-bottom: 1px solid #f4f6f8;
+            font-size: 13px; vertical-align: top; }
+  .tbl td:first-child { color: #7f8c8d; width: 155px; }
+  .tbl td:last-child { color: #2c3e50; font-weight: 600; }
+  .tbl tr:last-child td { border-bottom: none; }
+  /* PORTURI */
+  .ports-box { background: #fdf3f3; border-left: 4px solid #c0392b;
+               padding: 11px 14px; font-family: 'Courier New', monospace;
+               font-size: 12px; color: #2c3e50; line-height: 1.7;
+               word-break: break-all; border-radius: 0 4px 4px 0; }
+  /* COMENZI */
+  .cmd-box { background: #1a2332; border-radius: 5px; padding: 16px 18px; }
+  .cmd-comment { color: #5d7a99; font-family: 'Courier New', monospace;
+                 font-size: 11.5px; display: block; margin-top: 12px; }
+  .cmd-comment:first-child { margin-top: 0; }
+  .cmd-line { color: #a8d4a8; font-family: 'Courier New', monospace;
+              font-size: 12.5px; display: block; margin-top: 4px; word-break: break-all; }
+  /* FOOTER */
+  .footer { background: #1e2a38; padding: 22px 28px; text-align: center; }
+  .footer pre { color: #5d8aa8; font-size: 10px; font-family: 'Courier New', monospace;
+                line-height: 1.5; margin-bottom: 14px; display: inline-block;
+                text-align: left; }
+  .footer p { color: #5d6d7e; font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hdr">
+    <div class="hdr-label">IDS-RS &mdash; Intrusion Detection System</div>
+    <h1>&#x1F534; ALERTA SCANARE RETEA</h1>
+    <span class="badge">__SCAN_TYPE__</span>
+    <span class="badge">Severitate: __SEVERITY__</span>
+  </div>
+
+  <div class="sec">
+    <div class="sec-title">Detalii eveniment</div>
+    <table class="tbl">
+      <tr><td>IP Sursa</td><td>__SRC_IP__</td></tr>
+      <tr><td>IP Destinatie</td><td>__DST_IP__</td></tr>
+      <tr><td>Porturi scanate</td><td>__PORT_COUNT__</td></tr>
+      <tr><td>Timestamp</td><td>__TIMESTAMP__</td></tr>
+    </table>
+  </div>
+
+  <div class="sec">
+    <div class="sec-title">Porturi detectate</div>
+    <div class="ports-box">__PORTS__</div>
+  </div>
+
+  <div class="sec" style="border-bottom: none;">
+    <div class="sec-title">Comenzi rapide</div>
+    <div class="cmd-box">
+      <span class="cmd-comment"># Log-uri firewall pentru acest IP (ultima ora):</span>
+      <span class="cmd-line">log show -s __SRC_IP__ -t &quot;last 1 hour&quot;</span>
+      <span class="cmd-comment"># Conexiuni active de la acest IP:</span>
+      <span class="cmd-line">fw tab -t connections -s | grep __SRC_IP__</span>
+      <span class="cmd-comment"># Blocare temporara cu SAM:</span>
+      <span class="cmd-line">fw sam -t 3600 -I src __SRC_IP__</span>
+    </div>
+  </div>
+
+  <div class="footer">
+    <pre>__FOOTER__</pre>
+    <p>Generat automat de IDS-RS &nbsp;|&nbsp; Nu raspundeti la acest email</p>
+  </div>
+
+</div>
+</body>
+</html>"#;
+
+    template
+        .replace("__SCAN_TYPE__", scan_type)
+        .replace("__SEVERITY__", severity)
+        .replace("__SRC_IP__", src_ip)
+        .replace("__DST_IP__", dst_ip)
+        .replace("__PORT_COUNT__", &port_count.to_string())
+        .replace("__TIMESTAMP__", timestamp)
+        .replace("__PORTS__", ports)
+        .replace("__FOOTER__", &footer_safe)
 }
 
 /// Componenta de alertare - trimite notificari catre SIEM si email.
@@ -265,7 +394,7 @@ impl Alerter {
         let port_count = alert.unique_ports.len();
 
         let subject = format!(
-            "[!!] ALERTA IDS-RS -- {} -- {} -- {} porturi scanate",
+            "\u{1F534} [{}][SCANARE RETEA] IDS-RS {} {} porturi",
             alert.scan_type, alert.source_ip, port_count
         );
 
@@ -295,49 +424,15 @@ impl Alerter {
 
         let timestamp = alert.timestamp.format("%Y-%m-%d %H:%M:%S");
 
-        let body = format!(
-            "==========================================================\n\
-             \x20   ALERTA DE SECURITATE -- IDS-RS\n\
-             ==========================================================\n\
-             \n\
-             \x20 Tip scanare:    {scan_type}\n\
-             \x20 Severitate:     {severity}\n\
-             \n\
-             ----------------------------------------------------------\n\
-             \x20 DETALII EVENIMENT\n\
-             ----------------------------------------------------------\n\
-             \n\
-             \x20 IP sursa:             {src_ip}\n\
-             \x20 IP destinatie:        {dst_ip}\n\
-             \x20 Porturi scanate:      {port_count}\n\
-             \x20 Timestamp:            {ts}\n\
-             \n\
-             \x20 Porturi:              {ports}\n\
-             \n\
-             ----------------------------------------------------------\n\
-             \x20 COMENZI UTILE (quick check)\n\
-             ----------------------------------------------------------\n\
-             \n\
-             \x20 # Log-uri firewall Gaia pentru acest IP (ultima ora):\n\
-             \x20 log show -s {src_ip} -t \"last 1 hour\"\n\
-             \n\
-             \x20 # Conexiuni active de la acest IP:\n\
-             \x20 fw tab -t connections -s | grep {src_ip}\n\
-             \n\
-             \x20 # Blocare temporara cu SAM (Suspicious Activity Monitoring):\n\
-             \x20 fw sam -t 3600 -I src {src_ip}\n\
-             \n\
-             ==========================================================\n\
-             {footer}\n\
-             ==========================================================",
-            scan_type = alert.scan_type,
-            severity = severity,
-            src_ip = alert.source_ip,
-            dst_ip = dest_ip_display,
-            port_count = port_count,
-            ts = timestamp,
-            ports = port_list_display,
-            footer = cfg.email_footer,
+        let html_body = build_html_body(
+            &alert.scan_type.to_string(),
+            severity,
+            &alert.source_ip.to_string(),
+            &dest_ip_display,
+            port_count,
+            &timestamp.to_string(),
+            &port_list_display,
+            &cfg.email_footer,
         );
 
         // Construim transportul SMTP async.
@@ -392,7 +487,8 @@ impl Alerter {
                     .parse()
                     .with_context(|| format!("Adresa destinatar invalida: {}", recipient))?)
                 .subject(&subject)
-                .body(body.clone())
+                .header(ContentType::TEXT_HTML)
+                .body(html_body.clone())
                 .context("Nu pot construi mesajul email")?;
 
             mailer
