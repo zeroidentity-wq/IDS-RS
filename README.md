@@ -19,6 +19,7 @@ Detecteaza scanari de retea (Fast Scan si Slow Scan) si trimite alerte catre SIE
 - [Protectie memorie — MAX\_HITS\_PER\_IP](#protectie-memorie--max_hits_per_ip)
 - [Protectie DashMap — MAX\_TRACKED\_IPS si LRU Eviction](#protectie-dashmap--max_tracked_ips-si-lru-eviction)
 - [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection)
+- [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket)
 - [Concepte Rust acoperite](#concepte-rust-acoperite)
 
 ---
@@ -148,6 +149,8 @@ Constrangerile validate:
 | `alerting.email.smtp_server` (daca enabled) | nenul |
 | `alerting.email.from` (daca enabled) | nenul |
 | `alerting.email.to` (daca enabled) | cel putin un destinatar |
+| `network.udp_burst_size` (daca `udp_rate_limit` > 0) | ≥ 1 |
+| `network.udp_burst_size` (daca `udp_rate_limit` > 0) | ≥ `udp_rate_limit` (warning) |
 
 ```toml
 [network]
@@ -1290,6 +1293,77 @@ cargo test sanitize
 
 ---
 
+## Rate Limiting UDP — Token Bucket
+
+> **PROTECTIE CPU** — Implementat in `src/main.rs`, struct `TokenBucket`.
+
+### Problema
+
+Main loop-ul proceseaza **fiecare pachet UDP** primit pe socket. Un flood UDP (pachete false, amplificare DNS/NTP, sau un scanner agresiv) poate satura CPU-ul IDS-ului, cauzand:
+
+- Pierderea alertelor reale (detectorul nu mai proceseaza la timp)
+- Cresterea latentei de procesare
+- Consum excesiv de memorie (acumulare de PortHit-uri)
+
+### Solutia: Token Bucket
+
+**Analogie:** Imaginati-va un paznic la intrarea intr-un club care are un bol cu jetoane.
+Fiecare persoana (pachet UDP) care vrea sa intre trebuie sa ia un jeton din bol.
+Daca bolul are jetoane — intri. Daca e gol — esti respins. Cineva reumple bolul constant
+cu un numar fix de jetoane pe secunda (`udp_rate_limit`), dar bolul nu poate depasi
+capacitatea maxima (`udp_burst_size`).
+
+- **Trafic normal** (500 pachete/sec): bolul e mereu plin, totul trece. Nimeni nu simte nimic.
+- **Burst legitim** (8.000 pachete intr-o secunda): bolul era plin cu 10.000, deci toate trec. Bolul scade la 2.000, dar se reumple treptat.
+- **Flood/atac** (100.000 pachete/sec): primele 10.000 trec (bolul era plin), apoi se proceseaza doar ~5.000/sec (rata de reumplere). Restul sunt aruncate — CPU-ul e protejat.
+
+Daca `udp_rate_limit = 0` in config — paznicul nu exista, totul trece ca inainte.
+
+Algoritmul **Token Bucket** permite burst-uri scurte legitime dar limiteaza rata medie:
+
+```
+   refill_rate (tokens/sec)
+         |
+         v
+  ┌──────────────┐
+  │  Token Bucket │  max_tokens = burst_size
+  │  ████████░░░░ │
+  └──────┬───────┘
+         │ consume 1 token per pachet
+         v
+   [accept]  sau  [drop daca bucket gol]
+```
+
+1. Bucket-ul porneste plin (`burst_size` tokeni).
+2. La fiecare secunda se adauga `refill_rate` tokeni (nu depaseste `max_tokens`).
+3. Fiecare pachet procesat consuma 1 token.
+4. Daca bucket-ul e gol → pachetul este dropat silentios.
+5. La fiecare 30 secunde, IDS-ul afiseaza cate pachete au fost dropate.
+
+### Configurare
+
+```toml
+[network]
+# Pachete acceptate per secunda (0 = dezactivat, fara limita).
+udp_rate_limit = 5000
+# Capacitate burst: permite varfuri scurte peste rata medie.
+udp_burst_size = 10000
+```
+
+| Parametru | Efect |
+|-----------|-------|
+| `udp_rate_limit = 0` | Rate limiting dezactivat (backward compatible) |
+| `udp_rate_limit = 5000` | Maxim 5.000 pachete/secunda in medie |
+| `udp_burst_size = 10000` | Permite burst de 10.000 pachete imediat |
+
+### Comportament
+
+- **Fara rate limiting** (`udp_rate_limit = 0`): comportament identic cu versiunile anterioare.
+- **Cu rate limiting activ**: la pornire se afiseaza rata si burst-ul configurat. Periodic (la 30s), daca au existat drop-uri, se afiseaza numarul de pachete dropate cu badge-ul `[ RATE ]`.
+- **Validare config**: daca `udp_rate_limit > 0` si `udp_burst_size = 0`, configuratia este respinsa. Daca `udp_burst_size < udp_rate_limit`, se emite un warning (burst prea mic pentru a absorbi varfuri).
+
+---
+
 ## TODO — Securitate si hardening
 
 Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
@@ -1314,7 +1388,7 @@ Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
 
 - [ ] **Debug mode disk fill** — modul debug afiseaza fiecare pachet in stdout. In productie cu volum mare si stdout redirectat la fisier, poate umple disk-ul. *Mitigare: dezactivare automata dupa N minute sau limita de linii.*
 
-- [ ] **Lipsa rate-limiting pe receptie UDP** (`main.rs`) — main loop-ul proceseaza pachete fara limita. Un flood UDP poate satura CPU-ul. *Mitigare: token bucket / rate limiter pe receptie.*
+- [x] **Rate limiting UDP** (`main.rs`) — rezolvat. Token bucket limiteaza rata medie de procesare la `udp_rate_limit` pachete/secunda cu burst de `udp_burst_size`. Dezactivat implicit (0 = fara limita). Vezi sectiunea [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket).
 
 ---
 

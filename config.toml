@@ -13,6 +13,11 @@ listen_port = 5555
 parser = "gaia"
 # Mod debug: afiseaza fiecare pachet primit cu validare parsare.
 # debug = true
+# Rate limiting UDP: protejeaza CPU-ul impotriva flood-ului de pachete.
+# udp_rate_limit = pachete acceptate per secunda (0 = dezactivat).
+# udp_burst_size = capacitate burst (permite varfuri scurte legitime).
+udp_rate_limit = 5000
+udp_burst_size = 20000
 
 # -----------------------------------------------------------------------------
 # Praguri de detectie pentru scanari de retea

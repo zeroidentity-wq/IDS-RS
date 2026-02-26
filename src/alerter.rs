@@ -275,7 +275,7 @@ impl Alerter {
             .join(", ");
 
         let body = format!(
-            "ALERTA DE SECURITATE - IDS-RS\n\
+            "ALERTA DE SECURITATE - IDS-S5B2\n\
              \n\
              Tip scanare:           {scan_type}\n\
              IP sursa:              {ip}\n\
@@ -283,7 +283,7 @@ impl Alerter {
              Lista porturi:         {ports}\n\
              Timestamp:             {ts}\n\
              \n\
-             Aceasta alerta a fost generata automat de IDS-RS.\n\
+             Aceasta alerta a fost generata automat de IDS-S5B2.\n\
              Verificati activitatea IP-ului sursa in firewall si SIEM.",
             scan_type = alert.scan_type,
             ip = alert.source_ip,

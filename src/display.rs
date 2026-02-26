@@ -297,6 +297,20 @@ pub fn log_stats(tracked_ips: usize, cleaned_ips: usize) {
     );
 }
 
+/// Afiseaza numarul de pachete UDP dropate de rate limiter (periodic).
+///
+/// Format: [timestamp] [ RATE ] 1234 pachete UDP dropate (rate limit)
+/// Badge galben — vizibilitate medie, nu este o eroare ci protectie activa.
+pub fn log_rate_limited(dropped: u64) {
+    let ts = timestamp();
+    println!(
+        "{} {} {} pachete UDP dropate (rate limit)",
+        ts.dimmed(),
+        " RATE ".on_yellow().black().bold(),
+        dropped.to_string().white().bold()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Functii de debug/diagnostic - afiseaza detalii despre parsare
 // ---------------------------------------------------------------------------

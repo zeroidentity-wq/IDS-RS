@@ -58,8 +58,91 @@ use alerter::Alerter;
 use config::AppConfig;
 use detector::Detector;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
+
+// =============================================================================
+// TokenBucket — Rate Limiter pentru receptie UDP
+// =============================================================================
+//
+// CONCEPTE RUST EXPLICATE:
+//
+// Algoritmul Token Bucket:
+//   - Bucket-ul contine un numar de "tokeni" (capacitate = burst size).
+//   - La fiecare secunda, se adauga `refill_rate` tokeni (= rata configurata).
+//   - Fiecare pachet consumat scoate 1 token din bucket.
+//   - Daca bucket-ul e gol (tokens <= 0), pachetul este dropat.
+//   - Bucket-ul nu poate depasi `max_tokens` (= burst size).
+//
+// Aceasta permite burst-uri scurte (ex: 10.000 pachete imediat) dar limiteaza
+// rata medie la `refill_rate` pachete/secunda pe termen lung.
+//
+// NOTA RUST - f64 pentru tokeni:
+// Folosim `f64` (nu u64) deoarece refill-ul se calculeaza proportional cu
+// timpul scurs. Exemplu: daca au trecut 0.5 secunde si rata e 1000/s,
+// adaugam 500.0 tokeni. Cu u64 am pierde precizia fractiunilor.
+//
+// =============================================================================
+
+struct TokenBucket {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64,      // tokeni adaugati per secunda
+    last_refill: Instant,
+    dropped_count: u64,    // contor pachete dropate (pentru afisare periodica)
+}
+
+impl TokenBucket {
+    /// Creeaza un nou TokenBucket cu bucket-ul plin.
+    ///
+    /// `rate` = pachete acceptate per secunda (refill rate).
+    /// `burst` = capacitate maxima bucket (permite varfuri scurte).
+    fn new(rate: u64, burst: u64) -> Self {
+        Self {
+            tokens: burst as f64,
+            max_tokens: burst as f64,
+            refill_rate: rate as f64,
+            last_refill: Instant::now(),
+            dropped_count: 0,
+        }
+    }
+
+    /// Incearca sa consume un token (= accepta un pachet).
+    ///
+    /// Recalculeaza tokenii pe baza timpului scurs de la ultimul refill,
+    /// apoi consuma 1 token. Returneaza `false` daca bucket-ul e gol.
+    ///
+    /// NOTA RUST - `Instant::elapsed()`:
+    /// Returneaza `Duration` de la momentul creat pana la acum (monotonic clock).
+    /// `.as_secs_f64()` converteste la secunde cu precizie sub-secunda.
+    fn try_consume(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+
+        // Refill: adaugam tokeni proportional cu timpul scurs.
+        // `.min(self.max_tokens)` impiedica depasirea capacitatii burst.
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.max_tokens);
+
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            self.dropped_count += 1;
+            false
+        }
+    }
+
+    /// Returneaza si reseteaza contorul de pachete dropate.
+    ///
+    /// Folosit pentru afisarea periodica a statisticilor de rate limiting.
+    /// `std::mem::replace` schimba valoarea si returneaza cea veche — atomic
+    /// din perspectiva ownership-ului (nu avem nevoie de Mutex deoarece
+    /// TokenBucket nu este partajat intre thread-uri).
+    fn take_dropped_count(&mut self) -> u64 {
+        std::mem::replace(&mut self.dropped_count, 0)
+    }
+}
 
 /// Punctul de intrare al aplicatiei.
 ///
@@ -227,7 +310,41 @@ async fn main() -> anyhow::Result<()> {
     display::print_separator();
 
     // =========================================================================
-    // 7. MAIN LOOP - Receptie si Procesare Log-uri
+    // 7. RATE LIMITER (Token Bucket, optional)
+    // =========================================================================
+    //
+    // Daca `udp_rate_limit > 0`, cream un TokenBucket care limiteaza
+    // numarul de pachete procesate per secunda. Daca `udp_rate_limit == 0`,
+    // rate limiter-ul este dezactivat (backward compatible).
+    //
+    // NOTA RUST - Option<T>:
+    // `Option<TokenBucket>` = fie `Some(bucket)` fie `None`.
+    // Folosim `if let Some(ref mut limiter) = rate_limiter` in loop
+    // pentru a accesa bucket-ul doar cand exista.
+    //
+    let mut rate_limiter: Option<TokenBucket> = if config.network.udp_rate_limit > 0 {
+        display::log_info(&format!(
+            "Rate limiting UDP activ: {} pachete/s, burst {}",
+            config.network.udp_rate_limit, config.network.udp_burst_size
+        ));
+        Some(TokenBucket::new(
+            config.network.udp_rate_limit,
+            config.network.udp_burst_size,
+        ))
+    } else {
+        None
+    };
+
+    // Interval pentru afisarea periodica a statisticilor de rate limiting.
+    // Folosim `tokio::time::interval` cu 30 secunde — suficient de rar
+    // pentru a nu polua output-ul, dar suficient de des pentru vizibilitate.
+    let mut rate_limit_tick = tokio::time::interval(Duration::from_secs(30));
+    // Primul tick al `interval()` e imediat — il consumam ca sa nu afisam
+    // statistici goale la startup.
+    rate_limit_tick.tick().await;
+
+    // =========================================================================
+    // 8. MAIN LOOP - Receptie si Procesare Log-uri
     // =========================================================================
     //
     // NOTA RUST - BUFFER pe STACK:
@@ -265,10 +382,28 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
 
+            // Branch: Afisare periodica statistici rate limiting (la fiecare 30s).
+            _ = rate_limit_tick.tick() => {
+                if let Some(ref mut limiter) = rate_limiter {
+                    let dropped = limiter.take_dropped_count();
+                    if dropped > 0 {
+                        display::log_rate_limited(dropped);
+                    }
+                }
+            }
+
             // Branch: Pachet UDP primit.
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, _addr)) => {
+                        // Rate limiting: verificam daca avem token disponibil.
+                        // Daca bucket-ul e gol, dropam pachetul silentios.
+                        if let Some(ref mut limiter) = rate_limiter {
+                            if !limiter.try_consume() {
+                                continue;
+                            }
+                        }
+
                         // NOTA RUST - String::from_utf8_lossy:
                         //
                         // Converteste bytes in text UTF-8.

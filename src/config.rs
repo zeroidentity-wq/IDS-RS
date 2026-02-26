@@ -62,6 +62,20 @@ pub struct NetworkConfig {
     pub parser: String,
     #[serde(default)]
     pub debug: bool,
+
+    /// Rate limit UDP: pachete acceptate per secunda. 0 = dezactivat.
+    /// Retrocompatibil: daca lipseste din config.toml, serde pune 0 (dezactivat).
+    #[serde(default)]
+    pub udp_rate_limit: u64,
+
+    /// Capacitate burst token bucket. Permite varfuri scurte peste rata medie.
+    /// Implicit: 10.000 pachete.
+    #[serde(default = "default_udp_burst_size")]
+    pub udp_burst_size: u64,
+}
+
+fn default_udp_burst_size() -> u64 {
+    10_000
 }
 
 /// Configurare detectie - contine sub-structuri pentru fiecare tip de scan.
@@ -225,6 +239,22 @@ impl AppConfig {
             errors.push(format!(
                 "network.parser = {:?} este invalid. Valori acceptate: \"gaia\", \"cef\"",
                 self.network.parser
+            ));
+        }
+        if self.network.udp_rate_limit > 0 && self.network.udp_burst_size == 0 {
+            errors.push(
+                "network.udp_burst_size = 0 cand udp_rate_limit > 0: burst_size trebuie sa fie cel putin 1"
+                    .to_string(),
+            );
+        }
+        if self.network.udp_rate_limit > 0
+            && self.network.udp_burst_size > 0
+            && self.network.udp_burst_size < self.network.udp_rate_limit
+        {
+            errors.push(format!(
+                "network.udp_burst_size ({}) < udp_rate_limit ({}): burst mai mic decat rata \
+                 medie — se pierd pachete la orice varf scurt de trafic",
+                self.network.udp_burst_size, self.network.udp_rate_limit
             ));
         }
 
