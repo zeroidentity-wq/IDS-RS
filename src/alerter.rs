@@ -188,21 +188,27 @@ fn build_html_body(
     <div class="ports-box">__PORTS__</div>
   </div>
 
-  <div class="sec" style="border-bottom: none;">
-    <div class="sec-title">Comenzi rapide</div>
-    <div class="cmd-box">
-      <span class="cmd-comment"># Log-uri firewall pentru acest IP (ultima ora):</span>
-      <span class="cmd-line">log show -s __SRC_IP__ -t &quot;last 1 hour&quot;</span>
-      <span class="cmd-comment"># Conexiuni active de la acest IP:</span>
-      <span class="cmd-line">fw tab -t connections -s | grep __SRC_IP__</span>
-      <span class="cmd-comment"># Blocare temporara cu SAM:</span>
-      <span class="cmd-line">fw sam -t 3600 -I src __SRC_IP__</span>
-    </div>
-  </div>
-
   <div class="footer">
     <pre>__FOOTER__</pre>
     <p>Generat automat de IDS-RS &nbsp;|&nbsp; Nu raspundeti la acest email</p>
+  </div>
+
+  <div class="sec" style="border-bottom: none;">
+    <div class="sec-title">Comenzi rapide &mdash; RHEL 9.6</div>
+    <div class="cmd-box">
+      <span class="cmd-comment"># Conexiuni active de la/catre acest IP:</span>
+      <span class="cmd-line">ss -tnp | grep __SRC_IP__</span>
+      <span class="cmd-comment"># Cautare in log-urile de securitate si sistem:</span>
+      <span class="cmd-line">grep __SRC_IP__ /var/log/secure /var/log/messages 2>/dev/null</span>
+      <span class="cmd-comment"># Cautare in journal (ultimele 200 linii):</span>
+      <span class="cmd-line">journalctl -n 200 --no-pager | grep __SRC_IP__</span>
+      <span class="cmd-comment"># Captura live trafic de la acest IP (primele 30 pachete):</span>
+      <span class="cmd-line">tcpdump -i any host __SRC_IP__ -n -c 30</span>
+      <span class="cmd-comment"># Blocare imediata cu firewalld (persistenta):</span>
+      <span class="cmd-line">firewall-cmd --add-rich-rule='rule family="ipv4" source address="__SRC_IP__" drop' --permanent &amp;&amp; firewall-cmd --reload</span>
+      <span class="cmd-comment"># Verificare daca IP-ul este activ in retea (ARP):</span>
+      <span class="cmd-line">ip neigh show | grep __SRC_IP__</span>
+    </div>
   </div>
 
 </div>
