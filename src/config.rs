@@ -162,6 +162,24 @@ pub struct EmailConfig {
     pub to: Vec<String>,
     pub username: String,
     pub password: String,
+
+    /// Footer personalizabil pentru email-urile de alerta.
+    /// Poate contine banner ASCII al echipei, disclaimer, etc.
+    /// Afisat intre separatoarele ========== din footer-ul email-ului.
+    #[serde(default = "default_email_footer")]
+    pub email_footer: String,
+}
+
+fn default_email_footer() -> String {
+    "\
+       ____  ____  ____  ____\n\
+      / ___|| ___|| __ )|___ \\\n\
+      \\___ \\|___ \\|  _ \\  __) |\n\
+       ___) |___) | |_) |/ __/\n\
+      |____/|____/|____/|_____|\n\
+\n\
+  Generat automat de S5B2 | Nu raspundeti la acest email"
+        .to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

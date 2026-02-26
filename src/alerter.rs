@@ -262,34 +262,82 @@ impl Alerter {
     async fn send_email_alert(&self, alert: &Alert) -> Result<()> {
         let cfg = &self.config.email;
 
+        let port_count = alert.unique_ports.len();
+
         let subject = format!(
-            "[IDS-RS] {} detectat de la {}",
-            alert.scan_type, alert.source_ip
+            "[!!] ALERTA IDS-RS -- {} -- {} -- {} porturi scanate",
+            alert.scan_type, alert.source_ip, port_count
         );
 
-        let port_list: String = alert
-            .unique_ports
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        // Lista porturi pentru body — maxim 30, restul sumarizate.
+        let port_list_display = if port_count <= 30 {
+            alert
+                .unique_ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else {
+            let first_30: String = alert.unique_ports[..30]
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{} + {} more", first_30, port_count - 30)
+        };
+
+        let severity = "RIDICATA";
+
+        let dest_ip_display = match alert.dest_ip {
+            Some(ip) => ip.to_string(),
+            None => "N/A".to_string(),
+        };
+
+        let timestamp = alert.timestamp.format("%Y-%m-%d %H:%M:%S");
 
         let body = format!(
-            "ALERTA DE SECURITATE - IDS-S5B2\n\
+            "==========================================================\n\
+             \x20   ALERTA DE SECURITATE -- IDS-RS\n\
+             ==========================================================\n\
              \n\
-             Tip scanare:           {scan_type}\n\
-             IP sursa:              {ip}\n\
-             Porturi unice scanate: {count}\n\
-             Lista porturi:         {ports}\n\
-             Timestamp:             {ts}\n\
+             \x20 Tip scanare:    {scan_type}\n\
+             \x20 Severitate:     {severity}\n\
              \n\
-             Aceasta alerta a fost generata automat de IDS-S5B2.\n\
-             Verificati activitatea IP-ului sursa in firewall si SIEM.",
+             ----------------------------------------------------------\n\
+             \x20 DETALII EVENIMENT\n\
+             ----------------------------------------------------------\n\
+             \n\
+             \x20 IP sursa:             {src_ip}\n\
+             \x20 IP destinatie:        {dst_ip}\n\
+             \x20 Porturi scanate:      {port_count}\n\
+             \x20 Timestamp:            {ts}\n\
+             \n\
+             \x20 Porturi:              {ports}\n\
+             \n\
+             ----------------------------------------------------------\n\
+             \x20 COMENZI UTILE (quick check)\n\
+             ----------------------------------------------------------\n\
+             \n\
+             \x20 # Log-uri firewall Gaia pentru acest IP (ultima ora):\n\
+             \x20 log show -s {src_ip} -t \"last 1 hour\"\n\
+             \n\
+             \x20 # Conexiuni active de la acest IP:\n\
+             \x20 fw tab -t connections -s | grep {src_ip}\n\
+             \n\
+             \x20 # Blocare temporara cu SAM (Suspicious Activity Monitoring):\n\
+             \x20 fw sam -t 3600 -I src {src_ip}\n\
+             \n\
+             ==========================================================\n\
+             {footer}\n\
+             ==========================================================",
             scan_type = alert.scan_type,
-            ip = alert.source_ip,
-            count = alert.unique_ports.len(),
-            ports = port_list,
-            ts = alert.timestamp.format("%Y-%m-%d %H:%M:%S"),
+            severity = severity,
+            src_ip = alert.source_ip,
+            dst_ip = dest_ip_display,
+            port_count = port_count,
+            ts = timestamp,
+            ports = port_list_display,
+            footer = cfg.email_footer,
         );
 
         // Construim transportul SMTP async.

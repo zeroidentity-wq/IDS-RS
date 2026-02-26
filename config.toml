@@ -74,6 +74,17 @@ from = "ids-rs@example.com"
 to = ["it-security@example.com"]
 username = ""
 password = ""
+# Footer personalizabil pentru email-urile de alerta.
+# Poate contine banner ASCII al echipei, disclaimer, etc.
+# Folositi """ pentru text multi-linie in TOML.
+email_footer = """
+       ____  ____  ____  ____
+      / ___|| ___|| __ )|___ \\
+      \\___ \\|___ \\|  _ \\  __) |
+       ___) |___) | |_) |/ __/
+      |____/|____/|____/|_____|
+
+  Generat automat de S5B2"""
 
 # -----------------------------------------------------------------------------
 # Mentenanta memorie
