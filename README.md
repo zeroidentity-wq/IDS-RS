@@ -1,7 +1,7 @@
 # IDS-RS — Intrusion Detection System
 
 Sistem de detectie a intruziunilor bazat pe analiza log-urilor de firewall, scris in Rust.
-Detecteaza scanari de retea (Fast Scan si Slow Scan) si trimite alerte catre SIEM si email.
+Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite alerte catre SIEM si email.
 
 ---
 
@@ -40,6 +40,7 @@ Detecteaza scanari de retea (Fast Scan si Slow Scan) si trimite alerte catre SIE
                           | DashMap per IP    |
                           | Fast Scan check   |
                           | Slow Scan check   |
+                          | Accept Scan check |
                           +--------+----------+
                                    |
                             Alerta detectata?
@@ -56,8 +57,8 @@ Detecteaza scanari de retea (Fast Scan si Slow Scan) si trimite alerte catre SIE
 1. Firewall-ul trimite log-uri syslog pe UDP catre portul configurat (default `5555`)
 2. Pachetele UDP sunt receptionate asincron (`tokio`) si splituite pe newline (buffer coalescing)
 3. Fiecare linie este parsata cu parser-ul activ (`gaia` sau `cef`), selectat din `config.toml`
-4. Evenimentele de tip `drop` sunt inregistrate in detectorul thread-safe (`DashMap`)
-5. Daca un IP depaseste pragul de porturi unice intr-o fereastra de timp, se genereaza o alerta
+4. Evenimentele de tip `drop` si `accept` sunt inregistrate in detectorul thread-safe (`DashMap`)
+5. Daca un IP depaseste pragul de porturi unice intr-o fereastra de timp, se genereaza o alerta (Fast/Slow/Accept Scan)
 6. Alerta este afisata in terminal (colorat ANSI) si trimisa catre SIEM / email
 7. Un task de cleanup periodic sterge datele vechi din memorie
 
@@ -140,6 +141,8 @@ Constrangerile validate:
 | `detection.fast_scan.time_window_secs` | ≥ 1 |
 | `detection.slow_scan.port_threshold` | ≥ 1 |
 | `detection.slow_scan.time_window_mins` | ≥ 1 |
+| `detection.accept_scan.port_threshold` | ≥ 1 |
+| `detection.accept_scan.time_window_secs` | ≥ 1 |
 | Fereastra Slow Scan | > fereastra Fast Scan |
 | `cleanup.interval_secs` | ≥ 1 |
 | `cleanup.max_entry_age_secs` | ≥ fereastra Slow Scan |
@@ -169,6 +172,10 @@ time_window_secs = 10          # ...in acest interval (secunde)
 [detection.slow_scan]
 port_threshold = 30            # Alerta daca IP acceseaza > N porturi unice...
 time_window_mins = 5           # ...in acest interval (minute)
+
+[detection.accept_scan]
+port_threshold = 5             # Alerta daca IP acceseaza > N porturi DESCHISE unice...
+time_window_secs = 30          # ...in acest interval (secunde)
 
 [alerting.siem]
 enabled = true
@@ -402,18 +409,19 @@ if let Some(event) = parser.parse(line) { ... }
 ```
 
 Parser-ul GAIA (`gaia.rs`) face doua lucruri:
-1. Gaseste cuvantul `drop` dupa `Checkpoint:` cu un regex
-2. Extrage campurile `src:`, `proto:`, `service:` prin split dupa `;`
+1. Gaseste cuvantul `drop` sau `accept` dupa `Checkpoint:` cu un regex
+2. Extrage campurile `src:`, `dst:`, `proto:`, `service:` prin split dupa `;`
 
-- Daca actiunea este `accept` → returneaza `None`, linia este ignorata complet
-- Daca actiunea este `drop` → returneaza un `LogEvent`:
+- Daca actiunea este `reject` sau alta valoare necunoscuta → returneaza `None`, linia este ignorata
+- Daca actiunea este `drop` sau `accept` → returneaza un `LogEvent`:
 
 ```rust
 LogEvent {
     source_ip:  192.168.11.7,    // atacatorul
+    dest_ip:    Some(10.0.0.1),  // IP-ul tinta (din campul dst:)
     dest_port:  443,              // portul pe care a batut
     protocol:   "tcp",
-    action:     "drop",
+    action:     "drop",          // sau "accept" pentru porturi deschise
     raw_log:    "Sep 3 15:12..."  // linia originala, pastrata pentru audit
 }
 ```
@@ -434,22 +442,28 @@ Detectorul tine in memorie (DashMap) un jurnal per IP sursa:
 192.168.11.7  →  [ port:80 la t=0s, port:443 la t=1s, port:22 la t=2s, ... ]
 ```
 
-La fiecare eveniment nou verifica **doua ferestre de timp** independente:
+Evenimentele `drop` sunt stocate in `port_hits`, evenimentele `accept` in `accept_hits`
+(harti separate pentru a nu contamina detectia). La fiecare eveniment nou verifica
+**trei ferestre de timp** independente:
 
 ```
-Fast Scan: cate porturi UNICE a atins acest IP in ultimele 10 secunde?
-           daca > 15  →  ALERTA Fast Scan
+Fast Scan:   cate porturi UNICE BLOCATE (drop) a atins IP-ul in ultimele 10 secunde?
+             daca > 15  →  ALERTA Fast Scan (SigID 1001, severitate High)
 
-Slow Scan: cate porturi UNICE a atins acest IP in ultimele 5 minute?
-           daca > 30  →  ALERTA Slow Scan
+Slow Scan:   cate porturi UNICE BLOCATE (drop) a atins IP-ul in ultimele 5 minute?
+             daca > 30  →  ALERTA Slow Scan (SigID 1002, severitate Medium)
+
+Accept Scan: cate porturi UNICE ACCEPTATE (accept) a atins IP-ul in ultimele 30 secunde?
+             daca > 5   →  ALERTA Accept Scan (SigID 1003, severitate Low-Medium)
 ```
 
 Cand pragul este depasit, creeaza un struct `Alert`:
 
 ```rust
 Alert {
-    scan_type:    ScanType::Fast,
+    scan_type:    ScanType::Fast,        // sau Slow, sau AcceptScan
     source_ip:    192.168.11.7,
+    dest_ip:      Some(10.0.0.1),        // IP-ul tinta (din log)
     unique_ports: [21, 22, 23, 25, 53, 80, 110, 443, ...],
     timestamp:    2026-02-18T12:06:16
 }
@@ -474,8 +488,9 @@ Functia `send_siem_alert()` construieste mesajul in trei pasi:
 
 ```rust
 match alert.scan_type {
-    ScanType::Fast => sig_id = "1001", name = "Fast Port Scan Detected"
-    ScanType::Slow => sig_id = "1002", name = "Slow Port Scan Detected"
+    ScanType::Fast      => (sig_id = "1001", name = "Fast Port Scan Detected",   severity = 7)
+    ScanType::Slow      => (sig_id = "1002", name = "Slow Port Scan Detected",   severity = 6)
+    ScanType::AcceptScan => (sig_id = "1003", name = "Accept Port Scan Detected", severity = 5)
 }
 ```
 
@@ -521,7 +536,7 @@ CEF:0                    → versiunea formatului CEF
 IDS-RS                   → Device Vendor
 Network Scanner Detector → Device Product
 1.0                      → Device Version
-1001                     → Signature ID (1001=Fast, 1002=Slow) — folosit in reguli
+1001                     → Signature ID (1001=Fast, 1002=Slow, 1003=AcceptScan) — folosit in reguli
 Fast Port Scan Detected  → Event Name
 7                        → Severity → apare ca "Priority: High" in ArcSight
 ```
@@ -664,12 +679,15 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 17 passed`
+Rezultat asteptat: `test result: ok. 33 passed`
 
 Testele acopera:
-- Parser GAIA: drop valid, accept ignorat, broadcast fara src, ICMP fara service, format invalid
-- Parser CEF: drop valid, accept ignorat, syslog header, syslog priority header, non-CEF, campuri incomplete
-- Detector: fast scan alert, sub prag, cooldown, cleanup, IP-uri separate
+- Parser GAIA: drop valid, accept parsat (nu ignorat), broadcast fara src, ICMP fara service, format invalid
+- Parser CEF: drop valid, accept parsat, syslog header, syslog priority header, non-CEF, campuri incomplete
+- Detector Fast Scan: alert, sub prag, cooldown, cleanup, IP-uri separate, max_hits_per_ip, max_tracked_ips LRU
+- Detector Slow Scan: alert dedicat, cooldown, independenta fata de Fast Scan (`slow_test_config()`)
+- Detector Accept Scan: alert accept, drop nu declanseaza accept scan, accept nu declanseaza fast scan, cooldown accept
+- Alerter: 7 teste sanitize_cef (anti-injection CEF)
 
 ---
 
@@ -713,7 +731,20 @@ python3 tester/tester.py slow --cef
 
 IDS-RS ar trebui sa afiseze o alerta `Slow Scan detectat!`.
 
-### Pas 4 — Trafic normal (NU trebuie sa declanseze alerta)
+### Pas 4 — Accept Scan (trebuie sa declanseze alerta)
+
+```bash
+# Genereaza accept-uri pe porturi unice — simuleaza enumerarea serviciilor deschise
+python3 tester/tester.py accept-scan --format gaia --ports 10 --delay 0.05
+
+# Format CEF
+python3 tester/tester.py accept-scan --format cef --ports 10 --delay 0.05
+```
+
+IDS-RS ar trebui sa afiseze o alerta `Accept Scan` cu badge **magenta** in terminal.
+Diferenta fata de Fast Scan: evenimentele trimise au `action=accept`, nu `action=drop`.
+
+### Pas 5 — Trafic normal (NU trebuie sa declanseze alerta)
 
 ```bash
 # GAIA
@@ -725,9 +756,10 @@ python3 tester/tester.py normal --cef
 
 IDS-RS **nu** ar trebui sa genereze nicio alerta.
 
-### Pas 5 — Replay log-uri reale Checkpoint
+### Pas 6 — Replay log-uri reale Checkpoint
 
-Fisierul `sample2_gaia.log` contine 56 de log-uri reale Checkpoint GAIA (accept + drop mixt):
+Fisierul `sample2_gaia.log` contine 56 de log-uri reale Checkpoint GAIA (accept + drop mixt).
+Accept-urile sunt acum procesate pentru detectia Accept Scan (nu mai sunt ignorate):
 
 ```bash
 python3 tester/tester.py replay tester/sample2_gaia.log --delay 0.05
@@ -748,6 +780,8 @@ python3 tester/tester.py fast-scan --format gaia --ports 20 --delay 0.1
 python3 tester/tester.py fast-scan --format cef --ports 20 --delay 0.1
 python3 tester/tester.py slow-scan --format gaia --ports 40
 python3 tester/tester.py slow-scan --format cef --ports 40 --delay 3
+python3 tester/tester.py accept-scan --format gaia --ports 10 --delay 0.1
+python3 tester/tester.py accept-scan --format cef --ports 10 --delay 0.1
 ```
 
 #### Sample Mode
@@ -774,22 +808,27 @@ python3 tester/tester.py sample tester/sample2_gaia.log fast-cef
 ---
 
 ```
-┌────────────────────────────────┬───────────────────────────────┐
-│            Command             │         What it does          │
-├────────────────────────────────┼───────────────────────────────┤
-│ tester.py fast                 │ Replay sample_fast_gaia.log   │
-├────────────────────────────────┼───────────────────────────────┤
-│ tester.py fast --cef           │ Replay sample_fast_cef.log    │
-├────────────────────────────────┼───────────────────────────────┤
-│ tester.py slow                 │ Replay sample_slow_gaia.log   │
-├────────────────────────────────┼───────────────────────────────┤
-│ tester.py normal               │ Replay sample_normal_gaia.log │
-├────────────────────────────────┼───────────────────────────────┤
-│ tester.py replay <file>        │ Replay from any file          │
-├────────────────────────────────┼───────────────────────────────┤
-│ tester.py sample <file> <mode> │ Advanced sample mode          │
-└────────────────────────────────┴───────────────────────────────┘
-
+┌──────────────────────────────────────────┬──────────────────────────────────────────────┐
+│                  Command                 │                  What it does                │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py fast                           │ Replay sample_fast_gaia.log (drop events)    │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py fast --cef                     │ Replay sample_fast_cef.log                   │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py slow                           │ Replay sample_slow_gaia.log (drop events)    │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py normal                         │ Replay sample_normal_gaia.log (no alert)     │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py fast-scan --ports N --delay S  │ Generate fast scan (drop events)             │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py slow-scan --ports N --delay S  │ Generate slow scan (drop events)             │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py accept-scan --ports N          │ Generate accept scan (accept events)         │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py replay <file>                  │ Replay from any file                         │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py sample <file> <mode>           │ Advanced sample mode                         │
+└──────────────────────────────────────────┴──────────────────────────────────────────────┘
 ```
 
 ### Parametri comuni
@@ -801,7 +840,7 @@ python3 tester/tester.py sample tester/sample2_gaia.log fast-cef
 | `--cef` | `false` | Format CEF in loc de GAIA (preset-uri) |
 | `--format` | `gaia` | Formatul log-urilor: `gaia` sau `cef` (fast-scan/slow-scan) |
 | `--source` | `192.168.11.7` | IP-ul sursa simulat (fast-scan/slow-scan) |
-| `--ports` | `20` / `40` | Numar de porturi unice (fast-scan/slow-scan) |
+| `--ports` | `20` / `40` / `10` | Numar de porturi unice (fast-scan/slow-scan/accept-scan) |
 | `--delay` | variabil | Delay intre batch-uri in secunde |
 | `--batch` | `1` | Log-uri per pachet UDP |
 
@@ -941,6 +980,18 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
   100.000) si structura auxiliara `last_seen: DashMap<IpAddr, Instant>`. Cand limita e atinsa,
   IP-ul cel mai vechi (LRU) este evictat din toate structurile interne. Cleanup actualizat sa
   sincronizeze `last_seen`. Adaugat test unitar `test_max_tracked_ips_eviction`.
+
+- [x] **Detectie Accept Scan — ScanType::AcceptScan** (`detector.rs`, `config.rs`, `alerter.rs`,
+  `display.rs`, parseri) — IDS-RS analiza exclusiv evenimentele `drop`. Un atacator care scaneaza
+  **porturile deschise** (trafic `accept`) trecea complet neobservat. Implementat:
+  - Parserii GAIA si CEF procesa acum si actiunea `accept` (nu mai ignora)
+  - `detector.rs`: DashMap separat `accept_hits`, cooldown propriu `accept_cooldowns`,
+    `ScanType::AcceptScan` cu detectie independenta de Fast/Slow Scan
+  - `config.rs`: `AcceptScanConfig` cu `port_threshold` si `time_window_secs`; 2 validari noi
+  - `alerter.rs`: Signature ID `1003`, severitate CEF `5` (Low-Medium); email severitate `MEDIE-MICA`
+  - `display.rs`: alerta magenta distincta; badge `ACCPT` verde pentru evenimente accept
+  - `tester.py`: comanda `accept-scan`, functie `simulate_accept_scan()`, optiune in meniu
+  - 4 teste unitare noi in `detector.rs`: alert, no cross-contamination drop↔accept, cooldown
 
 ---
 
@@ -1111,8 +1162,10 @@ last_seen: DashMap<IpAddr, Instant>,  // ultimul moment cand IP-ul a fost vazut
 
 In `process_event()`:
 ```rust
-let is_new_ip = !self.port_hits.contains_key(&ip);
-if is_new_ip && self.port_hits.len() >= self.config.max_tracked_ips {
+// Verificam dupa last_seen (nu port_hits) — acopera si IP-urile care trimit
+// exclusiv "accept" (care nu apar in port_hits, dar sunt urmarite in last_seen).
+let is_new_ip = !self.last_seen.contains_key(&ip);
+if is_new_ip && self.last_seen.len() >= self.config.max_tracked_ips {
 
     // Gasim IP-ul cu cel mai vechi last_seen (LRU)
     let lru_ip: Option<IpAddr> = self.last_seen
@@ -1121,23 +1174,30 @@ if is_new_ip && self.port_hits.len() >= self.config.max_tracked_ips {
         .map(|e| *e.key());
 
     if let Some(old_ip) = lru_ip {
+        // Evictam din TOATE structurile: drop hits, accept hits, cooldowns
         self.port_hits.remove(&old_ip);
+        self.accept_hits.remove(&old_ip);
         self.last_seen.remove(&old_ip);
         self.fast_cooldowns.remove(&old_ip);
         self.slow_cooldowns.remove(&old_ip);
+        self.accept_cooldowns.remove(&old_ip);
     }
 }
-// Actualizam last_seen pentru IP-ul curent
+// Actualizam last_seen pentru IP-ul curent (drop sau accept)
 self.last_seen.insert(ip, now);
 ```
 
 ### Concepte Rust explicate
 
-#### `!self.port_hits.contains_key(&ip)` — short-circuit evaluation
+#### `!self.last_seen.contains_key(&ip)` — short-circuit evaluation
 
 Verificam mai intai daca IP-ul este nou (`is_new_ip`) **inainte** de a verifica
 limita. Motivul: evictia are sens doar pentru IP-uri **noi** — un IP existent
 nu creste numarul de intrari, deci nu necesita evictie.
+
+Folosim `last_seen` (nu `port_hits`) deoarece un IP poate trimite exclusiv evenimente
+`accept` — care nu apar in `port_hits` ci in `accept_hits`. Fara aceasta corectare,
+IP-urile pure-accept ar parea mereu "noi" si ar declansa evictii false.
 
 In Rust (ca si in C/Java), `&&` evalueaza lazy (short-circuit):
 - Daca `is_new_ip` e `false` → a doua conditie **nu se evalueaza** → fara overhead
@@ -1179,19 +1239,19 @@ Curatand la evictie: consistenta completa, fara date orfane.
 
 #### Cleanup actualizat pentru `last_seen`
 
-In `cleanup()`, cand un IP este sters din `port_hits` (hits vechi), il stergem
-si din `last_seen`:
+In `cleanup()`, dupa ce sterg `port_hits` si `accept_hits` vechi, sincronizam `last_seen`
+cu un `retain` care verifica amandoua hartile:
 
 ```rust
-for ip in &empty_keys {
-    self.port_hits.remove(ip);
-    self.last_seen.remove(ip);  // evitam acumularea de intrari stale
-}
+self.last_seen.retain(|ip, _| {
+    self.port_hits.contains_key(ip) || self.accept_hits.contains_key(ip)
+});
 ```
 
-Fara aceasta linie, `last_seen` ar retine intrari pentru IP-uri sterse din
-`port_hits`. La urmatoarea evictie, algoritmul LRU ar putea selecta un IP
-deja sters — `remove()` ar fi no-op, dar am pierde o evictie reala.
+Un IP este pastrat in `last_seen` cat timp apare in cel putin una din cele doua harti.
+Daca dispare din amandoua (datele expira), este sters si din `last_seen`.
+Fara aceasta sincronizare, `last_seen` ar retine intrari "zombie" si evictia LRU
+ar putea selecta IP-uri deja sterse.
 
 ### Trade-off: LRU O(n) vs. structuri dedicate
 
@@ -1276,7 +1336,7 @@ ulterioare raman corecte.
 - `src` / `dst` — `IpAddr` (tip Rust, nu poate contine caractere speciale)
 - `rt` — `i64` timestamp milisecunde
 - `cnt` — `usize` numar intregi
-- `sig_id` — literal static (`"1001"`, `"1002"`)
+- `sig_id` — literal static (`"1001"`, `"1002"`, `"1003"`)
 
 ### Teste unitare
 
@@ -1398,15 +1458,10 @@ Idei de extindere planificate, ordonate dupa impact operational.
 
 ### Impact ridicat
 
-- [ ] **Detectie scanare porturi deschise (accept scan)** — in prezent IDS-RS
-  analizeaza exclusiv evenimentele `drop`. Un atacator sofisticat poate scana
-  **porturile deschise** (servicii active) generand exclusiv trafic `accept`,
-  trecand complet neobservat. Exemplu: un tool care bate metodic porturile
-  22, 80, 443, 3306 ale tuturor host-urilor din retea va genera doar accept-uri.
-  *Implementare: extinde `LogParser` si `Detector` sa proceseze si actiunea*
-  *`accept`; adauga praguri separate pentru accept-scan in `config.toml`;*
-  *creeaza `ScanType::AcceptScan` in `detector.rs`; alerta distincta in SIEM*
-  *cu Signature ID nou (ex: 1003) pentru diferentiere fata de drop-scan.*
+- [x] **Detectie scanare porturi deschise (accept scan)** — implementat complet.
+  Parserii procesa acum `accept`; detectorul foloseste `accept_hits` si `accept_cooldowns`
+  separate; `ScanType::AcceptScan` cu Signature ID `1003`, severitate CEF `5`; alerta
+  magenta distincta in terminal; `tester.py accept-scan` pentru testare.
 
 - [ ] **Raport zilnic prin email catre echipa IT/Security** — un task async
   programat sa ruleze o data pe zi (ex: la 08:00) care compileaza si trimite
@@ -1423,3 +1478,20 @@ Idei de extindere planificate, ordonate dupa impact operational.
   *stocheaza statisticile zilnice intr-un struct protejat de `Arc<Mutex<...>>`*
   *actualizat de `Detector` la fiecare eveniment; genereaza corpul emailului*
   *in `alerter.rs` si trimite prin SMTP-ul deja configurat.*
+
+---
+
+## TODO — Calitate cod
+
+Imbunatatiri tehnice interne care nu afecteaza comportamentul extern, dar cresc robustetea si testabilitatea.
+
+- [x] **#2 — Cache transport SMTP** (`alerter.rs`) — rezolvat. `AsyncSmtpTransport<Tokio1Executor>`
+  era reconstruit la fiecare alerta (reconectare TLS/STARTTLS costisitoare).
+  Acum este construit **o singura data** in `Alerter::new()` (returneaza `Result<Self>`)
+  si reutilizat la fiecare email prin `Option<AsyncSmtpTransport<Tokio1Executor>>` stocat in struct.
+  Erorile de configurare SMTP sunt detectate la startup, nu la prima alerta.
+
+- [x] **#18 — Teste unitare Slow Scan** (`detector.rs`) — rezolvat. Adaugate 3 teste dedicate
+  cu config separata (`slow_test_config()`: prag slow=3, prag fast=1000 — nu se declanseaza):
+  `test_slow_scan_alert`, `test_slow_scan_cooldown`, `test_slow_scan_independent_from_fast`.
+  Total teste: **33 passed**.

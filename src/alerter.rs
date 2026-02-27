@@ -34,7 +34,7 @@
 //
 // =============================================================================
 
-use crate::config::{AlertingConfig, DetectionConfig};
+use crate::config::{AlertingConfig, DetectionConfig, EmailConfig};
 use crate::detector::{Alert, ScanType};
 use crate::display;
 use anyhow::{Context, Result};
@@ -226,6 +226,39 @@ fn build_html_body(
         .replace("__FOOTER__", &footer_safe)
 }
 
+/// Construieste transportul SMTP async din configurarea email.
+///
+/// Functie privata separata — transportul este construit O SINGURA DATA
+/// la initializarea Alerter-ului si reutilizat la fiecare alerta,
+/// evitand reconectarea TLS/STARTTLS la fiecare email trimis.
+fn build_mailer(cfg: &EmailConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
+    let smtp_timeout = Some(Duration::from_secs(30));
+
+    let mailer = if cfg.smtp_tls {
+        let mut builder = AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.smtp_server)
+            .context("Nu pot configura SMTP relay")?
+            .port(cfg.smtp_port)
+            .timeout(smtp_timeout);
+        if !cfg.username.is_empty() {
+            let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
+            builder = builder.credentials(creds);
+        }
+        builder.build()
+    } else {
+        let mut builder =
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_server)
+                .port(cfg.smtp_port)
+                .timeout(smtp_timeout);
+        if !cfg.username.is_empty() {
+            let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
+            builder = builder.credentials(creds);
+        }
+        builder.build()
+    };
+
+    Ok(mailer)
+}
+
 /// Componenta de alertare - trimite notificari catre SIEM si email.
 ///
 /// NOTA RUST: Acest struct DETINE (owns) configurarea. Clonarea s-a facut
@@ -235,11 +268,29 @@ fn build_html_body(
 pub struct Alerter {
     config: AlertingConfig,
     detection: DetectionConfig,
+    // Transport SMTP pre-construit la initializare (None daca email dezactivat).
+    // Reutilizat la fiecare alerta — evita reconectarea TLS la fiecare email.
+    mailer: Option<AsyncSmtpTransport<Tokio1Executor>>,
 }
 
 impl Alerter {
-    pub fn new(config: AlertingConfig, detection: DetectionConfig) -> Self {
-        Self { config, detection }
+    /// Initializeaza Alerter-ul si construieste transportul SMTP (daca email e activat).
+    ///
+    /// Returneaza `Result<Self>` deoarece construirea transportului SMTP poate esua
+    /// (hostname invalid, port gresit, etc.). Erorile de configurare sunt detectate
+    /// la startup, nu la prima alerta.
+    pub fn new(config: AlertingConfig, detection: DetectionConfig) -> Result<Self> {
+        // Construim mailer-ul O SINGURA DATA la startup, nu la fiecare alerta.
+        let mailer = if config.email.enabled {
+            Some(build_mailer(&config.email)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            config,
+            detection,
+            mailer,
+        })
     }
 
     /// Trimite alerta catre toate destinatiile configurate.
@@ -260,8 +311,8 @@ impl Alerter {
             }
         }
 
-        if self.config.email.enabled {
-            if let Err(e) = self.send_email_alert(alert).await {
+        if let Some(ref mailer) = self.mailer {
+            if let Err(e) = self.send_email_alert(alert, mailer).await {
                 display::log_error(&format!("Eroare trimitere email: {:#}", e));
             }
         }
@@ -416,7 +467,11 @@ impl Alerter {
     /// de runtime-ul tokio 1.x. Acesta este un exemplu de "zero-cost
     /// abstraction" - lettre suporta multiple runtime-uri fara overhead.
     ///
-    async fn send_email_alert(&self, alert: &Alert) -> Result<()> {
+    async fn send_email_alert(
+        &self,
+        alert: &Alert,
+        mailer: &AsyncSmtpTransport<Tokio1Executor>,
+    ) -> Result<()> {
         let cfg = &self.config.email;
 
         let port_count = alert.unique_ports.len();
@@ -468,42 +523,6 @@ impl Alerter {
             &port_list_display,
             &cfg.email_footer,
         );
-
-        // Construim transportul SMTP async.
-        //
-        // NOTA RUST - MATCH pe bool:
-        // In loc de if/else, putem folosi match. Dar aici if este mai clar.
-        //
-        // `.relay()` = conectare cu STARTTLS (recomandat pentru port 587)
-        // `.builder_dangerous()` = fara TLS (pentru retele interne, port 25)
-        // `.port()` seteaza portul SMTP din configurare.
-        // `.timeout()` = timeout explicit pentru a evita asteptare infinita.
-        //
-        // Credentialele sunt optionale: pe servere interne (port 25 relay),
-        // autentificarea nu este de obicei necesara. Daca username este gol,
-        // nu trimitem AUTH — serverul va relaya pe baza IP-ului sursa.
-        let smtp_timeout = Some(Duration::from_secs(30));
-
-        let mailer = if cfg.smtp_tls {
-            let mut builder = AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.smtp_server)
-                .context("Nu pot configura SMTP relay")?
-                .port(cfg.smtp_port)
-                .timeout(smtp_timeout);
-            if !cfg.username.is_empty() {
-                let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
-                builder = builder.credentials(creds);
-            }
-            builder.build()
-        } else {
-            let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_server)
-                .port(cfg.smtp_port)
-                .timeout(smtp_timeout);
-            if !cfg.username.is_empty() {
-                let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
-                builder = builder.credentials(creds);
-            }
-            builder.build()
-        };
 
         // Trimitem un email catre fiecare destinatar.
         //

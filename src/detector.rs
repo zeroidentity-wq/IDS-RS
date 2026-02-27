@@ -815,4 +815,103 @@ mod tests {
             "IP-ul cel mai recent (10.0.0.3) trebuie sa fie prezent"
         );
     }
+
+    // =========================================================================
+    // Teste pentru Slow Scan (#18)
+    // =========================================================================
+    //
+    // test_config() are slow_scan.port_threshold = 50 — prea mare pentru teste.
+    // slow_test_config() seteaza prag mic (3) si Fast Scan dezactivat practic
+    // (prag 1000) pentru a testa Slow Scan izolat.
+
+    /// Configuratie dedicata testelor Slow Scan.
+    ///
+    /// Fast Scan are prag ridicat (1000) astfel incat nu se declanseaza in
+    /// testele curente (max ~10 porturi). Slow Scan are prag mic (3) pentru
+    /// teste rapide. Fereastra de 1 minut inseamna ca toate evenimentele
+    /// din test (milisecunde) sunt in cadrul ferestrei.
+    fn slow_test_config() -> DetectionConfig {
+        DetectionConfig {
+            alert_cooldown_secs: 5,
+            max_hits_per_ip: 1_000,
+            max_tracked_ips: 10_000,
+            fast_scan: FastScanConfig {
+                port_threshold: 1_000, // prag mare — nu se declanseaza in teste slow
+                time_window_secs: 10,
+            },
+            slow_scan: SlowScanConfig {
+                port_threshold: 3, // prag mic pentru teste rapide
+                time_window_mins: 1,
+            },
+            accept_scan: AcceptScanConfig {
+                port_threshold: 1_000,
+                time_window_secs: 60,
+            },
+        }
+    }
+
+    #[test]
+    fn test_slow_scan_alert() {
+        // 4 porturi unice (drop) cu prag slow = 3 → alerta Slow Scan la al 4-lea port.
+        let detector = Detector::new(slow_test_config());
+
+        for port in 1..=4u16 {
+            let alerts = detector.process_event(&make_event("192.168.1.1", port));
+            if port == 4 {
+                assert_eq!(alerts.len(), 1, "Trebuia o alerta Slow Scan la {} porturi", port);
+                assert!(
+                    matches!(alerts[0].scan_type, ScanType::Slow),
+                    "Tipul alertei trebuie sa fie Slow, nu {:?}",
+                    alerts[0].scan_type
+                );
+                assert_eq!(alerts[0].unique_ports.len(), 4);
+            } else {
+                assert!(alerts.is_empty(), "Fara alerta sub prag (port {})", port);
+            }
+        }
+    }
+
+    #[test]
+    fn test_slow_scan_cooldown() {
+        // Dupa o alerta Slow Scan, porturi suplimentare nu genereaza alerta noua
+        // cat timp cooldown-ul este activ.
+        let detector = Detector::new(slow_test_config());
+
+        // Generam alerta initiala (4 porturi drop → prag 3 depasit).
+        for port in 1..=4u16 {
+            detector.process_event(&make_event("192.168.2.1", port));
+        }
+
+        // Al 5-lea port → cooldown activ → fara alerta noua.
+        let alerts = detector.process_event(&make_event("192.168.2.1", 5));
+        assert!(
+            alerts.is_empty(),
+            "Cooldown-ul Slow Scan trebuia sa previna alerta duplicata"
+        );
+    }
+
+    #[test]
+    fn test_slow_scan_independent_from_fast() {
+        // Slow Scan si Fast Scan sunt urmarite independent.
+        // Cu slow_test_config: Fast threshold = 1000, Slow threshold = 3.
+        // 4 porturi drop → doar Slow Scan se declanseaza (Fast nu are prag depasit).
+        let detector = Detector::new(slow_test_config());
+
+        let mut got_slow = false;
+        let mut got_fast = false;
+
+        for port in 1..=4u16 {
+            let alerts = detector.process_event(&make_event("192.168.3.1", port));
+            for alert in &alerts {
+                match alert.scan_type {
+                    ScanType::Slow => got_slow = true,
+                    ScanType::Fast => got_fast = true,
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(got_slow, "Trebuia o alerta Slow Scan");
+        assert!(!got_fast, "Fast Scan NU trebuia sa se declanseze cu prag 1000");
+    }
 }

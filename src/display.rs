@@ -71,7 +71,7 @@ pub fn print_banner(config: &AppConfig) {
         "{}",
         format!(
             "║{:^width$}║",
-            "Network Port Scan Detector",
+            "Network Port Scan Detector  ·  A.D.",
             width = inner_width
         )
         .cyan()

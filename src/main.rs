@@ -240,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
     // pot rula pe thread-uri diferite -> TREBUIE Arc, nu Rc.
     //
     let detector = Arc::new(Detector::new(config.detection.clone()));
-    let alerter = Arc::new(Alerter::new(config.alerting.clone(), config.detection.clone()));
+    let alerter = Arc::new(Alerter::new(config.alerting.clone(), config.detection.clone())?);
 
     display::log_info("Detector initializat (DashMap thread-safe)");
 
