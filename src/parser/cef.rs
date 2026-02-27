@@ -118,8 +118,10 @@ impl LogParser for CefParser {
         let source_ip = source_ip?;
         let dest_port = dest_port?;
 
-        // Filtram doar actiunile "drop" (similar cu parser-ul Gaia).
-        if action != "drop" {
+        // Filtram: procesam "drop" si "accept" (similar cu parser-ul Gaia).
+        //   drop   = conexiune BLOCATA de firewall → Fast/Slow Scan
+        //   accept = conexiune PERMISA de firewall → Accept Scan (porturi deschise)
+        if action != "drop" && action != "accept" {
             return None;
         }
 
@@ -159,11 +161,18 @@ mod tests {
     }
 
     #[test]
-    fn test_ignore_cef_accept() {
+    fn test_parse_cef_accept() {
+        // Accept — acum trebuie PARSAT (pentru detectia Accept Scan).
+        // Inainte de #10 acest eveniment era ignorat. Acum detectam
+        // si scanarile de porturi DESCHISE, nu doar cele blocate.
         let parser = CefParser::new();
         let log = "CEF:0|CheckPoint|VPN-1|R81|100|Accept|3|src=10.0.0.5 dst=10.0.0.1 dpt=80 proto=TCP act=accept";
 
-        assert!(parser.parse(log).is_none());
+        let event = parser.parse(log).unwrap();
+        assert_eq!(event.source_ip.to_string(), "10.0.0.5");
+        assert_eq!(event.dest_port, 80);
+        assert_eq!(event.protocol, "tcp");
+        assert_eq!(event.action, "accept");
     }
 
     #[test]

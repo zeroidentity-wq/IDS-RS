@@ -131,9 +131,11 @@ impl LogParser for GaiaParser {
         // `.to_lowercase()` creeaza un String owned (alocare pe heap).
         let action = caps.get(1)?.as_str().to_lowercase();
 
-        // Filtram: ne intereseaza DOAR actiunile "drop".
-        // Drop = firewall-ul a blocat conexiunea = potential scan.
-        if action != "drop" {
+        // Filtram: procesam "drop" si "accept".
+        //   drop   = firewall a BLOCAT conexiunea  → scanare porturi inchise/filtrate (Fast/Slow Scan)
+        //   accept = firewall a PERMIS conexiunea  → scanare porturi deschise (Accept Scan)
+        // "reject" si alte actiuni sunt ignorate — nu ne furnizeaza informatii utile.
+        if action != "drop" && action != "accept" {
             return None;
         }
 
@@ -212,15 +214,22 @@ mod tests {
     }
 
     #[test]
-    fn test_ignore_accept_real_format() {
-        // Log real cu accept - trebuie ignorat.
+    fn test_parse_accept_real_format() {
+        // Log real cu accept — acum trebuie PARSAT pentru detectia Accept Scan.
+        // Inainte de #10, acest test verifica ca accept era ignorat.
+        // Acum Accept Scan detecteaza scanari de porturi DESCHISE (permise de firewall),
+        // deci avem nevoie ca parserii sa ne furnizeze si evenimentele "accept".
         let parser = GaiaParser::new().unwrap();
         let log = "Sep 3 15:10:54 192.168.99.1 Checkpoint: 3Sep2007 15:10:28 accept \
             192.168.99.1 >eth2 rule: 9; rule_uid: {11111111-2222-3333-8A67-F54CED606693}; \
             service_id: domain-udp; src: 200.14.120.9; dst: 192.168.99.184; proto: udp; \
             product: VPN-1 & FireWall-1; service: 53; s_port: 32769;";
 
-        assert!(parser.parse(log).is_none());
+        let event = parser.parse(log).unwrap();
+        assert_eq!(event.source_ip.to_string(), "200.14.120.9");
+        assert_eq!(event.dest_port, 53);
+        assert_eq!(event.protocol, "udp");
+        assert_eq!(event.action, "accept");
     }
 
     #[test]

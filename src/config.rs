@@ -108,6 +108,12 @@ pub struct DetectionConfig {
 
     pub fast_scan: FastScanConfig,
     pub slow_scan: SlowScanConfig,
+
+    /// Configurare pentru detectia Accept Scan (scanare porturi deschise).
+    /// Retrocompatibil: daca lipseste din config.toml, se aplica valorile implicite
+    /// (port_threshold = 5, time_window_secs = 30).
+    #[serde(default = "default_accept_scan")]
+    pub accept_scan: AcceptScanConfig,
 }
 
 fn default_max_hits_per_ip() -> usize {
@@ -131,6 +137,34 @@ pub struct SlowScanConfig {
     pub port_threshold: usize,
     /// Fereastra de timp in minute (convertita in secunde la utilizare).
     pub time_window_mins: u64,
+}
+
+/// Configurare detectie Accept Scan (scanare porturi DESCHISE).
+///
+/// Accept Scan = un host acceseaza sistematic porturi permise de firewall.
+/// Diferenta fata de Fast/Slow Scan (care urmaresc "drop"-uri):
+///   - Fast/Slow → atacatorul loveste porturi INCHISE/filtrate (conexiuni blocate)
+///   - AcceptScan → atacatorul loveste porturi DESCHISE (conexiuni permise)
+///
+/// Accept Scan este mai subtil: traficul generat arata "legitim" — conexiunile
+/// sunt permise de regulile de firewall. Fara detectia acestui pattern, un
+/// atacator care mapeaza sistematic serviciile active ar trece neobservat.
+///
+/// Pragurile implicite sunt mai conservative decat Fast Scan deoarece
+/// traficul accepted este mai "normal" si am vrea sa evitam false positives.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcceptScanConfig {
+    /// Numarul de porturi ACCEPTATE unice care declanseaza alerta.
+    pub port_threshold: usize,
+    /// Fereastra de timp in secunde in care se numara porturile unice.
+    pub time_window_secs: u64,
+}
+
+fn default_accept_scan() -> AcceptScanConfig {
+    AcceptScanConfig {
+        port_threshold: 5,
+        time_window_secs: 30,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -317,6 +351,18 @@ impl AppConfig {
         if self.detection.slow_scan.time_window_mins == 0 {
             errors.push(
                 "detection.slow_scan.time_window_mins = 0: fereastra de timp zero face detectia imposibila"
+                    .to_string(),
+            );
+        }
+        if self.detection.accept_scan.port_threshold == 0 {
+            errors.push(
+                "detection.accept_scan.port_threshold = 0: orice pachet accept va declansa alerta Accept Scan"
+                    .to_string(),
+            );
+        }
+        if self.detection.accept_scan.time_window_secs == 0 {
+            errors.push(
+                "detection.accept_scan.time_window_secs = 0: fereastra de timp zero face detectia Accept Scan imposibila"
                     .to_string(),
             );
         }

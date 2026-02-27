@@ -3,11 +3,12 @@
 // =============================================================================
 //
 // Acest modul implementeaza logica centrala a IDS-ului:
-//   1. Inregistreaza fiecare eveniment "drop" (IP sursa + port destinatie)
-//   2. Detecteaza Fast Scan: > X porturi unice in Y secunde
-//   3. Detecteaza Slow Scan: > Z porturi unice in W minute
-//   4. Gestioneaza cooldown-ul alertelor (anti-spam)
-//   5. Curata periodic datele vechi din memorie
+//   1. Inregistreaza evenimentele "drop" si "accept" (IP sursa + port destinatie)
+//   2. Detecteaza Fast Scan:   > X porturi BLOCATE unice in Y secunde
+//   3. Detecteaza Slow Scan:   > Z porturi BLOCATE unice in W minute
+//   4. Detecteaza Accept Scan: > N porturi ACCEPTATE unice in M secunde
+//   5. Gestioneaza cooldown-ul alertelor (anti-spam)
+//   6. Curata periodic datele vechi din memorie
 //
 
 // CONCEPTE RUST EXPLICATE:
@@ -63,6 +64,21 @@ use std::time::{Duration, Instant};
 pub enum ScanType {
     Fast,
     Slow,
+
+    /// Scanare de porturi DESCHISE (conexiuni permise de firewall).
+    ///
+    /// Diferenta fata de Fast si Slow Scan:
+    ///   Fast / Slow  → urmaresc drop-uri: atacatorul testeaza porturi INCHISE/filtrate
+    ///   AcceptScan   → urmareste accept-uri: atacatorul mapeaza porturi DESCHISE
+    ///
+    /// Accept Scan este mai subtil — traficul generat este "legitim" din perspectiva
+    /// firewall-ului (conexiunile sunt permise de reguli). Fara aceasta detectie,
+    /// un atacator care enumera serviciile active ar trece complet neobservat.
+    ///
+    /// Exemplu concret: un host intern acceseaza porturile 22, 80, 443, 3306, 5432
+    /// pe mai multe servere in scurt timp. Firewall-ul le permite (sunt servicii
+    /// legitime), dar pattern-ul sistematic denota enumerare, nu comportament normal.
+    AcceptScan,
 }
 
 /// Implementarea trait-ului Display pentru ScanType.
@@ -78,6 +94,7 @@ impl std::fmt::Display for ScanType {
         match self {
             ScanType::Fast => write!(f, "Fast Scan"),
             ScanType::Slow => write!(f, "Slow Scan"),
+            ScanType::AcceptScan => write!(f, "Accept Scan"),
         }
     }
 }
@@ -137,9 +154,18 @@ struct PortHit {
 ///   - Rust: DashMap cu garantii COMPILE-TIME de thread safety
 ///
 pub struct Detector {
-    /// Evidenta porturilor accesate per IP sursa.
+    /// Evidenta porturilor BLOCATE (drop) accesate per IP sursa.
+    /// Alimenteaza detectia Fast Scan si Slow Scan.
     /// Key: IP-ul sursa | Value: lista de (port, timestamp)
     port_hits: DashMap<IpAddr, Vec<PortHit>>,
+
+    /// Evidenta porturilor ACCEPTATE (accept) accesate per IP sursa.
+    /// Alimenteaza detectia Accept Scan (porturi deschise).
+    ///
+    /// NOTA: Separat de port_hits intentionat — amestecarea drop-urilor cu
+    /// accept-urile ar contamina detectia. Un Fast Scan poate aparea simultan
+    /// cu un Accept Scan de la acelasi IP, si vrem sa le detectam independent.
+    accept_hits: DashMap<IpAddr, Vec<PortHit>>,
 
     /// Cooldown alerte Fast Scan per IP.
     /// Previne re-alertarea pentru acelasi IP inainte de expirarea cooldown-ului.
@@ -148,12 +174,17 @@ pub struct Detector {
     /// Cooldown alerte Slow Scan per IP.
     slow_cooldowns: DashMap<IpAddr, Instant>,
 
-    /// Ultimul moment cand fiecare IP a fost vazut.
-    /// Folosit pentru LRU eviction: cand DashMap-ul ajunge la max_tracked_ips,
-    /// IP-ul cu cel mai vechi `last_seen` este eliminat pentru a face loc celui nou.
+    /// Cooldown alerte Accept Scan per IP.
+    accept_cooldowns: DashMap<IpAddr, Instant>,
+
+    /// Ultimul moment cand fiecare IP a fost vazut (drop SAU accept).
+    /// Folosit pentru LRU eviction: cand numarul de IP-uri urmarite ajunge
+    /// la max_tracked_ips, IP-ul cu cel mai vechi `last_seen` este eliminat.
     ///
-    /// NOTA RUST: Mentinem aceasta structura separata (in loc sa parcurgem port_hits)
-    /// pentru a gasi rapid LRU-ul fara a tine write-lock-uri pe port_hits in acelasi timp.
+    /// NOTA RUST: Mentinem aceasta structura separata (nu parcurgem port_hits
+    /// sau accept_hits) pentru a gasi rapid LRU-ul fara write-lock-uri suprapuse.
+    /// `last_seen` acum urmareste TOATE IP-urile, indiferent de tipul actiunii
+    /// (drop sau accept), deci este sursa de adevar pentru capacitate totala.
     last_seen: DashMap<IpAddr, Instant>,
 
     /// Configurarea pragurilor de detectie (owned, cloned din AppConfig).
@@ -168,8 +199,10 @@ impl Detector {
     pub fn new(config: DetectionConfig) -> Self {
         Self {
             port_hits: DashMap::new(),
+            accept_hits: DashMap::new(),
             fast_cooldowns: DashMap::new(),
             slow_cooldowns: DashMap::new(),
+            accept_cooldowns: DashMap::new(),
             last_seen: DashMap::new(),
             config,
         }
@@ -221,8 +254,18 @@ impl Detector {
         // atingerea limitei). In practica, un flood de IP-uri spoofed este cel mai
         // rau caz — dar atunci O(n) eviction este acceptabil vs. OOM.
         //
-        let is_new_ip = !self.port_hits.contains_key(&ip);
-        if is_new_ip && self.port_hits.len() >= self.config.max_tracked_ips {
+        // NOTA #4 — LRU EVICTION (actualizat pentru Accept Scan):
+        //
+        // Folosim `last_seen` ca sursa de adevar pentru "cate IP-uri urmarim".
+        // `last_seen` este actualizat la FIECARE eveniment (drop si accept),
+        // deci reflecta corect totalul IP-urilor active, indiferent de tipul actiunii.
+        //
+        // Inainte de #10 verificam `port_hits.contains_key` si `port_hits.len()`.
+        // Problema: un IP care trimite doar "accept"-uri (fara "drop") nu aparea in
+        // port_hits → nu era considerat "urmarit" → evictia nu se activa corect.
+        // Acum: `last_seen` urmareste orice IP, indiferent de actiune.
+        let is_new_ip = !self.last_seen.contains_key(&ip);
+        if is_new_ip && self.last_seen.len() >= self.config.max_tracked_ips {
             // Gasim IP-ul cu cel mai vechi last_seen (Least Recently Used).
             let lru_ip: Option<IpAddr> = self
                 .last_seen
@@ -231,41 +274,52 @@ impl Detector {
                 .map(|e| *e.key());
 
             if let Some(old_ip) = lru_ip {
-                // Eliminam IP-ul LRU din toate structurile care il retin.
+                // Eliminam IP-ul LRU din TOATE structurile (drop, accept, cooldowns).
                 self.port_hits.remove(&old_ip);
+                self.accept_hits.remove(&old_ip);
                 self.last_seen.remove(&old_ip);
                 self.fast_cooldowns.remove(&old_ip);
                 self.slow_cooldowns.remove(&old_ip);
+                self.accept_cooldowns.remove(&old_ip);
             }
         }
 
         // Actualizam last_seen pentru IP-ul curent (nou sau existent).
         self.last_seen.insert(ip, now);
 
-        // --- 2. Inregistram port hit-ul (cu limitare memorie per IP) ---
+        // --- 2. Inregistram port hit-ul in map-ul corespunzator actiunii ---
         //
-        // NOTA RUST - ENTRY API:
-        // `.entry(key)` este pattern-ul standard pentru "get or insert":
-        //   - Daca cheia exista: returneaza o referinta mutabila la valoare
-        //   - Daca nu exista: insereaza valoarea default si returneaza ref
+        // NOTA RUST - REFERINTE IMUTABILE la campuri diferite ale structurii:
         //
-        // `.or_default()` foloseste Default::default() care pentru Vec este Vec::new().
+        // Selectam map-ul tinta pe baza actiunii evenimentului:
+        //   "drop"   → port_hits   (port BLOCAT de firewall → Fast/Slow Scan)
+        //   "accept" → accept_hits (port PERMIS de firewall → Accept Scan)
+        //
+        // `let hits_map: &DashMap<...>` stocheaza o referinta imutabila la unul
+        // din cele doua campuri. Chiar daca referinta este imutabila (&), DashMap
+        // permite modificari prin INTERIOR MUTABILITY (lock-uri interne per shard).
+        //
+        // Borrow checker-ul Rust stie ca `if-else` produce O SINGURA referinta,
+        // deci nu exista "doua borrows simultane". Compilatorul accepta acest cod
+        // si garanteaza la compile-time ca nu exista aliasing periculos.
         //
         // NOTA RUST - SCOP (SCOPE) EXPLICIT cu `{}`:
-        // Folosim un bloc `{}` pentru a limita durata de viata a `entry` (RefMut).
-        // RefMut tine un write-lock pe shard-ul DashMap. Daca nu il eliberam explicit
-        // inainte de urmatoarele operatii (care si ele acceseaza DashMap), am putea
-        // ajunge la un deadlock sau eroare de compilare (daca Rust detecteaza overlapping borrows).
-        // Blocul `{}` garanteaza ca RefMut este dropit (si lock-ul eliberat) la final.
+        // Blocul `{}` garanteaza ca `RefMut` (write-lock-ul DashMap) este dropit
+        // (eliberat) inainte de urmatoarele operatii pe DashMap.
+        // Altfel: write-lock activ → urmatorul .get() pe acelasi shard → deadlock.
         //
         // NOTA #3 - LIMITARE MEMORIE PER IP:
-        // Vec<PortHit> creste la fiecare eveniment. Fara limita, un scanner la viteza
-        // mare poate genera mii/zeci-de-mii de intrari intre doua cleanup-uri (la 60s interval).
-        // Solutia: dupa push, daca len() > max_hits_per_ip, stergem de la inceput (oldest first).
-        // `.drain(..N)` sterge primele N elemente (cele mai vechi) in-place.
+        // `.drain(..N)` sterge primele N elemente (cele mai vechi, oldest-first).
+        // Aplica aceeasi limita (max_hits_per_ip) la ambele map-uri.
         //
+        let hits_map: &DashMap<IpAddr, Vec<PortHit>> = if event.action == "drop" {
+            &self.port_hits
+        } else {
+            // "accept" si orice alta actiune filtrata de parser → accept_hits.
+            &self.accept_hits
+        };
         {
-            let mut hits = self.port_hits.entry(ip).or_default();
+            let mut hits = hits_map.entry(ip).or_default();
             hits.push(PortHit {
                 port: event.dest_port,
                 seen_at: now,
@@ -274,7 +328,6 @@ impl Detector {
             // Cap la max_hits_per_ip: pastram doar cele mai recente intrari.
             let max_hits = self.config.max_hits_per_ip;
             if hits.len() > max_hits {
-                // drain(..N) sterge primele N elemente (oldest); restul raman in ordine.
                 let overflow = hits.len() - max_hits;
                 hits.drain(..overflow);
             }
@@ -282,13 +335,17 @@ impl Detector {
 
         let mut alerts = Vec::new();
 
-        // --- 3. Verificam Fast Scan ---
+        // --- 3. Verificam Fast Scan (pe port_hits — drop-uri) ---
+        //
+        // `unique_ports_in_window` acum primeste map-ul ca parametru explicit.
+        // Aceasta este o REFACTORIZARE necesara: inainte functia accesa `self.port_hits`
+        // direct (hardcodat). Acum poate lucra cu orice DashMap de tip corect,
+        // ceea ce ne permite sa o refolosim pentru Accept Scan (pasul 5) cu `accept_hits`.
         let fast_window = Duration::from_secs(self.config.fast_scan.time_window_secs);
-        if let Some(ports) = self.unique_ports_in_window(ip, fast_window, now) {
+        if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, fast_window, now) {
             if ports.len() > self.config.fast_scan.port_threshold
                 && !self.in_cooldown(&self.fast_cooldowns, ip)
             {
-                // Setam cooldown-ul pentru acest IP (prevenim spam).
                 self.fast_cooldowns.insert(ip, now);
                 alerts.push(Alert {
                     scan_type: ScanType::Fast,
@@ -300,9 +357,9 @@ impl Detector {
             }
         }
 
-        // --- 4. Verificam Slow Scan ---
+        // --- 4. Verificam Slow Scan (pe port_hits — drop-uri) ---
         let slow_window = Duration::from_secs(self.config.slow_scan.time_window_mins * 60);
-        if let Some(ports) = self.unique_ports_in_window(ip, slow_window, now) {
+        if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, slow_window, now) {
             if ports.len() > self.config.slow_scan.port_threshold
                 && !self.in_cooldown(&self.slow_cooldowns, ip)
             {
@@ -317,41 +374,66 @@ impl Detector {
             }
         }
 
+        // --- 5. Verificam Accept Scan (pe accept_hits — conexiuni permise) ---
+        //
+        // Logica este identica cu Fast Scan, dar:
+        //   - Sursa de date: accept_hits (nu port_hits)
+        //   - Praguri: din config.accept_scan (pot fi diferite de Fast Scan)
+        //   - Cooldown propriu: accept_cooldowns (independent de fast/slow)
+        //   - ScanType: AcceptScan → SignatureID 1003 in SIEM
+        //
+        // Separarea completa de Fast/Slow Scan inseamna ca un IP poate declansa
+        // simultan o alerta Fast Scan (din drop-uri) SI o alerta Accept Scan (din
+        // accept-uri) — si amandoua vor fi trimise la SIEM si email, independent.
+        let accept_window = Duration::from_secs(self.config.accept_scan.time_window_secs);
+        if let Some(ports) = self.unique_ports_in_window(&self.accept_hits, ip, accept_window, now) {
+            if ports.len() > self.config.accept_scan.port_threshold
+                && !self.in_cooldown(&self.accept_cooldowns, ip)
+            {
+                self.accept_cooldowns.insert(ip, now);
+                alerts.push(Alert {
+                    scan_type: ScanType::AcceptScan,
+                    source_ip: ip,
+                    dest_ip: event.dest_ip,
+                    unique_ports: ports,
+                    timestamp: Local::now(),
+                });
+            }
+        }
+
         alerts
     }
 
     /// Returneaza lista porturilor unice accesate de un IP in fereastra de timp.
     ///
-    /// NOTA RUST - ITERATORS (Iteratori):
-    /// Rust iterators sunt "zero-cost abstractions":
-    ///   .iter()        -> creeaza iterator (lazy, nu face nimic inca)
-    ///   .filter(|h|..) -> creeaza un nou iterator care filtreaza
-    ///   .map(|h|..)    -> creeaza un nou iterator care transforma
-    ///   .collect()     -> CONSUMA iteratorul si produce rezultatul
+    /// NOTA RUST - REFACTORIZARE (#10): Aceasta functie primeste `hits_map` ca parametru.
     ///
-    /// Compilatorul fuzioneaza intregul lant intr-un singur loop optimizat.
-    /// Nu se creeaza colectii intermediare - totul e procesat element cu element.
+    /// Inainte de #10, functia accesa `self.port_hits` direct (hardcodat).
+    /// Problema: nu o puteam refolosi pentru Accept Scan (care foloseste `accept_hits`).
     ///
-    /// Aceasta este ECHIVALENT cu:
-    ///   let mut result = Vec::new();
-    ///   for h in hits.iter() {
-    ///       if now.duration_since(h.seen_at) <= window {
-    ///           result.push(h.port);
-    ///       }
-    ///   }
-    /// Dar versiunea cu iteratori este mai concisa si la fel de performanta.
+    /// Solutia: injectam map-ul ca referinta `&DashMap<IpAddr, Vec<PortHit>>`.
+    /// Aceasta este "dependency injection" la nivel de functie — un principiu
+    /// fundamental in design-ul de software testabil si extensibil.
     ///
+    /// Apeluri:
+    ///   self.unique_ports_in_window(&self.port_hits, ip, window, now)   → Fast/Slow Scan
+    ///   self.unique_ports_in_window(&self.accept_hits, ip, window, now) → Accept Scan
+    ///
+    /// NOTA RUST - ITERATORS (zero-cost abstractions):
+    /// .iter() → lazy, .filter() → lazy, .map() → lazy, .collect() → EXECUTA.
+    /// Compilatorul fuzioneaza lantul intr-un singur loop optimizat, fara colectii intermediare.
+    ///
+    /// NOTA RUST - `.get(&ip)` returneaza Option<Ref<K, V>>:
+    /// `Ref` este un guard de citire al DashMap (similar cu RwLockReadGuard).
+    /// Tine lock-ul de citire cat timp exista — dropat automat la finalul scope-ului (RAII).
     fn unique_ports_in_window(
         &self,
+        hits_map: &DashMap<IpAddr, Vec<PortHit>>,
         ip: IpAddr,
         window: Duration,
         now: Instant,
     ) -> Option<Vec<u16>> {
-        // `.get(&ip)` returneaza Option<Ref<IpAddr, Vec<PortHit>>>
-        // `Ref` este un guard de citire al DashMap (similar cu RwLockReadGuard).
-        // Guard-ul tine lock-ul cat timp exista - este dropat automat la
-        // finalul scope-ului (RAII).
-        let entry = self.port_hits.get(&ip)?;
+        let entry = hits_map.get(&ip)?;
         let hits = entry.value();
 
         let mut unique_ports: Vec<u16> = hits
@@ -401,51 +483,81 @@ impl Detector {
     ///
     pub fn cleanup(&self, max_age: Duration) {
         let now = Instant::now();
-        let mut empty_keys: Vec<IpAddr> = Vec::new();
 
-        // Curatam port hits vechi din fiecare IP.
+        // --- Curatam port_hits (drop-uri) ---
+        //
+        // NOTA RUST: Nu putem sterge din DashMap in timpul iteratiei (ar invalida
+        // iteratorul). De aceea colectam cheile goale si le stergem separat.
+        let mut drop_empty: Vec<IpAddr> = Vec::new();
         for mut entry in self.port_hits.iter_mut() {
-            // `.retain()` pastreaza doar hit-urile mai recente decat max_age.
             entry.value_mut().retain(|hit| {
                 now.saturating_duration_since(hit.seen_at) <= max_age
             });
-
-            // Marcam IP-urile fara hit-uri pentru stergere.
             if entry.value().is_empty() {
-                empty_keys.push(*entry.key());
+                drop_empty.push(*entry.key());
             }
         }
-
-        // Stergem IP-urile goale (eliberam memoria complet).
-        //
-        // NOTA RUST: Nu putem sterge in timpul iteratiei (ar invalida
-        // iteratorul). De aceea colectam cheile si le stergem separat.
-        for ip in &empty_keys {
+        for ip in &drop_empty {
             self.port_hits.remove(ip);
-            // Curatam si last_seen pentru IP-urile eliminate → evitam acumularea
-            // de intrari stale care ar fi selectate incorect ca LRU in viitor.
-            self.last_seen.remove(ip);
         }
 
-        // Curatam cooldown-urile expirate.
+        // --- Curatam accept_hits (accept-uri) ---
+        //
+        // Aceeasi logica ca pentru port_hits, dar pe map-ul separat al Accept Scan.
+        // Datele vechi de accept sunt la fel de costisitoare in memorie ca cele de drop.
+        let mut accept_empty: Vec<IpAddr> = Vec::new();
+        for mut entry in self.accept_hits.iter_mut() {
+            entry.value_mut().retain(|hit| {
+                now.saturating_duration_since(hit.seen_at) <= max_age
+            });
+            if entry.value().is_empty() {
+                accept_empty.push(*entry.key());
+            }
+        }
+        for ip in &accept_empty {
+            self.accept_hits.remove(ip);
+        }
+
+        // --- Sincronizam last_seen ---
+        //
+        // Eliminam din last_seen IP-urile care nu mai au date in NICIUN map.
+        // Un IP urmarit exclusiv pentru Accept Scan (fara drop-uri) trebuie
+        // sters din last_seen cand accept_hits il curata (si invers).
+        //
+        // NOTA RUST: `.retain()` pe DashMap cu closure care acceseaza ALTE DashMap-uri.
+        // Aceasta este sigura deoarece:
+        //   - last_seen, port_hits, accept_hits sunt DashMap-uri SEPARATE
+        //   - Fiecare are propriile sale shard-uri si lock-uri
+        //   - Nu exista overlapping borrows sau deadlock potential
+        //   - Garantat de Rust la compile-time prin tipurile Send + Sync ale DashMap
+        self.last_seen.retain(|ip, _| {
+            self.port_hits.contains_key(ip) || self.accept_hits.contains_key(ip)
+        });
+
+        // --- Curatam cooldown-urile expirate (toate trei tipuri) ---
         let cooldown_dur = Duration::from_secs(self.config.alert_cooldown_secs);
         self.fast_cooldowns
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
         self.slow_cooldowns
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
+        self.accept_cooldowns
+            .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
     }
 
-    /// Returneaza numarul de IP-uri urmarite in memorie.
+    /// Returneaza numarul total de IP-uri urmarite in memorie (drop + accept).
+    ///
+    /// `last_seen` este sursa de adevar: contine orice IP care a generat cel
+    /// putin un eveniment (drop sau accept) si nu a fost inca curatat.
     /// Util pentru monitorizarea starii interne si afisarea in CLI.
     pub fn tracked_ips(&self) -> usize {
-        self.port_hits.len()
+        self.last_seen.len()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DetectionConfig, FastScanConfig, SlowScanConfig};
+    use crate::config::{AcceptScanConfig, DetectionConfig, FastScanConfig, SlowScanConfig};
 
     /// Creeaza o configuratie de test cu praguri mici pentru teste rapide.
     fn test_config() -> DetectionConfig {
@@ -460,6 +572,11 @@ mod tests {
             slow_scan: SlowScanConfig {
                 port_threshold: 50,
                 time_window_mins: 1,
+            },
+            // Accept Scan cu acelasi prag ca Fast Scan pentru teste simetrice.
+            accept_scan: AcceptScanConfig {
+                port_threshold: 3,
+                time_window_secs: 10,
             },
         }
     }
@@ -571,6 +688,98 @@ mod tests {
         let ports: Vec<u16> = entry.iter().map(|h| h.port).collect();
         assert!(ports.contains(&10), "Portul cel mai recent (10) trebuie sa fie prezent");
         assert!(!ports.contains(&1), "Portul cel mai vechi (1) trebuia eliminat");
+    }
+
+    // =========================================================================
+    // Teste pentru #10 — Accept Scan Detection
+    // =========================================================================
+
+    /// Construieste un eveniment de tip "accept" (port deschis, permis de firewall).
+    fn make_accept_event(ip: &str, port: u16) -> LogEvent {
+        LogEvent {
+            source_ip: ip.parse().unwrap(),
+            dest_ip: Some("10.0.0.1".parse().unwrap()),
+            dest_port: port,
+            protocol: "tcp".to_string(),
+            // Diferenta fata de make_event: actiunea este "accept" nu "drop".
+            action: "accept".to_string(),
+            raw_log: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_accept_scan_alert() {
+        // 4 porturi ACCEPTATE unice cu prag = 3 → alerta la al 4-lea port.
+        let detector = Detector::new(test_config());
+
+        for port in 1..=4 {
+            let alerts = detector.process_event(&make_accept_event("10.1.0.1", port));
+            if port == 4 {
+                assert_eq!(alerts.len(), 1, "Trebuia o alerta Accept Scan la {} porturi", port);
+                assert!(
+                    matches!(alerts[0].scan_type, ScanType::AcceptScan),
+                    "Tipul alertei trebuie sa fie AcceptScan"
+                );
+            } else {
+                assert!(alerts.is_empty(), "Fara alerta la {} porturi (sub prag)", port);
+            }
+        }
+    }
+
+    #[test]
+    fn test_drop_events_do_not_trigger_accept_scan() {
+        // Evenimentele "drop" NU trebuie sa declanseze Accept Scan.
+        // Sunt inregistrate in port_hits, nu in accept_hits.
+        let detector = Detector::new(test_config());
+
+        for port in 1..=10 {
+            let alerts = detector.process_event(&make_event("10.2.0.1", port));
+            for alert in &alerts {
+                assert!(
+                    !matches!(alert.scan_type, ScanType::AcceptScan),
+                    "Drop events NU trebuie sa declanseze Accept Scan (port {})", port
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_accept_events_do_not_trigger_fast_scan() {
+        // Evenimentele "accept" NU trebuie sa declanseze Fast/Slow Scan.
+        // Sunt inregistrate in accept_hits, nu in port_hits.
+        let detector = Detector::new(test_config());
+
+        for port in 1..=10 {
+            let alerts = detector.process_event(&make_accept_event("10.3.0.1", port));
+            for alert in &alerts {
+                assert!(
+                    !matches!(alert.scan_type, ScanType::Fast),
+                    "Accept events NU trebuie sa declanseze Fast Scan (port {})", port
+                );
+                assert!(
+                    !matches!(alert.scan_type, ScanType::Slow),
+                    "Accept events NU trebuie sa declanseze Slow Scan (port {})", port
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_accept_scan_cooldown() {
+        // Cooldown-ul Accept Scan este independent de cel Fast Scan.
+        let detector = Detector::new(test_config());
+
+        // Generam alerta initiala (4 porturi accept).
+        for port in 1..=4 {
+            detector.process_event(&make_accept_event("10.4.0.1", port));
+        }
+
+        // Al 5-lea port accept → cooldown activ → fara alerta noua.
+        let alerts = detector.process_event(&make_accept_event("10.4.0.1", 5));
+        assert!(
+            alerts.is_empty(),
+            "Cooldown-ul Accept Scan trebuia sa previna alerta duplicata"
+        );
     }
 
     #[test]

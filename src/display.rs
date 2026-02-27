@@ -5,8 +5,8 @@
 // Acest modul gestioneaza TOATA iesirea vizuala catre terminal:
 //   - Banner-ul de start (cu informatii de configurare)
 //   - Log-uri de stare formatate cu culori si badge-uri
-//   - Alerte de securitate vizual distincte (Fast/Slow Scan)
-//   - Statistici periodice si evenimente de drop
+//   - Alerte de securitate vizual distincte (Fast/Slow/Accept Scan)
+//   - Statistici periodice si evenimente de firewall (drop + accept)
 //
 // DESIGN: Separarea logicii de afisare de logica de business.
 // Modulul display.rs nu stie NIMIC despre parsare sau detectie -
@@ -184,6 +184,7 @@ pub fn log_error(message: &str) {
 // imediat vizibile in stream-ul de log. Folosim:
 //   - ROSU cu fundal pentru Fast Scan (urgenta ridicata)
 //   - GALBEN cu fundal pentru Slow Scan (urgenta medie)
+//   - MAGENTA cu fundal pentru Accept Scan (urgenta medie-mica)
 //   - Separatoare colorate si simboluri ▶▶▶ pentru vizibilitate maxima
 //   - Lista de porturi (trunchiate la 25 pentru lizibilitate)
 //
@@ -250,6 +251,24 @@ pub fn log_alert(alert: &Alert) {
             println!("{}", "─".repeat(SEPARATOR_WIDTH).yellow());
             println!();
         }
+        // Accept Scan: magenta — distinct vizual fata de rosu (Fast) si galben (Slow).
+        // Magenta semnalizeaza o amenintare de nivel mediu: traficul este "legitim"
+        // din perspectiva firewall-ului, dar pattern-ul este suspect.
+        ScanType::AcceptScan => {
+            println!();
+            println!("{}", "─".repeat(SEPARATOR_WIDTH).magenta());
+            println!(
+                "{} {} {} [ACCEPT SCAN] {} | {} porturi deschise accesate!",
+                ts.bold().white(),
+                arrows.magenta().bold(),
+                " ALERT ".on_magenta().white().bold(),
+                format!("[IP: {}]", alert.source_ip).magenta().bold(),
+                alert.unique_ports.len().to_string().magenta().bold()
+            );
+            println!("  Porturi: {}{}", port_list, suffix);
+            println!("{}", "─".repeat(SEPARATOR_WIDTH).magenta());
+            println!();
+        }
     }
 }
 
@@ -265,17 +284,29 @@ pub fn log_alert_sent(destination: &str, alert_type: &str) {
     );
 }
 
-/// Logarea unui eveniment de pachet primit (drop firewall) - albastru subtil.
+/// Logarea unui eveniment de firewall primit (drop sau accept) - cu badge dinamic.
 ///
-/// Afiseaza IP sursa, portul destinatie, protocolul si actiunea firewall-ului.
-/// Aceasta consuma campurile `protocol` si `action` din `LogEvent`,
-/// oferind vizibilitate completa asupra evenimentelor procesate.
-pub fn log_drop_event(ip: &std::net::IpAddr, port: u16, protocol: &str, action: &str) {
+/// Inainte de #10, aceasta functie se numea `log_drop_event` si afisa intotdeauna
+/// badge-ul " DROP " — incorect pentru evenimentele "accept" care acum sunt
+/// procesate pentru detectia Accept Scan.
+///
+/// Badge-uri:
+///   " DROP " albastru  → conexiune BLOCATA de firewall (port inchis/filtrat)
+///   " ACCPT" verde     → conexiune PERMISA de firewall (port deschis)
+pub fn log_firewall_event(ip: &std::net::IpAddr, port: u16, protocol: &str, action: &str) {
     let ts = timestamp();
+    // Badge dinamic: albastru pentru drop, verde pentru accept.
+    // NOTA RUST: `if-else` ca expresie — returneaza ColoredString din ambele ramuri.
+    // Tipul este unificat la compile-time (ambele returneaza ColoredString).
+    let badge = if action == "accept" {
+        " ACCPT".on_green().black().bold()
+    } else {
+        " DROP ".on_blue().white().bold()
+    };
     println!(
         "{} {} Src={} DstPort={} Proto={} Action={}",
         ts.dimmed(),
-        " DROP ".on_blue().white().bold(),
+        badge,
         format!("{}", ip).bright_blue(),
         format!("{}", port).bright_blue(),
         protocol.bright_blue(),

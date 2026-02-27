@@ -445,8 +445,9 @@ async fn main() -> anyhow::Result<()> {
                                     display::log_debug_parse_ok(&event);
                                 }
 
-                                // Afisam evenimentul de drop in terminal (albastru subtil).
-                                display::log_drop_event(
+                                // Afisam evenimentul in terminal cu badge dinamic
+                                // (albastru = drop, verde = accept).
+                                display::log_firewall_event(
                                     &event.source_ip,
                                     event.dest_port,
                                     &event.protocol,

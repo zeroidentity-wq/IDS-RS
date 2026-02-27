@@ -289,7 +289,16 @@ impl Alerter {
         // Prioritate syslog: facility=4 (security) × 8 + severity=6 (info) = 38
         // Campuri CEF Extensions: rt, src, cnt, act, msg, cs1Label, cs1
 
-        let (sig_id, event_name, scan_label) = match alert.scan_type {
+        // Tuple: (SignatureID, EventName, DescriereMsg, SeveritateCEF)
+        //
+        // Severitatea CEF (campul 7 din header) indica urgenta in ArcSight:
+        //   7 = High    → Fast Scan (raspuns imediat necesar)
+        //   6 = Medium  → Slow Scan (investigare necesara)
+        //   5 = Low     → Accept Scan (poate fi trafic legitim; investigare)
+        //
+        // Comentariul anterior spunea severitate 5 pentru AcceptScan, dar
+        // codul folosea 7 hardcodat pentru toate tipurile — inconsistenta fixata.
+        let (sig_id, event_name, scan_label, cef_severity) = match alert.scan_type {
             ScanType::Fast => (
                 "1001",
                 "Fast Port Scan Detected",
@@ -298,6 +307,7 @@ impl Alerter {
                     alert.unique_ports.len(),
                     self.detection.fast_scan.time_window_secs,
                 ),
+                7u8,
             ),
             ScanType::Slow => (
                 "1002",
@@ -307,6 +317,17 @@ impl Alerter {
                     alert.unique_ports.len(),
                     self.detection.slow_scan.time_window_mins,
                 ),
+                6u8,
+            ),
+            ScanType::AcceptScan => (
+                "1003",
+                "Accept Port Scan Detected",
+                format!(
+                    "Accept Scan detectat: {} porturi deschise accesate in {} secunde",
+                    alert.unique_ports.len(),
+                    self.detection.accept_scan.time_window_secs,
+                ),
+                5u8,
             ),
         };
 
@@ -351,9 +372,10 @@ impl Alerter {
 
         let message = format!(
             "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
-             |{sig_id}|{event_name}|7\
+             |{sig_id}|{event_name}|{sev}\
              |rt={rt_ms} src={src}{dst} cnt={cnt} act=alert \
              msg={msg} cs1Label=ScannedPorts cs1={ports}",
+            sev = cef_severity,
             syslog_ts = syslog_ts,
             sig_id = sig_id,
             event_name = event_name_safe,
@@ -421,7 +443,13 @@ impl Alerter {
             format!("{} + {} more", first_30, port_count - 30)
         };
 
-        let severity = "RIDICATA";
+        // Severitate afisata in email — paralela cu severitatea CEF din send_siem_alert.
+        // Fast=7=RIDICATA, Slow=6=MEDIE, AcceptScan=5=MEDIE-MICA.
+        let severity = match alert.scan_type {
+            ScanType::Fast => "RIDICATA",
+            ScanType::Slow => "MEDIE",
+            ScanType::AcceptScan => "MEDIE-MICA",
+        };
 
         let dest_ip_display = match alert.dest_ip {
             Some(ip) => ip.to_string(),

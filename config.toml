@@ -54,6 +54,15 @@ time_window_secs = 10
 port_threshold = 30
 time_window_mins = 5
 
+[detection.accept_scan]
+# Numar de porturi unice ACCEPTATE (permise de firewall) care declanseaza
+# alerta de Accept Scan. Alerta se emite cand un IP acceseaza > port_threshold
+# porturi DESCHISE in time_window_secs secunde.
+# Accept Scan detecteaza enumerarea serviciilor active (open port enumeration).
+# Pragul este mai mic decat Fast Scan (traficul accept poate fi mai "normal").
+port_threshold = 5
+time_window_secs = 30
+
 # -----------------------------------------------------------------------------
 # Configurare alerte
 # -----------------------------------------------------------------------------

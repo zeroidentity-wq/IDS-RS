@@ -19,6 +19,7 @@ Replay / sample (fisier la alegere):
 Generare dinamica (avansat):
   python tester.py fast-scan --format gaia --ports 20 --delay 0.1
   python tester.py slow-scan --format gaia --ports 40
+  python tester.py accept-scan --format gaia --ports 10 --delay 0.1
 """
 
 import argparse
@@ -264,6 +265,64 @@ def simulate_slow_scan(
     elapsed = time.time() - start_time
     print()
     print(f"[+] Slow Scan complet: {sent_count} log-uri in {elapsed:.1f}s ({fmt.upper()})")
+    print(f"    IDS-RS ar trebui sa detecteze scanarea daca pragul este < {num_ports}")
+
+
+def simulate_accept_scan(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    source_ip: str,
+    num_ports: int,
+    delay: float,
+    batch_size: int,
+    fmt: str,
+) -> None:
+    """
+    Simuleaza un Accept Scan: trimite log-uri de tip 'accept' cu porturi unice
+    diferite de la acelasi IP sursa, intr-un interval scurt.
+
+    Spre deosebire de Fast/Slow Scan (care simuleaza conexiuni BLOCATE de firewall),
+    Accept Scan simuleaza accesarea sistematica a porturilor DESCHISE — traficul
+    trece de firewall, dar pattern-ul este suspect.
+
+    Pragul default din config.toml: >5 porturi acceptate in 30 secunde.
+    """
+    print(f"[*] Simulare ACCEPT SCAN de la {source_ip} (format: {fmt.upper()})")
+    print(f"    Porturi: {num_ports} | Delay: {delay}s | Batch: {batch_size}")
+    print(f"    Destinatie: {host}:{port}")
+    print()
+
+    ports = random.sample(range(1, 65536), min(num_ports, 65535))
+
+    batch_buffer = []
+    sent_count = 0
+
+    for i, dst_port in enumerate(ports):
+        # Diferenta cheie fata de Fast/Slow Scan: action="accept" in loc de "drop".
+        # IDS-RS va ruta aceste evenimente catre accept_hits DashMap,
+        # nu catre port_hits, deci nu vor declansa Fast/Slow Scan.
+        log_line = generate_log(fmt, source_ip, dst_port, "accept")
+        batch_buffer.append(log_line)
+
+        if len(batch_buffer) >= batch_size or i == len(ports) - 1:
+            message = "\n".join(batch_buffer)
+            send_udp(sock, host, port, message)
+            sent_count += len(batch_buffer)
+
+            print(
+                f"  [{sent_count:>4}/{num_ports}] "
+                f"Trimis {len(batch_buffer)} log(uri) | "
+                f"Ultimul port: {dst_port}"
+            )
+
+            batch_buffer.clear()
+
+            if delay > 0 and i < len(ports) - 1:
+                time.sleep(delay)
+
+    print()
+    print(f"[+] Accept Scan complet: {sent_count} log-uri trimise ({fmt.upper()})")
     print(f"    IDS-RS ar trebui sa detecteze scanarea daca pragul este < {num_ports}")
 
 
@@ -787,13 +846,14 @@ def run_interactive_menu() -> None:
             print()
             print("  1) Fast Scan      (declanseaza alerta)")
             print("  2) Slow Scan      (declanseaza alerta lent)")
-            print("  3) Trafic Normal  (fara alerta)")
-            print("  4) Replay fisier  (trimite log-uri dintr-un fisier)")
-            print("  5) Random         (generare aleatorie cu IP custom)")
+            print("  3) Accept Scan    (declanseaza alerta — porturi deschise accesate)")
+            print("  4) Trafic Normal  (fara alerta)")
+            print("  5) Replay fisier  (trimite log-uri dintr-un fisier)")
+            print("  6) Random         (generare aleatorie cu IP custom)")
             print("  0) Iesire")
             print()
 
-            choice = _prompt_choice(["0", "1", "2", "3", "4", "5"])
+            choice = _prompt_choice(["0", "1", "2", "3", "4", "5", "6"])
 
             if choice == "0":
                 print("\nIesire.")
@@ -847,6 +907,28 @@ def run_interactive_menu() -> None:
                 elif choice == "3":
                     fmt = _ask_format()
                     host, port = _prompt_host_port()
+                    num_ports = _prompt_int("Numar porturi", 10)
+                    delay = _prompt_float("Delay intre pachete (s)", 0.1)
+                    source = _prompt("IP sursa simulat", "192.168.11.7")
+                    _print_summary([
+                        ("Scenariu", "Accept Scan"),
+                        ("Format", fmt.upper()),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("IP sursa", source),
+                        ("Porturi", num_ports),
+                        ("Delay", f"{delay}s"),
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+                    simulate_accept_scan(
+                        sock=sock, host=host, port=port,
+                        source_ip=source, num_ports=num_ports,
+                        delay=delay, batch_size=1, fmt=fmt,
+                    )
+
+                elif choice == "4":
+                    fmt = _ask_format()
+                    host, port = _prompt_host_port()
                     count = _prompt_int("Numar log-uri", 10)
                     source = _prompt("IP sursa simulat", "192.168.11.7")
                     _print_summary([
@@ -863,7 +945,7 @@ def run_interactive_menu() -> None:
                         source_ip=source, count=count, fmt=fmt,
                     )
 
-                elif choice == "4":
+                elif choice == "5":
                     host, port = _prompt_host_port()
                     file_path = _prompt("Cale fisier")
                     delay = _prompt_float("Delay intre pachete (s)", 0.1)
@@ -880,22 +962,23 @@ def run_interactive_menu() -> None:
                         file_path=file_path, delay=delay, batch_size=1,
                     )
 
-                elif choice == "5":
+                elif choice == "6":
                     ips = _prompt_ip_source()
 
                     print()
                     print("  Tip scenariu:")
                     print("    1) Fast Scan")
                     print("    2) Slow Scan")
-                    print("    3) Normal")
-                    scan_choice = _prompt_choice(["1", "2", "3"], "1")
+                    print("    3) Accept Scan")
+                    print("    4) Normal")
+                    scan_choice = _prompt_choice(["1", "2", "3", "4"], "1")
 
                     fmt = _ask_format()
                     host, port = _prompt_host_port()
 
-                    if scan_choice in ("1", "2"):
-                        default_ports = 20 if scan_choice == "1" else 40
-                        default_delay = 0.1 if scan_choice == "1" else 7.0
+                    if scan_choice in ("1", "2", "3"):
+                        default_ports = 20 if scan_choice == "1" else (40 if scan_choice == "2" else 10)
+                        default_delay = 0.1 if scan_choice == "1" else (7.0 if scan_choice == "2" else 0.1)
                         num_ports = _prompt_int("Numar porturi", default_ports)
                         delay = _prompt_float("Delay intre pachete (s)", default_delay)
                         extra_items = [("Porturi", num_ports), ("Delay", f"{delay}s")]
@@ -903,7 +986,7 @@ def run_interactive_menu() -> None:
                         count = _prompt_int("Numar log-uri", 10)
                         extra_items = [("Log-uri", count)]
 
-                    scan_names = {"1": "Fast Scan", "2": "Slow Scan", "3": "Normal"}
+                    scan_names = {"1": "Fast Scan", "2": "Slow Scan", "3": "Accept Scan", "4": "Normal"}
                     _print_summary([
                         ("Scenariu", f"Random — {scan_names[scan_choice]}"),
                         ("Format", fmt.upper()),
@@ -926,6 +1009,12 @@ def run_interactive_menu() -> None:
                             )
                         elif scan_choice == "2":
                             simulate_slow_scan(
+                                sock=sock, host=host, port=port,
+                                source_ip=ip, num_ports=num_ports,
+                                delay=delay, batch_size=1, fmt=fmt,
+                            )
+                        elif scan_choice == "3":
+                            simulate_accept_scan(
                                 sock=sock, host=host, port=port,
                                 source_ip=ip, num_ports=num_ports,
                                 delay=delay, batch_size=1, fmt=fmt,
@@ -1005,6 +1094,7 @@ def main() -> None:
             "Generare dinamica (avansat):\n"
             "  python tester.py fast-scan --format gaia --ports 20 --delay 0.1\n"
             "  python tester.py slow-scan --format gaia --ports 40\n"
+            "  python tester.py accept-scan --format gaia --ports 10 --delay 0.1\n"
         ),
     )
 
@@ -1087,6 +1177,25 @@ def main() -> None:
         type=float,
         default=7.0,
         help="Delay intre batch-uri in secunde (default: 7.0)",
+    )
+
+    # --- accept-scan (generare dinamica) ---
+    accept_parser = subparsers.add_parser(
+        "accept-scan",
+        help="Genereaza dinamic un Accept Scan (>5 porturi acceptate in <30s)",
+    )
+    add_common_scan_args(accept_parser)
+    accept_parser.add_argument(
+        "--ports",
+        type=int,
+        default=10,
+        help="Numar de porturi unice accesate (default: 10)",
+    )
+    accept_parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.1,
+        help="Delay intre batch-uri in secunde (default: 0.1)",
     )
 
     # --- replay ---
@@ -1174,6 +1283,17 @@ def main() -> None:
             )
         elif args.command == "slow-scan":
             simulate_slow_scan(
+                sock=sock,
+                host=args.host,
+                port=args.port,
+                source_ip=args.source,
+                num_ports=args.ports,
+                delay=args.delay,
+                batch_size=args.batch,
+                fmt=args.format,
+            )
+        elif args.command == "accept-scan":
+            simulate_accept_scan(
                 sock=sock,
                 host=args.host,
                 port=args.port,
