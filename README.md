@@ -1426,42 +1426,27 @@ udp_burst_size = 10000
 
 ## TODO — Securitate si hardening
 
-Probleme identificate si planificate pentru rezolvare, ordonate dupa prioritate.
-
-### Critica
-
-- [x] **Memorie neboundata per IP** (`detector.rs`) — rezolvat. `Vec<PortHit>` este acum limitat la `max_hits_per_ip` intrari (implicit: 10.000). La depasire, cele mai vechi intrari sunt eliminate (FIFO). Vezi sectiunea [Protectie memorie — MAX\_HITS\_PER\_IP](#protectie-memorie--max_hits_per_ip).
-
-- [x] **IP spoofing -> DashMap flood** (`detector.rs`) — rezolvat. Cand numarul de IP-uri urmarite atinge `max_tracked_ips` (implicit: 100.000), IP-ul cel mai vechi (LRU) este evictat automat inainte de inserarea celui nou. Vezi sectiunea [Protectie DashMap — MAX\_TRACKED\_IPS si LRU Eviction](#protectie-dashmap--max_tracked_ips-si-lru-eviction).
-
 ### Medie
 
 - [ ] **Parola SMTP in plaintext** (`config.toml`) — credentialele SMTP sunt stocate in clar in fisierul de configurare. Oricine cu acces read la fisier le poate citi. *Mitigare: citire din environment variable (`SMTP_PASSWORD`) sau secrets manager.*
 
-- [ ] **SMTP fara TLS** (`alerter.rs`) — cand `smtp_tls = false`, se foloseste `builder_dangerous()` care trimite credentiale (username + password) in clar pe retea. *Mitigare: warning la startup cand TLS e dezactivat; forteaza STARTTLS.*
-
-- [x] **Lipsa validare config** (`config.rs`) — rezolvat. `AppConfig::validate()` verifica toate constrangerile semantice la pornire. Vezi sectiunea [Validare automata la pornire](#validare-automata-la-pornire).
+- [ ] **SMTP fara TLS** (`alerter.rs`) — cand `smtp_tls = false`, se foloseste `builder_dangerous()` care trimite credentiale (username + password) in clar pe retea. *Mitigare: warning la startup cand TLS e dezactivat.*
 
 ### Scazuta
 
-- [x] **SIEM alert injection** (`alerter.rs`) — rezolvat. Functia `sanitize_cef()` escapeaza `\`, `|`, `\n`, `\r` pe campurile cu text dinamic: `event_name` (header CEF) si `scan_label` (textul descriptiv din `msg=`). Separatoarele proprii ale mesajului si listele de porturi (`u16`) nu sunt sanitizate. Vezi sectiunea [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection).
-
 - [ ] **Debug mode disk fill** — modul debug afiseaza fiecare pachet in stdout. In productie cu volum mare si stdout redirectat la fisier, poate umple disk-ul. *Mitigare: dezactivare automata dupa N minute sau limita de linii.*
 
-- [x] **Rate limiting UDP** (`main.rs`) — rezolvat. Token bucket limiteaza rata medie de procesare la `udp_rate_limit` pachete/secunda cu burst de `udp_burst_size`. Dezactivat implicit (0 = fara limita). Vezi sectiunea [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket).
+- [ ] **Verificare permisiuni config.toml** (`config.rs`) — daca fisierul este world-readable (`644`), oricine pe sistem poate citi credentialele SMTP. *Mitigare: warning la startup daca permisiunile sunt prea largi.*
 
 ---
 
 ## TODO — Functionalitati viitoare
 
-Idei de extindere planificate, ordonate dupa impact operational.
-
 ### Impact ridicat
 
-- [x] **Detectie scanare porturi deschise (accept scan)** — implementat complet.
-  Parserii procesa acum `accept`; detectorul foloseste `accept_hits` si `accept_cooldowns`
-  separate; `ScanType::AcceptScan` cu Signature ID `1003`, severitate CEF `5`; alerta
-  magenta distincta in terminal; `tester.py accept-scan` pentru testare.
+- [ ] **Alert fallback la fisier local** — daca SMTP-ul intern sau SIEM-ul este unreachable, alertele se pierd silentios. *Mitigare: scriere alerte intr-un fisier local ca fallback.*
+
+- [ ] **Whitelist IP-uri** — in retea interna exista scanere de vulnerabilitati legitime (Nessus, OpenVAS), agenti de monitoring sau echipa de securitate care face pentest intern. Fara whitelist, toate genereaza false positives. *Implementare: `[detection.whitelist]` in `config.toml` cu lista de IP-uri/CIDR excluse din detectie.*
 
 - [ ] **Raport zilnic prin email catre echipa IT/Security** — un task async
   programat sa ruleze o data pe zi (ex: la 08:00) care compileaza si trimite
@@ -1469,29 +1454,49 @@ Idei de extindere planificate, ordonate dupa impact operational.
   - Lista IP-urilor care au generat alerte (Fast/Slow Scan, Accept Scan)
   - Numarul total de porturi unice scanate per IP si tipul actiunii (accept/drop)
   - IP-urile cele mai active (top 10 atacatori)
-  - Comparatie cu ziua precedenta (IP-uri noi vs. recurente)
   - Starea sistemului: uptime IDS-RS, pachete procesate, alerte generate
 
   *Implementare: adauga `[alerting.daily_report]` in `config.toml` cu*
   *`enabled`, `send_at = "08:00"`, `recipients = [...]`; creeaza un task*
-  *tokio cu `tokio::time::interval` de 24h sau calcul pana la urmatorul HH:MM;*
-  *stocheaza statisticile zilnice intr-un struct protejat de `Arc<Mutex<...>>`*
-  *actualizat de `Detector` la fiecare eveniment; genereaza corpul emailului*
-  *in `alerter.rs` si trimite prin SMTP-ul deja configurat.*
+  *tokio cu calcul pana la urmatorul HH:MM; stocheaza statisticile zilnice*
+  *intr-un struct protejat de `Arc<Mutex<...>>`; genereaza si trimite prin SMTP.*
+
+### Impact mediu
+
+- [ ] **Diferentiere IP intern vs extern** — RFC1918 (`10.x`, `192.168.x`, `172.16-31.x`) vs IP-uri publice. Un atac din interior merita severitate/label diferit in SIEM si email.
+
+- [ ] **Stats periodice la fisier** — dump periodic (ex: la fiecare 5 minute) al unui JSON cu uptime, pachete procesate, alerte generate, IP-uri tracked. Poate fi citit de Nagios/Zabbix intern fara a interoga procesul.
+
+- [ ] **SIGHUP config reload** — reincarca `config.toml` fara restart, fara pierdere de context din memorie.
+
+- [ ] **Graceful shutdown SIGTERM** — flushaza alertele pending inainte de oprire.
+
+### Impact scazut
+
+- [ ] **Systemd service file** — restart automat la crash, logging prin journald, start la boot.
 
 ---
 
-## TODO — Calitate cod
+## Rezolvat
 
-Imbunatatiri tehnice interne care nu afecteaza comportamentul extern, dar cresc robustetea si testabilitatea.
+### Securitate si hardening
 
-- [x] **#2 — Cache transport SMTP** (`alerter.rs`) — rezolvat. `AsyncSmtpTransport<Tokio1Executor>`
-  era reconstruit la fiecare alerta (reconectare TLS/STARTTLS costisitoare).
-  Acum este construit **o singura data** in `Alerter::new()` (returneaza `Result<Self>`)
-  si reutilizat la fiecare email prin `Option<AsyncSmtpTransport<Tokio1Executor>>` stocat in struct.
-  Erorile de configurare SMTP sunt detectate la startup, nu la prima alerta.
+- [x] **Memorie neboundata per IP** (`detector.rs`) — `Vec<PortHit>` limitat la `max_hits_per_ip` intrari. La depasire, cele mai vechi sunt eliminate (FIFO). Vezi [Protectie memorie — MAX\_HITS\_PER\_IP](#protectie-memorie--max_hits_per_ip).
 
-- [x] **#18 — Teste unitare Slow Scan** (`detector.rs`) — rezolvat. Adaugate 3 teste dedicate
-  cu config separata (`slow_test_config()`: prag slow=3, prag fast=1000 — nu se declanseaza):
-  `test_slow_scan_alert`, `test_slow_scan_cooldown`, `test_slow_scan_independent_from_fast`.
-  Total teste: **33 passed**.
+- [x] **IP spoofing -> DashMap flood** (`detector.rs`) — la `max_tracked_ips`, IP-ul cel mai vechi (LRU) este evictat automat. Vezi [Protectie DashMap — MAX\_TRACKED\_IPS si LRU Eviction](#protectie-dashmap--max_tracked_ips-si-lru-eviction).
+
+- [x] **Lipsa validare config** (`config.rs`) — `AppConfig::validate()` verifica toate constrangerile semantice la pornire. Vezi [Validare automata la pornire](#validare-automata-la-pornire).
+
+- [x] **SIEM alert injection** (`alerter.rs`) — `sanitize_cef()` escapeaza `\`, `|`, `\n`, `\r` pe campurile cu text dinamic. Vezi [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection).
+
+- [x] **Rate limiting UDP** (`main.rs`) — token bucket limiteaza rata la `udp_rate_limit` pachete/secunda cu burst de `udp_burst_size`. Vezi [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket).
+
+### Functionalitati
+
+- [x] **Detectie Accept Scan** (`detector.rs`, `config.rs`, `alerter.rs`, `display.rs`) — `accept_hits` si `accept_cooldowns` separate; `ScanType::AcceptScan` cu Signature ID `1003`, severitate CEF `5`; alerta magenta in terminal; `tester.py accept-scan` pentru testare.
+
+### Calitate cod
+
+- [x] **Cache transport SMTP** (`alerter.rs`) — `AsyncSmtpTransport<Tokio1Executor>` construit o singura data in `Alerter::new()` si reutilizat la fiecare email. Erorile de configurare SMTP sunt detectate la startup.
+
+- [x] **Teste unitare Slow Scan** (`detector.rs`) — 3 teste dedicate: `test_slow_scan_alert`, `test_slow_scan_cooldown`, `test_slow_scan_independent_from_fast`. Total: **33 passed**.
