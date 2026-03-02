@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
-"""Conversie PREZENTARE_PROIECT_IDS-RS.md -> PDF cu weasyprint."""
+"""Conversie fisier Markdown -> PDF cu weasyprint.
 
+Utilizare:
+  python md_to_pdf.py                          # converteste PREZENTARE_PROIECT_IDS-RS.md
+  python md_to_pdf.py raport.md                # converteste raport.md -> raport.pdf
+  python md_to_pdf.py docs/README.md           # converteste cu cale relativa
+"""
+
+import sys
 import markdown
+from pathlib import Path
 from weasyprint import HTML
 
-MD_FILE = "PREZENTARE_PROIECT_IDS-RS.md"
-PDF_FILE = "PREZENTARE_PROIECT_IDS-RS.pdf"
+if len(sys.argv) >= 2:
+    MD_FILE = Path(sys.argv[1])
+else:
+    MD_FILE = Path("PREZENTARE_PROIECT_IDS-RS.md")
+
+PDF_FILE = MD_FILE.with_suffix(".pdf")
 
 CSS = """
 @page {
@@ -133,6 +145,10 @@ li {
 }
 """
 
+if not MD_FILE.exists():
+    print(f"Eroare: fisierul '{MD_FILE}' nu exista.")
+    sys.exit(1)
+
 with open(MD_FILE, "r", encoding="utf-8") as f:
     md_content = f.read()
 
@@ -152,5 +168,5 @@ full_html = f"""<!DOCTYPE html>
 </body>
 </html>"""
 
-HTML(string=full_html).write_pdf(PDF_FILE)
+HTML(string=full_html, base_url=str(MD_FILE.parent)).write_pdf(PDF_FILE)
 print(f"PDF generat: {PDF_FILE}")
