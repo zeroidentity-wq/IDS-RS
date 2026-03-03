@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { 
+            background-color: #f4f7f6; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            display: flex; 
+            justify-content: center; 
+            padding: 40px; 
+        }
+        .email-container { 
+            background: #ffffff; 
+            border-radius: 8px; 
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1); 
+            width: 100%; 
+            max-width: 650px; 
+            overflow: hidden; 
+            border: 1px solid #e0e0e0; 
+        }
+        .header { 
+            background: linear-gradient(135deg, #d32f2f, #e53935); 
+            color: white; 
+            padding: 20px 25px; 
+        }
+        .header-title { 
+            font-size: 13px; 
+            text-transform: uppercase; 
+            letter-spacing: 1px; 
+            opacity: 0.8; 
+            margin-bottom: 8px; 
+        }
+        .alert-title { 
+            font-size: 22px; 
+            font-weight: bold; 
+            display: flex; 
+            align-items: center; 
+            gap: 12px; 
+            margin: 0;
+        }
+        .dot { 
+            height: 14px; 
+            width: 14px; 
+            background-color: #ffeb3b; 
+            border-radius: 50%; 
+            display: inline-block;
+            box-shadow: 0 0 8px rgba(255, 235, 59, 0.6);
+        }
+        .badges { 
+            padding: 15px 25px; 
+            background: #fafafa; 
+            border-bottom: 1px solid #eeeeee; 
+            display: flex; 
+            gap: 12px; 
+        }
+        .badge { 
+            padding: 6px 14px; 
+            border-radius: 20px; 
+            font-size: 13px; 
+            font-weight: 600; 
+            border: 1px solid #ccc; 
+            background: white; 
+            color: #424242;
+        }
+        .badge-high { 
+            border-color: #ef5350; 
+            color: #d32f2f; 
+            background: #ffebee; 
+        }
+        .section { 
+            padding: 20px 25px; 
+            border-bottom: 1px solid #eeeeee; 
+        }
+        .section:last-child { border-bottom: none; }
+        .section-title { 
+            font-size: 12px; 
+            font-weight: 700; 
+            color: #757575; 
+            text-transform: uppercase; 
+            margin-bottom: 15px; 
+            letter-spacing: 0.5px; 
+        }
+        .details-grid { 
+            display: grid; 
+            grid-template-columns: 140px 1fr; 
+            gap: 12px; 
+            font-size: 14px; 
+        }
+        .label { 
+            font-weight: 600; 
+            color: #546e7a; 
+        }
+        .value { 
+            color: #212121; 
+            font-family: 'Consolas', monospace; 
+            background: #f5f5f5; 
+            padding: 3px 8px; 
+            border-radius: 4px;
+            display: inline-block;
+        }
+        .ports-list { 
+            font-family: 'Consolas', monospace; 
+            font-size: 14px; 
+            line-height: 1.6; 
+            color: #263238; 
+            background: #eceff1;
+            padding: 12px;
+            border-radius: 6px;
+            border-left: 4px solid #90a4ae;
+        }
+        .terminal { 
+            background: #1e1e1e; 
+            color: #d4d4d4; 
+            padding: 15px; 
+            border-radius: 6px; 
+            font-family: 'Consolas', monospace; 
+            font-size: 13px; 
+            line-height: 1.6; 
+            overflow-x: auto; 
+            border: 1px solid #000;
+        }
+        .comment { color: #6a9955; }
+        .command { color: #9cdcfe; }
+        .string { color: #ce9178; }
+        .keyword { color: #569cd6; }
+    </style>
+</head>
+<body>
+
+<div class="email-container">
+    <div class="header">
+        <div class="header-title">IDS-RS - Intrusion Detection System</div>
+        <h1 class="alert-title"><span class="dot"></span> ALERTA SCANARE RETEA</h1>
+    </div>
+
+    <div class="badges">
+        <span class="badge">Fast Scan</span>
+        <span class="badge badge-high">Severitate: RIDICATA</span>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Detalii Eveniment</div>
+        <div class="details-grid">
+            <div class="label">IP Sursa</div>
+            <div><span class="value">192.168.10.45</span></div>
+            
+            <div class="label">IP Destinatie</div>
+            <div><span class="value">10.0.0.1</span></div>
+            
+            <div class="label">Porturi scanate</div>
+            <div><span class="value" style="background: none; padding: 0;">20</span></div>
+            
+            <div class="label">Timestamp</div>
+            <div><span class="value">2026-02-26 14:30:00</span></div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Porturi Detectate</div>
+        <div class="ports-list">
+            21, 22, 23, 25, 53, 80, 110, 143, 443, 993, 995, 3389, 8080, 8443, 3306, 1433, 5432, 27017, 6379, 11211
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Comenzi Rapide &mdash; RHEL 9.6</div>
+        <div class="terminal">
+            <span class="comment"># Conexiuni active de la/catre acest IP:</span><br>
+            <span class="command">ss</span> -tnp | <span class="command">grep</span> <span class="string">192.168.10.45</span><br><br>
+
+            <span class="comment"># Cautare in log-urile de securitate si sistem:</span><br>
+            <span class="command">grep</span> <span class="string">192.168.10.45</span> /var/log/secure /var/log/messages 2>/dev/null<br><br>
+
+            <span class="comment"># Cautare in journal (ultimele 200 linii):</span><br>
+            <span class="command">journalctl</span> -n 200 --no-pager | <span class="command">grep</span> <span class="string">192.168.10.45</span><br><br>
+
+            <span class="comment"># Captura live trafic (primele 30 pachete):</span><br>
+            <span class="command">tcpdump</span> -i any host <span class="string">192.168.10.45</span> -n -c 30<br><br>
+
+            <span class="comment"># Blocare imediata cu firewalld (persistenta):</span><br>
+            <span class="command">firewall-cmd</span> --add-rich-rule=<span class="string">'rule family="ipv4" source address="192.168.10.45" drop'</span> --permanent && <span class="command">firewall-cmd</span> --reload<br><br>
+
+            <span class="comment"># Verificare daca IP-ul este activ (ARP):</span><br>
+            <span class="command">ip</span> neigh show | <span class="command">grep</span> <span class="string">192.168.10.45</span>
+        </div>
+    </div>
+</div>
+
+</body>
+</html>
