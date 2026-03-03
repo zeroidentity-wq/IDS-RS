@@ -7,6 +7,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 
 ## Cuprins
 
+- [Stare proiect](#stare-proiect)
 - [Arhitectura](#arhitectura)
 - [Cerinte sistem](#cerinte-sistem)
 - [Compilare](#compilare)
@@ -21,6 +22,40 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection)
 - [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket)
 - [Concepte Rust acoperite](#concepte-rust-acoperite)
+
+---
+
+## Stare proiect
+
+| Categorie | Detalii |
+|-----------|---------|
+| **Detectie** | Fast Scan, Slow Scan, Accept Scan — toate funcționale |
+| **Parseri** | Checkpoint Gaia, CEF/ArcSight |
+| **Alertare** | SIEM (UDP CEF), Email (SMTP async) |
+| **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
+| **Validare** | 16 constrângeri semantice la startup |
+| **Teste** | 33 teste unitare — toate trec |
+| **Clippy** | 7 warnings pre-existente (cosmetice, niciuna funcțională) |
+
+### Implementat
+
+- [x] Detectie Fast Scan + Slow Scan + Accept Scan
+- [x] Parseri Gaia si CEF
+- [x] Alertare SIEM (UDP CEF) si Email (SMTP async cu cache transport)
+- [x] Sanitizare campuri CEF anti-injection
+- [x] Rate Limiting UDP (Token Bucket)
+- [x] Protectie memorie: MAX_HITS_PER_IP (FIFO) + MAX_TRACKED_IPS (LRU eviction)
+- [x] Validare config cu raportare cumulata (16 constrangeri)
+- [x] Teste unitare: 33 passed (parseri, detector, alerter)
+
+### De implementat
+
+- [ ] Parser FortiGate (format Fortinet)
+- [ ] Raport zilnic email cu clasificare subretele
+- [ ] Whitelist IP-uri (IP + CIDR)
+- [ ] Webhook alerting (Slack/Teams)
+- [ ] Statistici live in terminal (AtomicU64 counters)
+- [ ] Hot reload config la SIGHUP
 
 ---
 
@@ -949,14 +984,14 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
 
 ## Changelog
 
-### [Nerealizat] — Imbunatatiri in curs de implementare
+### Implementat — toate verificate si testate
 
-- [x] **Mesaje SIEM hardcodate** (`alerter.rs`) — valorile ferestrei de timp (`10 secunde`,
+- [x] **#1 — Mesaje SIEM hardcodate** (`alerter.rs`) — valorile ferestrei de timp (`10 secunde`,
   `5 minute`) din mesajul CEF trimis catre SIEM erau hardcodate. Acum `Alerter` primeste
   `DetectionConfig` si citeste `time_window_secs` / `time_window_mins` direct din configurare.
 
-- [x] **Cleanup task: primul tick imediat** (`main.rs`) — `tokio::time::interval()` face
-  primul tick imediat la creare, rulând un cleanup inutil la startup. Inlocuit cu un loop
+- [x] **#17 — Cleanup task: primul tick imediat** (`main.rs`) — `tokio::time::interval()` face
+  primul tick imediat la creare, ruland un cleanup inutil la startup. Inlocuit cu un loop
   simplu `sleep`-first: asteapta intai intervalul complet, apoi curata.
 
 - [x] **Target Address si porturi in mesajul SIEM** — campul `dst` (Target Address in ArcSight)
@@ -965,23 +1000,29 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
   Campul `cs1=ScannedPorts` contine in continuare lista completa. `dest_ip` adaugat in
   `LogEvent` si `Alert`; extras de ambii parseri (Gaia si CEF).
 
-- [x] **Validare config post-deserializare** (`config.rs`) — adaugata `AppConfig::validate()`
+- [x] **#7 — Validare config post-deserializare** (`config.rs`) — adaugata `AppConfig::validate()`
   apelata automat din `load()`. Verifica 16 constrangeri semantice (valori zero invalide,
   consistenta ferestre de timp, campuri obligatorii conditionale) si raporteaza toate
   erorile simultan la pornire, inainte ca aplicatia sa inceapa sa asculte pe UDP.
 
-- [x] **Limitare memorie per IP — MAX_HITS_PER_IP** (`detector.rs`, `config.rs`) — `Vec<PortHit>`
+- [x] **#3 — Limitare memorie per IP — MAX_HITS_PER_IP** (`detector.rs`, `config.rs`) — `Vec<PortHit>`
   era nelimitata intre cleanup cycle-uri. Adaugat camp `max_hits_per_ip` in `DetectionConfig`
   (implicit 10.000). La depasire, cele mai vechi intrari sunt eliminate (FIFO via `drain(..N)`).
   Retrocompatibil prin `#[serde(default)]`. Adaugat test unitar `test_max_hits_per_ip_cap`.
 
-- [x] **Limitare globala IP-uri — MAX_TRACKED_IPS cu LRU Eviction** (`detector.rs`, `config.rs`)
+- [x] **#4 — Limitare globala IP-uri — MAX_TRACKED_IPS cu LRU Eviction** (`detector.rs`, `config.rs`)
   — DashMap-ul creste nelimitat la IP spoofing flood. Adaugat camp `max_tracked_ips` (implicit
   100.000) si structura auxiliara `last_seen: DashMap<IpAddr, Instant>`. Cand limita e atinsa,
   IP-ul cel mai vechi (LRU) este evictat din toate structurile interne. Cleanup actualizat sa
   sincronizeze `last_seen`. Adaugat test unitar `test_max_tracked_ips_eviction`.
 
-- [x] **Detectie Accept Scan — ScanType::AcceptScan** (`detector.rs`, `config.rs`, `alerter.rs`,
+- [x] **#8 — Sanitizare CEF anti-injection** (`alerter.rs`) — `sanitize_cef()` escapeaza `\`, `|`,
+  `\n`, `\r` pe campurile cu text dinamic. 7 teste unitare.
+
+- [x] **#9 — Rate Limiting UDP** (`main.rs`) — Token Bucket cu `udp_rate_limit` si `udp_burst_size`
+  in `config.toml`. Afisare periodica drop-uri cu badge `RATE`.
+
+- [x] **#10 — Detectie Accept Scan — ScanType::AcceptScan** (`detector.rs`, `config.rs`, `alerter.rs`,
   `display.rs`, parseri) — IDS-RS analiza exclusiv evenimentele `drop`. Un atacator care scaneaza
   **porturile deschise** (trafic `accept`) trecea complet neobservat. Implementat:
   - Parserii GAIA si CEF procesa acum si actiunea `accept` (nu mai ignora)
@@ -992,6 +1033,11 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
   - `display.rs`: alerta magenta distincta; badge `ACCPT` verde pentru evenimente accept
   - `tester.py`: comanda `accept-scan`, functie `simulate_accept_scan()`, optiune in meniu
   - 4 teste unitare noi in `detector.rs`: alert, no cross-contamination drop↔accept, cooldown
+
+- [x] **#2 — Cache transport SMTP** (`alerter.rs`) — `AsyncSmtpTransport` construit o singura data
+  in `Alerter::new()`. Erorile SMTP detectate la startup.
+
+- [x] **#18 — Teste unitare Slow Scan** (`detector.rs`) — 3 teste dedicate. Total: **33 passed**.
 
 ---
 
@@ -1444,13 +1490,13 @@ udp_burst_size = 10000
 
 ### Impact ridicat
 
-- [ ] **Alert fallback la fisier local** — daca SMTP-ul intern sau SIEM-ul este unreachable, alertele se pierd silentios. *Mitigare: scriere alerte intr-un fisier local ca fallback.*
+- [ ] **#12 — Whitelist IP-uri** — in retea interna exista scanere de vulnerabilitati legitime (Nessus, OpenVAS), agenti de monitoring sau echipa de securitate care face pentest intern. Fara whitelist, toate genereaza false positives. *Implementare: `[detection.whitelist]` in `config.toml` cu lista de IP-uri/CIDR excluse din detectie.*
 
-- [ ] **Whitelist IP-uri** — in retea interna exista scanere de vulnerabilitati legitime (Nessus, OpenVAS), agenti de monitoring sau echipa de securitate care face pentest intern. Fara whitelist, toate genereaza false positives. *Implementare: `[detection.whitelist]` in `config.toml` cu lista de IP-uri/CIDR excluse din detectie.*
-
-- [ ] **Raport zilnic prin email catre echipa IT/Security** — un task async
+- [ ] **#11 — Raport zilnic prin email catre echipa IT/Security** — un task async
   programat sa ruleze o data pe zi (ex: la 08:00) care compileaza si trimite
-  un email de sinteza cu activitatea din ultimele 24 de ore. Raportul include:
+  un email de sinteza cu activitatea din ultimele 24 de ore. Design complet gandit:
+  clasificare subretele (`[network.segments]`), Accept Scan = lateral movement in retea
+  izolata. Raportul include:
   - Lista IP-urilor care au generat alerte (Fast/Slow Scan, Accept Scan)
   - Numarul total de porturi unice scanate per IP si tipul actiunii (accept/drop)
   - IP-urile cele mai active (top 10 atacatori)
@@ -1461,13 +1507,19 @@ udp_burst_size = 10000
   *tokio cu calcul pana la urmatorul HH:MM; stocheaza statisticile zilnice*
   *intr-un struct protejat de `Arc<Mutex<...>>`; genereaza si trimite prin SMTP.*
 
+- [ ] **Alert fallback la fisier local** — daca SMTP-ul intern sau SIEM-ul este unreachable, alertele se pierd silentios. *Mitigare: scriere alerte intr-un fisier local ca fallback.*
+
 ### Impact mediu
 
+- [ ] **#19 — Parser FortiGate (Fortinet)** — format propriu, diferit de Gaia si CEF. Adaugat ca optiune `parser = "fortigate"` in `config.toml`. Implementeaza `trait LogParser` in `src/parser/fortigate.rs`.
+
+- [ ] **#13 — Webhook alerting (Slack/Teams)** — trimitere alerte prin HTTP POST catre webhook-uri Slack sau Microsoft Teams. *Implementare: `[alerting.webhook]` in `config.toml` cu `enabled`, `url`, `format` (slack/teams).*
+
+- [ ] **#16 — SIGHUP config reload** — reincarca `config.toml` fara restart, fara pierdere de context din memorie.
+
+- [ ] **#15 — Statistici live in terminal** — counteri `AtomicU64` pentru pachete procesate, alerte generate, IP-uri tracked. Afisare periodica in terminal fara impact pe performanta.
+
 - [ ] **Diferentiere IP intern vs extern** — RFC1918 (`10.x`, `192.168.x`, `172.16-31.x`) vs IP-uri publice. Un atac din interior merita severitate/label diferit in SIEM si email.
-
-- [ ] **Stats periodice la fisier** — dump periodic (ex: la fiecare 5 minute) al unui JSON cu uptime, pachete procesate, alerte generate, IP-uri tracked. Poate fi citit de Nagios/Zabbix intern fara a interoga procesul.
-
-- [ ] **SIGHUP config reload** — reincarca `config.toml` fara restart, fara pierdere de context din memorie.
 
 - [ ] **Graceful shutdown SIGTERM** — flushaza alertele pending inainte de oprire.
 
@@ -1475,28 +1527,34 @@ udp_burst_size = 10000
 
 - [ ] **Systemd service file** — restart automat la crash, logging prin journald, start la boot.
 
+- [ ] **Stats periodice la fisier** — dump periodic (ex: la fiecare 5 minute) al unui JSON cu uptime, pachete procesate, alerte generate, IP-uri tracked. Poate fi citit de Nagios/Zabbix intern fara a interoga procesul.
+
 ---
 
 ## Rezolvat
 
 ### Securitate si hardening
 
-- [x] **Memorie neboundata per IP** (`detector.rs`) — `Vec<PortHit>` limitat la `max_hits_per_ip` intrari. La depasire, cele mai vechi sunt eliminate (FIFO). Vezi [Protectie memorie — MAX\_HITS\_PER\_IP](#protectie-memorie--max_hits_per_ip).
-
-- [x] **IP spoofing -> DashMap flood** (`detector.rs`) — la `max_tracked_ips`, IP-ul cel mai vechi (LRU) este evictat automat. Vezi [Protectie DashMap — MAX\_TRACKED\_IPS si LRU Eviction](#protectie-dashmap--max_tracked_ips-si-lru-eviction).
-
-- [x] **Lipsa validare config** (`config.rs`) — `AppConfig::validate()` verifica toate constrangerile semantice la pornire. Vezi [Validare automata la pornire](#validare-automata-la-pornire).
-
-- [x] **SIEM alert injection** (`alerter.rs`) — `sanitize_cef()` escapeaza `\`, `|`, `\n`, `\r` pe campurile cu text dinamic. Vezi [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection).
-
-- [x] **Rate limiting UDP** (`main.rs`) — token bucket limiteaza rata la `udp_rate_limit` pachete/secunda cu burst de `udp_burst_size`. Vezi [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket).
+| # | Descriere | Sectiune |
+|---|-----------|----------|
+| #3 | MAX_HITS_PER_IP — FIFO per IP | [Protectie memorie](#protectie-memorie--max_hits_per_ip) |
+| #4 | MAX_TRACKED_IPS — LRU eviction | [Protectie DashMap](#protectie-dashmap--max_tracked_ips-si-lru-eviction) |
+| #7 | Validare config — 16 constrangeri | [Validare automata](#validare-automata-la-pornire) |
+| #8 | Sanitizare CEF anti-injection | [Securitate CEF](#securitate--sanitizare-campuri-cef-anti-injection) |
+| #9 | Rate Limiting UDP — Token Bucket | [Rate Limiting](#rate-limiting-udp--token-bucket) |
 
 ### Functionalitati
 
-- [x] **Detectie Accept Scan** (`detector.rs`, `config.rs`, `alerter.rs`, `display.rs`) — `accept_hits` si `accept_cooldowns` separate; `ScanType::AcceptScan` cu Signature ID `1003`, severitate CEF `5`; alerta magenta in terminal; `tester.py accept-scan` pentru testare.
+| # | Descriere |
+|---|-----------|
+| #1 | Mesaje SIEM citesc time_window din config (nu hardcodate) |
+| #10 | Accept Scan — `accept_hits` separate, SigID 1003, magenta CLI |
+| #17 | Cleanup task sleep-first (nu interval tick imediat) |
+| — | `dest_ip` in LogEvent/Alert, `dst=` in CEF, porturi in `msg` |
 
 ### Calitate cod
 
-- [x] **Cache transport SMTP** (`alerter.rs`) — `AsyncSmtpTransport<Tokio1Executor>` construit o singura data in `Alerter::new()` si reutilizat la fiecare email. Erorile de configurare SMTP sunt detectate la startup.
-
-- [x] **Teste unitare Slow Scan** (`detector.rs`) — 3 teste dedicate: `test_slow_scan_alert`, `test_slow_scan_cooldown`, `test_slow_scan_independent_from_fast`. Total: **33 passed**.
+| # | Descriere |
+|---|-----------|
+| #2 | Cache SMTP transport (construit o data in `new()`) |
+| #18 | Teste unitare Slow Scan (3 teste). **Total: 33 passed** |

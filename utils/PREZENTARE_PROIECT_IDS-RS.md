@@ -4,6 +4,123 @@
 
 ---
 
+## PREZENTARE ORALA — Ghid pentru 5 minute
+
+> Aceste puncte sunt gandite pentru a fi citite sau parafrazate in fata audientei.
+> Fiecare bloc dureaza aproximativ 1 minut.
+
+---
+
+### MINUTUL 1 — Deschiderea (Problema)
+
+Vreau sa va rog sa va ganditi la un lucru: chiar acum, in aceasta secunda,
+firewall-ul nostru intern blocheaza conexiuni. Genereaza log-uri.
+Cineva sau ceva incearca sa ajunga undeva unde nu are voie.
+
+**Stim cine?** Nu.
+**Stim de cand?** Nu.
+**Stim ce a incercat?** Nu.
+
+Nu pentru ca informatia nu exista — ci pentru ca **nimeni nu o citeste**.
+
+Firewall-ul face treaba lui perfect. Blocheaza. Inregistreaza. Dar nu
+gandeste. Nu coreleaza. Nu bate pe nimeni pe umar sa spuna: "Uite,
+statia asta a incercat 50 de servicii diferite in ultimele 10 secunde —
+ceva nu e in regula."
+
+Si asta e diferenta intre a avea **protectie** si a avea **vizibilitate**.
+
+Noi avem protectie. Ne lipseste vizibilitatea.
+
+Un studiu IBM din 2023 arata ca organizatiile au nevoie in medie de
+**204 zile** ca sa detecteze o compromitere interna. 7 luni in care
+un dispozitiv infectat se plimba liber prin retea. Nu pentru ca nu
+exista indicii — ci pentru ca nimeni nu le vede.
+
+---
+
+### MINUTUL 2 — Solutia (Ce face IDS-RS)
+
+IDS-RS este un sistem pe care l-am dezvoltat intern. Face un singur lucru,
+si il face bine: **se uita la ceea ce firewall-ul raporteaza si vede tiparele
+pe care un om nu le poate observa in mii de log-uri.**
+
+Daca o statie interna bate la 20 de usi diferite in 10 secunde — nu este
+activitate normala. IDS-RS vede asta si trimite alerta **in secunde**,
+nu in zile.
+
+Detectam trei tipuri de comportament:
+- **Scanare rapida** — cineva alearga pe hol si trage de fiecare usa
+- **Scanare lenta** — cineva verifica o usa pe zi, stiind ca viteza ar fi observata
+- **Scanare cu acces** — cel mai periculos: cineva gaseste usile care **se deschid**
+
+Alerta ajunge instant pe doua canale: in SIEM-ul nostru central si pe email
+la echipa IT, cu comenzi gata de executat — copy-paste direct in firewall.
+
+---
+
+### MINUTUL 3 — De ce conteaza (Impactul real)
+
+Fara IDS-RS, o statie compromisa poate opera zile intregi fara sa fie observata.
+Scaneaza reteaua, gaseste servere, se misca lateral. Cand descoperim problema,
+este deja prea tarziu — datele au fost accesate.
+
+Cu IDS-RS, diferenta este dramatica:
+
+**Fara:** scanare → nimeni nu observa → zile → miscare laterala → incident
+**Cu:** scanare → alerta in secunde → echipa izoleaza → incident neutralizat
+
+Trecerea de la **reactiv** la **proactiv** nu este un lux. Este diferenta
+intre a descoperi o bresa dupa 7 luni si a o opri in 5 minute.
+
+Un singur incident nereportat poate costa mai mult decat toata investitia
+in acest sistem. IDS-RS nu inlocuieste firewall-ul — **il face vizibil**.
+
+---
+
+### MINUTUL 4 — Securitatea sistemului insusi
+
+Un punct important: IDS-RS nu doar detecteaza amenintari — **se protejeaza
+activ pe sine.**
+
+Un atacator sofisticat ar putea incerca:
+- Sa **inunde** IDS-ul cu trafic fals ca sa-l doboare → avem Rate Limiting
+- Sa **umfle** memoria cu milioane de IP-uri false → avem limita de IP-uri cu evictie automata
+- Sa **injecteze** alerte false in SIEM prin log-uri manipulate → avem sanitizare anti-injection
+- Sa trimita o configuratie gresita care sa-l blocheze → avem 16 validari automate la pornire
+
+Sistemul nu poate fi pacalit, suprasaturat sau doborat prin metode cunoscute.
+Acest lucru este critic — un IDS care poate fi oprit de atacator nu are nicio valoare.
+
+---
+
+### MINUTUL 5 — Inchiderea (Ce cerem)
+
+Sistemul este functional, testat, documentat. 33 de teste unitare, toate trec.
+Dezvoltat intern — **zero costuri de licenta**, zero dependenta de furnizor extern.
+
+Ce avem nevoie:
+- Un port UDP pe firewall — o singura regula de forwarding
+- Un server (fizic sau virtual) — resurse minime
+- Coordonare cu echipa de retea pentru configurarea initiala
+
+Implementarea este graduala, fara impact asupra serviciilor in productie.
+
+Intrebarea nu este **daca** cineva va incerca ceva in reteaua noastra.
+Intrebarea este: **vom sti cand se intampla?**
+
+Cu IDS-RS, raspunsul este **da, in secunde.**
+
+---
+
+> *Sfat pentru prezentare: dupa minutul 5, deschide terminalul cu IDS-RS pornit
+> si ruleaza `python3 tester/tester.py fast` — audienta va vedea alerta in
+> timp real. O demonstratie live de 30 secunde valoreaza mai mult decat
+> 10 slide-uri.*
+
+---
+---
+
 ## 1. DE CE AVEM NEVOIE DE ACEST PROIECT
 
 ### Contextul nostru
@@ -131,7 +248,113 @@ efectiv puncte de acces functionale in retea.
 
 ---
 
-## 4. BENEFICII
+## 4. FUNCTIONALITATI IMPLEMENTATE
+
+### Detectie — ce detecteaza sistemul
+
+| Functionalitate | Descriere | Status |
+|----------------|-----------|--------|
+| **Fast Scan** | Detecteaza scanari agresive — zeci de porturi in secunde | Implementat |
+| **Slow Scan** | Detecteaza scanari discrete — porturi distribuite pe minute | Implementat |
+| **Accept Scan** | Detecteaza enumerarea serviciilor **deschise** (cel mai periculos tip) | Implementat |
+| **Cooldown per IP** | Previne sute de alerte identice pentru aceeasi sursa | Implementat |
+
+### Alertare — cum aflati
+
+| Functionalitate | Descriere | Status |
+|----------------|-----------|--------|
+| **SIEM (ArcSight)** | Alerte CEF cu IP sursa, IP tinta, porturi, severitate | Implementat |
+| **Email** | Email structurat cu detalii + comenzi copy-paste de reactie | Implementat |
+| **Dashboard terminal** | Alerte colorate in timp real (rosu/galben/magenta) | Implementat |
+| **Webhook (Slack/Teams)** | Notificari prin HTTP POST | Planificat |
+| **Raport zilnic** | Sinteza 24h cu top atacatori si clasificare subretele | Planificat |
+
+### Parseri — ce firewall-uri intelege
+
+| Parser | Format | Status |
+|--------|--------|--------|
+| **Checkpoint Gaia** | Format nativ syslog Checkpoint | Implementat |
+| **CEF / ArcSight** | Common Event Format (standard multi-vendor) | Implementat |
+| **FortiGate** | Format nativ Fortinet | Planificat |
+
+### Securitatea sistemului IDS-RS
+
+IDS-RS nu doar detecteaza amenintari — **se protejeaza activ pe sine** impotriva manipularii
+si supraincarcarii. Fiecare masura raspunde unui vector de atac real:
+
+#### Sanitizare CEF anti-injection
+
+**Problema:** Un atacator sofisticat poate incerca sa injecteze alerte false in SIEM
+prin caractere speciale in log-urile firewall-ului (newline, pipe, backslash).
+
+**Solutia:** Toate campurile text din alertele trimise la SIEM sunt sanitizate inainte
+de trimitere. Caracterele structurale CEF (`|`, `\n`, `\r`, `\`) sunt escapate conform
+standardului, impiedicand injectarea de linii syslog sau campuri false.
+
+**Rezultat:** SIEM-ul primeste exclusiv alerte generate de IDS-RS — nicio alerta falsa
+nu poate fi fabricata prin manipularea log-urilor.
+
+#### Rate Limiting UDP (Token Bucket)
+
+**Problema:** Un flood de pachete UDP (IP-uri spoofate, amplificare DNS/NTP) poate
+satura CPU-ul IDS-ului, cauzand pierderea alertelor reale.
+
+**Solutia:** Algoritm Token Bucket — permite burst-uri scurte legitime dar limiteaza
+rata medie de procesare. Pachetele in exces sunt silentios ignorate.
+
+**Rezultat:** IDS-ul proceseaza traficul real chiar si sub atac — CPU-ul este protejat,
+alertele reale nu se pierd. Rata si burst-ul sunt configurabile.
+
+#### Protectie memorie per IP (MAX_HITS_PER_IP)
+
+**Problema:** Un scanner agresiv poate genera zeci de mii de evenimente pe secunda,
+umfland memoria alocata pentru acel IP intre doua cicluri de curatare.
+
+**Solutia:** Fiecare IP are o limita de intrari in memorie (implicit 10.000). Cand
+limita este depasita, cele mai vechi date sunt eliminate automat (FIFO). Datele recente
+— cele relevante pentru detectie — sunt mereu pastrate.
+
+**Rezultat:** Memoria este controlata chiar si sub scanare agresiva. Detectia nu este
+afectata — pragurile de alerta sunt cu mult sub limita de 10.000.
+
+#### Protectie DashMap (MAX_TRACKED_IPS + LRU Eviction)
+
+**Problema:** Un atacator poate trimite pachete cu IP-uri sursa false (spoofate),
+creand milioane de intrari noi in memorie. Cleanup-ul nu ajuta — toate sunt "recente".
+
+**Solutia:** Numarul total de IP-uri urmarite este limitat (implicit 100.000). Cand
+limita este atinsa, IP-ul cel mai vechi (LRU — Least Recently Used) este eliminat
+automat din toate structurile interne.
+
+**Rezultat:** Memoria totala este limitata indiferent de numarul de IP-uri sursa.
+IDS-ul nu poate fi doborat prin flood de IP-uri spoofate.
+
+#### Validare configuratie la pornire
+
+**Problema:** O configuratie gresita (fereastra de timp 0, SMTP fara server,
+praguri inconsistente) poate cauza comportament imprevizibil sau crash in productie.
+
+**Solutia:** La pornire, 16 constrangeri semantice sunt verificate automat.
+Toate erorile sunt raportate simultan — nu se porneste cu configuratie invalida.
+
+**Rezultat:** Erori detectate **inainte** de punerea in functiune, nu in productie.
+
+### Rezumat securitate
+
+```
+  VECTOR DE ATAC                    PROTECTIA IDS-RS
+  ============================      ============================
+  Injectie alerte false in SIEM  →  Sanitizare CEF anti-injection
+  Flood UDP → saturare CPU       →  Rate Limiting (Token Bucket)
+  Scanner agresiv → OOM per IP   →  MAX_HITS_PER_IP (FIFO)
+  IP spoofing → OOM global       →  MAX_TRACKED_IPS (LRU eviction)
+  Config gresita → crash         →  Validare 16 constrangeri la startup
+  Cleanup periodic                →  Curatare automata date expirate
+```
+
+---
+
+## 5. BENEFICII PENTRU ORGANIZATIE
 
 ### Control intern complet
 
@@ -155,7 +378,7 @@ efectiv puncte de acces functionale in retea.
 
 ---
 
-## 5. CE VEDETI CONCRET
+## 6. CE VEDETI CONCRET
 
 ### Arhitectura sistemului
 
@@ -165,7 +388,8 @@ efectiv puncte de acces functionale in retea.
   log-uri syslog         | Parser            |
                           |   - Gaia          |
                           |   - CEF           |
-                          |   - FortiGate     |
+                          |   - FortiGate (*) |
+                          |  (*) = planificat |
                           +--------+----------+
                                    |
                                    v
@@ -284,9 +508,9 @@ IDS-RS se adapteaza la infrastructura existenta, fara schimbari majore:
 
 **Scenariul A — Firewall direct catre IDS-RS:**
 ```
-  Checkpoint/FortiGate         IDS-RS
+  Checkpoint                    IDS-RS
   Firewall intern     -------->  UDP :5555
-                      syslog     parser = "gaia" / "fortigate"
+                      syslog     parser = "gaia"
 ```
 
 **Scenariul B — Prin platforma ArcSight (SIEM deja existent):**
@@ -314,8 +538,8 @@ ids-rs/
 │   └── parser/
 │       ├── mod.rs          # Interfata comuna pentru parseri
 │       ├── gaia.rs         # Parser Checkpoint Gaia
-│       ├── cef.rs          # Parser CEF / ArcSight
-│       └── fortigate.rs    # Parser Fortinet FortiGate
+│       └── cef.rs          # Parser CEF / ArcSight
+│       (fortigate.rs)      # Parser Fortinet FortiGate (planificat)
 └── tester/
     ├── tester.py           # Simulator trafic pentru testare
     └── sample_*.log        # Log-uri de test pre-generate
@@ -323,7 +547,7 @@ ids-rs/
 
 ---
 
-## 6. OBIECTIVE DE IMPLEMENTARE
+## 7. OBIECTIVE DE IMPLEMENTARE
 
 Implementarea se desfasoara in **8 obiective**:
 
@@ -357,11 +581,11 @@ log-uri, conexiuni active si blocare temporara.
 ---
 
 ### OBIECTIVUL 4 — Suport multi-vendor firewall
-> Livram: compatibilitate cu Checkpoint Gaia, CEF (standard) si Fortinet FortiGate
+> Livram: compatibilitate cu Checkpoint Gaia, CEF (standard) si Fortinet FortiGate (planificat)
 
-Sistemul intelege log-urile de la trei tipuri majore de firewall.
-Arhitectura modulara permite adaugarea altor producatori in viitor
-fara a modifica restul sistemului.
+Sistemul intelege log-urile de la doua tipuri majore de firewall (Gaia si CEF),
+cu FortiGate planificat ca urmatorul parser. Arhitectura modulara permite
+adaugarea altor producatori in viitor fara a modifica restul sistemului.
 
 ---
 
@@ -403,7 +627,7 @@ real si validare automata a configuratiei la pornire.
 
 ---
 
-## 7. SUMAR
+## 8. SUMAR
 
 ```
   FARA IDS-RS                           CU IDS-RS
@@ -435,7 +659,7 @@ Nu inlocuieste firewall-ul — il face vizibil.**
 
 ---
 
-## 8. CERERE DE AVIZARE
+## 9. CERERE DE AVIZARE
 
 Solicitam aprobarea pentru implementarea sistemului IDS-RS in
 infrastructura interna, conform celor 8 obiective prezentate.
