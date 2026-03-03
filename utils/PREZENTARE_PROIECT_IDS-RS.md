@@ -453,54 +453,87 @@ Campuri disponibile pentru investigare:
 
 ### Cum arata email-ul de alerta
 
-Echipa IT primeste un email structurat, cu tot ce trebuie sa stie si sa faca:
+Echipa IT primeste un **email HTML formatat profesional**, cu design modern
+si tot ce trebuie sa stie si sa faca. Subiectul email-ului:
 
 ```
-==========================================================
-    ALERTA DE SECURITATE -- IDS-RS
-==========================================================
+🔴 [Fast Scan][SCANARE RETEA] IDS-RS 192.168.10.45 20 porturi
+```
 
-  Tip scanare:    Fast Scan
-  Severitate:     RIDICATA
+Structura email-ului:
 
-----------------------------------------------------------
-  DETALII EVENIMENT
-----------------------------------------------------------
-
-  IP sursa:             192.168.10.45
-  IP destinatie:        10.0.0.1
-  Porturi scanate:      20
-  Timestamp:            2026-02-26 14:30:00
-
-  Porturi:              21, 22, 23, 25, 53, 80, 110, 143,
-                        443, 993, 995, 3389, 8080, ...
-
-----------------------------------------------------------
-  COMENZI UTILE (quick check)
-----------------------------------------------------------
-
-  # Log-uri firewall pentru acest IP (ultima ora):
-  log show -s 192.168.10.45 -t "last 1 hour"
-
-  # Conexiuni active de la acest IP:
-  fw tab -t connections -s | grep 192.168.10.45
-
-  # Blocare temporara (SAM):
-  fw sam -t 3600 -I src 192.168.10.45
-
-==========================================================
-       ____  ____  ____  ____
-      / ___|| ___|| __ )|___ \
-      \___ \|___ \|  _ \  __) |
-       ___) |___) | |_) |/ __/
-      |____/|____/|____/|_____|
-
-  Generat automat de S5B2
-==========================================================
+```
+┌──────────────────────────────────────────────────────────┐
+│  ████████████  HEADER (gradient rosu)  ████████████████  │
+│                                                          │
+│  IDS-RS — Intrusion Detection System                     │
+│  🔴 ALERTA SCANARE RETEA                                │
+│                                                          │
+│  ┌─────────────┐  ┌──────────────────────┐               │
+│  │  Fast Scan  │  │  Severitate: RIDICATA │              │
+│  └─────────────┘  └──────────────────────┘               │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  DETALII EVENIMENT                                       │
+│  ──────────────────────────                              │
+│  IP Sursa           192.168.10.45                        │
+│  IP Destinatie      10.0.0.1                             │
+│  Porturi scanate    20                                   │
+│  Timestamp          2026-02-26 14:30:00                  │
+│                                                          │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  PORTURI DETECTATE                                       │
+│  ▌ 21, 22, 23, 25, 53, 80, 110, 143, 443, 993,        │
+│  ▌ 995, 3389, 8080, 8443, 3306, 1433, 5432,            │
+│  ▌ 27017, 6379, 11211                                   │
+│                                                          │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  COMENZI RAPIDE — RHEL 9.6                               │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  # Conexiuni active de la/catre acest IP:          │  │
+│  │  ss -tnp | grep 192.168.10.45                      │  │
+│  │                                                    │  │
+│  │  # Cautare in log-urile de securitate si sistem:   │  │
+│  │  grep 192.168.10.45 /var/log/secure                │  │
+│  │       /var/log/messages 2>/dev/null                 │  │
+│  │                                                    │  │
+│  │  # Cautare in journal (ultimele 200 linii):        │  │
+│  │  journalctl -n 200 --no-pager |                    │  │
+│  │       grep 192.168.10.45                           │  │
+│  │                                                    │  │
+│  │  # Captura live trafic (primele 30 pachete):       │  │
+│  │  tcpdump -i any host 192.168.10.45 -n -c 30       │  │
+│  │                                                    │  │
+│  │  # Blocare imediata cu firewalld (persistenta):    │  │
+│  │  firewall-cmd --add-rich-rule='rule family="ipv4"  │  │
+│  │       source address="192.168.10.45" drop'         │  │
+│  │       --permanent && firewall-cmd --reload         │  │
+│  │                                                    │  │
+│  │  # Verificare daca IP-ul este activ (ARP):         │  │
+│  │  ip neigh show | grep 192.168.10.45                │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+├──────────────────────────────────────────────────────────┤
+│  ████████████  FOOTER (dark)  ████████████████████████   │
+│                                                          │
+│         ASCII ART CONFIGURABIL                           │
+│                                                          │
+│   Generat automat de IDS-RS | Nu raspundeti la email     │
+└──────────────────────────────────────────────────────────┘
 ```
 
 Inginerul de garda vede instant: **cine** scaneaza, **ce** a scanat,
-si are comenzi **gata de executat** — copy/paste direct in firewall.
+si are comenzi **gata de executat** — copy/paste direct in terminal RHEL.
+
+Tipuri de alerta in email:
+
+| Tip scanare | Severitate | Descriere |
+|-------------|-----------|-----------|
+| **Fast Scan** | RIDICATA | Zeci de porturi blocate in secunde |
+| **Slow Scan** | MEDIE | Porturi blocate distribuite pe minute |
+| **Accept Scan** | MEDIE-MICA | Porturi deschise accesate sistematic |
 
 ### Scenarii de conectare
 
