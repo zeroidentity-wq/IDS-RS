@@ -44,6 +44,7 @@
 
 pub mod cef;
 pub mod gaia;
+pub mod gaia_cef;
 
 use std::net::IpAddr;
 
@@ -122,6 +123,7 @@ pub fn create_parser(parser_type: &str) -> anyhow::Result<Box<dyn LogParser>> {
     match parser_type {
         "gaia" => Ok(Box::new(gaia::GaiaParser::new()?)),
         "cef" => Ok(Box::new(cef::CefParser::new())),
-        _ => anyhow::bail!("Parser necunoscut: '{}'. Optiuni valide: gaia, cef", parser_type),
+        "gaia_cef" => Ok(Box::new(gaia_cef::GaiaCefParser::new())),
+        _ => anyhow::bail!("Parser necunoscut: '{}'. Optiuni valide: gaia, cef, gaia_cef", parser_type),
     }
 }

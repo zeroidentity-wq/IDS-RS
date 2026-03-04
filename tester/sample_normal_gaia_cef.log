@@ -1,0 +1,5 @@
+<134>Feb 17 11:32:44 gw CEF:0|CheckPoint|FW-1|R77|100|action="Drop" src="192.168.11.34" dst="10.0.0.1" service="22" proto="6"|5|
+<134>Feb 17 11:32:44 gw CEF:0|CheckPoint|FW-1|R77|100|action="Drop" src="192.168.11.34" dst="10.0.0.1" service="80" proto="6"|5|
+<134>Feb 17 11:32:44 gw CEF:0|CheckPoint|FW-1|R77|100|action="Drop" src="192.168.11.34" dst="10.0.0.1" service="443" proto="6"|5|
+<134>Feb 17 11:32:44 gw CEF:0|CheckPoint|FW-1|R77|100|action="Drop" src="192.168.11.34" dst="10.0.0.1" service="25" proto="6"|5|
+<134>Feb 17 11:32:44 gw CEF:0|CheckPoint|FW-1|R77|100|action="Drop" src="192.168.11.34" dst="10.0.0.1" service="53" proto="6"|5|

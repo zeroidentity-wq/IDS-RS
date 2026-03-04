@@ -7,6 +7,7 @@ Trimite pachete UDP catre IDS-RS simuland log-uri de firewall.
 Preset-uri rapide (replay automat din fisierele sample pre-generate):
   python tester.py fast                     # Fast Scan GAIA
   python tester.py fast --cef               # Fast Scan CEF
+  python tester.py fast --gaia-cef          # Fast Scan GAIA-CEF
   python tester.py slow                     # Slow Scan GAIA
   python tester.py slow --cef               # Slow Scan CEF
   python tester.py normal                   # Trafic normal GAIA
@@ -18,6 +19,7 @@ Replay / sample (fisier la alegere):
 
 Generare dinamica (avansat):
   python tester.py fast-scan --format gaia --ports 20 --delay 0.1
+  python tester.py fast-scan --format gaia_cef --ports 20 --delay 0.1
   python tester.py slow-scan --format gaia --ports 40
   python tester.py accept-scan --format gaia --ports 10 --delay 0.1
 """
@@ -66,10 +68,25 @@ def generate_cef_log(source_ip: str, dst_port: int, action: str = "drop") -> str
     )
 
 
+def generate_gaia_cef_log(source_ip: str, dst_port: int, action: str = "drop") -> str:
+    """Genereaza un log Checkpoint Gaia LEA blob impachetat in CEF Name field."""
+    severity = 5 if action == "drop" else 3
+    action_cap = action.capitalize()
+    proto = "6"  # TCP default
+    ts = time.strftime("%b %d %H:%M:%S")
+    return (
+        f'<134>{ts} gw-checkpoint CEF:0|CheckPoint|FW-1|R77|100|'
+        f'action="{action_cap}" src="{source_ip}" dst="192.168.1.1" '
+        f'service="{dst_port}" proto="{proto}"|{severity}|'
+    )
+
+
 def generate_log(fmt: str, source_ip: str, dst_port: int, action: str = "drop") -> str:
-    """Genereaza un log in formatul specificat (gaia sau cef)."""
+    """Genereaza un log in formatul specificat (gaia, cef sau gaia_cef)."""
     if fmt == "cef":
         return generate_cef_log(source_ip, dst_port, action)
+    if fmt == "gaia_cef":
+        return generate_gaia_cef_log(source_ip, dst_port, action)
     return generate_gaia_log(source_ip, dst_port, action)
 
 
@@ -629,11 +646,17 @@ def run_preset(
     port: int,
     preset: str,
     cef: bool,
+    gaia_cef: bool,
     delay: float,
     batch_size: int,
 ) -> None:
     """Replay automat din sample-ul corespunzator preset-ului."""
-    fmt = "cef" if cef else "gaia"
+    if gaia_cef:
+        fmt = "gaia_cef"
+    elif cef:
+        fmt = "cef"
+    else:
+        fmt = "gaia"
     filename = f"sample_{preset}_{fmt}.log"
     file_path = os.path.join(SCRIPT_DIR, filename)
     replay_file(sock, host, port, file_path, delay, batch_size)
@@ -811,13 +834,18 @@ def _prompt_ip_source() -> list:
 
 
 def _ask_format() -> str:
-    """Intreaba utilizatorul formatul de log dorit. Returneaza 'gaia' sau 'cef'."""
+    """Intreaba utilizatorul formatul de log dorit. Returneaza 'gaia', 'cef' sau 'gaia_cef'."""
     print()
     print("  Format:")
     print("    1) GAIA")
     print("    2) CEF")
-    c = _prompt_choice(["1", "2"], "1")
-    return "gaia" if c == "1" else "cef"
+    print("    3) GAIA-CEF  (LEA blob in CEF Name)")
+    c = _prompt_choice(["1", "2", "3"], "1")
+    if c == "2":
+        return "cef"
+    if c == "3":
+        return "gaia_cef"
+    return "gaia"
 
 
 def _print_summary(items: list) -> None:
@@ -1055,9 +1083,9 @@ def add_common_scan_args(parser: argparse.ArgumentParser) -> None:
     """Adauga argumentele comune pentru comenzile de scan."""
     parser.add_argument(
         "--format",
-        choices=["gaia", "cef"],
+        choices=["gaia", "cef", "gaia_cef"],
         default="gaia",
-        help="Formatul log-urilor: gaia sau cef (default: gaia)",
+        help="Formatul log-urilor: gaia, cef sau gaia_cef (default: gaia)",
     )
     parser.add_argument(
         "--source",
@@ -1120,6 +1148,7 @@ def main() -> None:
         help="Replay sample_fast_*.log (Fast Scan)",
     )
     fast_preset.add_argument("--cef", action="store_true", help="Format CEF in loc de GAIA")
+    fast_preset.add_argument("--gaia-cef", action="store_true", help="Format GAIA-CEF (LEA blob in CEF Name)")
     fast_preset.add_argument("--delay", type=float, default=0.1, help="Delay intre batch-uri (default: 0.1)")
     fast_preset.add_argument("--batch", type=int, default=1, help="Linii per pachet UDP (default: 1)")
 
@@ -1129,6 +1158,7 @@ def main() -> None:
         help="Replay sample_slow_*.log (Slow Scan)",
     )
     slow_preset.add_argument("--cef", action="store_true", help="Format CEF in loc de GAIA")
+    slow_preset.add_argument("--gaia-cef", action="store_true", help="Format GAIA-CEF (LEA blob in CEF Name)")
     slow_preset.add_argument("--delay", type=float, default=0.5, help="Delay intre batch-uri (default: 0.5)")
     slow_preset.add_argument("--batch", type=int, default=1, help="Linii per pachet UDP (default: 1)")
 
@@ -1138,6 +1168,7 @@ def main() -> None:
         help="Replay sample_normal_*.log (trafic normal, fara alerta)",
     )
     normal_preset.add_argument("--cef", action="store_true", help="Format CEF in loc de GAIA")
+    normal_preset.add_argument("--gaia-cef", action="store_true", help="Format GAIA-CEF (LEA blob in CEF Name)")
     normal_preset.add_argument("--delay", type=float, default=0.1, help="Delay intre batch-uri (default: 0.1)")
     normal_preset.add_argument("--batch", type=int, default=1, help="Linii per pachet UDP (default: 1)")
 
@@ -1267,6 +1298,7 @@ def main() -> None:
                 port=args.port,
                 preset=args.command,
                 cef=args.cef,
+                gaia_cef=args.gaia_cef,
                 delay=args.delay,
                 batch_size=args.batch,
             )

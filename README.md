@@ -30,23 +30,23 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 | Categorie | Detalii |
 |-----------|---------|
 | **Detectie** | Fast Scan, Slow Scan, Accept Scan — toate funcționale |
-| **Parseri** | Checkpoint Gaia, CEF/ArcSight |
+| **Parseri** | Checkpoint Gaia, CEF/ArcSight, Gaia-CEF (LEA blob in CEF Name) |
 | **Alertare** | SIEM (UDP CEF), Email (SMTP async) |
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
-| **Teste** | 33 teste unitare — toate trec |
+| **Teste** | 43 teste unitare — toate trec |
 | **Clippy** | 7 warnings pre-existente (cosmetice, niciuna funcțională) |
 
 ### Implementat
 
 - [x] Detectie Fast Scan + Slow Scan + Accept Scan
-- [x] Parseri Gaia si CEF
+- [x] Parseri Gaia, CEF si Gaia-CEF (LEA blob in CEF Name)
 - [x] Alertare SIEM (UDP CEF) si Email (SMTP async cu cache transport)
 - [x] Sanitizare campuri CEF anti-injection
 - [x] Rate Limiting UDP (Token Bucket)
 - [x] Protectie memorie: MAX_HITS_PER_IP (FIFO) + MAX_TRACKED_IPS (LRU eviction)
 - [x] Validare config cu raportare cumulata (16 constrangeri)
-- [x] Teste unitare: 33 passed (parseri, detector, alerter)
+- [x] Teste unitare: 43 passed (parseri, detector, alerter)
 
 ### De implementat
 
@@ -67,6 +67,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
   log-uri syslog         | LogParser (trait)  |
                           |   - GaiaParser    |
                           |   - CefParser     |
+                          |   - GaiaCefParser |
                           +--------+----------+
                                    |
                                    v
@@ -91,7 +92,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 
 1. Firewall-ul trimite log-uri syslog pe UDP catre portul configurat (default `5555`)
 2. Pachetele UDP sunt receptionate asincron (`tokio`) si splituite pe newline (buffer coalescing)
-3. Fiecare linie este parsata cu parser-ul activ (`gaia` sau `cef`), selectat din `config.toml`
+3. Fiecare linie este parsata cu parser-ul activ (`gaia`, `cef` sau `gaia_cef`), selectat din `config.toml`
 4. Evenimentele de tip `drop` si `accept` sunt inregistrate in detectorul thread-safe (`DashMap`)
 5. Daca un IP depaseste pragul de porturi unice intr-o fereastra de timp, se genereaza o alerta (Fast/Slow/Accept Scan)
 6. Alerta este afisata in terminal (colorat ANSI) si trimisa catre SIEM / email
@@ -170,7 +171,7 @@ Constrangerile validate:
 | Camp | Constrangere |
 |------|-------------|
 | `network.listen_port` | ≠ 0 |
-| `network.parser` | `"gaia"` sau `"cef"` |
+| `network.parser` | `"gaia"`, `"cef"` sau `"gaia_cef"` |
 | `detection.alert_cooldown_secs` | ≥ 1 |
 | `detection.fast_scan.port_threshold` | ≥ 1 |
 | `detection.fast_scan.time_window_secs` | ≥ 1 |
@@ -194,7 +195,7 @@ Constrangerile validate:
 [network]
 listen_address = "0.0.0.0"    # Interfata de ascultare
 listen_port = 5555             # Port UDP pentru receptie log-uri
-parser = "gaia"                # Parser activ: "gaia" sau "cef"
+parser = "gaia"                # Parser activ: "gaia", "cef" sau "gaia_cef"
 # debug = true                 # Mod debug: afiseaza fiecare pachet cu validare parsare
 
 [detection]
@@ -243,6 +244,14 @@ Sep 3 15:12:20 192.168.99.1 Checkpoint: 3Sep2007 15:12:08 drop 192.168.11.7 >eth
 ```
 <134>Feb 17 11:32:44 gw-hostname CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|Drop|5|src=192.168.11.7 dst=10.0.0.1 dpt=443 proto=TCP act=drop
 ```
+
+**Gaia-CEF** — Checkpoint LEA blob impachetat in CEF Name field (via ArcSight):
+```
+<134>Feb 17 11:32:44 gw CEF:0|CheckPoint|FW-1|R77|100|action="Drop" src="1.2.3.4" dst="5.6.7.8" service="443" proto="6"|5|
+```
+
+In acest format, ArcSight pune tot blob-ul LEA (perechi `key="value"`) in campul Name (index 5)
+al CEF-ului, nu in extensii (index 7). Parser-ul `gaia_cef` extrage campurile din Name.
 
 ---
 
@@ -346,6 +355,42 @@ lipsi sau varia), apoi desparte cu `|` si itereaza extensiile ca perechi `cheie=
 
 ---
 
+### Formatul Gaia-CEF (LEA blob in CEF Name)
+
+Unele firewall-uri Checkpoint Gaia (versiune veche, LEA v5) trimit log-uri prin ArcSight,
+dar ArcSight pune **tot blob-ul LEA** in campul Name (index 5), nu in extensii (index 7).
+Extensiile raman goale sau minime.
+
+```
+<134>Feb 17 11:32:44 gw CEF:0|CheckPoint|FW-1|R77|100|action="Drop" src="1.2.3.4" dst="5.6.7.8" service="443" proto="6"|5|
+```
+
+Anatomia:
+
+```
+<134>            → prioritate syslog
+Feb 17 11:32:44  → timestamp syslog
+gw               → hostname
+CEF:0            → versiunea CEF
+CheckPoint       → vendor
+FW-1             → produs
+R77              → versiune produs
+100              → signature ID
+                 → Name (index 5) — AICI ESTE BLOB-UL LEA:
+  action="Drop"     → actiunea firewall-ului
+  src="1.2.3.4"     → IP sursa (atacatorul)
+  dst="5.6.7.8"     → IP destinatie (tinta)
+  service="443"     → portul destinatie
+  proto="6"         → protocol IANA (6=tcp, 17=udp, 1=icmp)
+5                → severitate
+                 → extensii (index 7) — GOALE in acest format
+```
+
+Parsatorul `gaia_cef.rs` extrage campul Name (index 5), parseaza perechile `key="value"` cu
+verificare boundary (nu sub-string match), si mapeaza numerele de protocol IANA la nume standard.
+
+---
+
 ### Cum ajung datele pe portul 5555 — Fluxul real cu ArcSight Forwarder
 
 In productie, exista doua scenarii posibile:
@@ -395,13 +440,16 @@ IDS-RS primeste pachetul, il imparte pe `\n`, si parseaza fiecare linie independ
 
 ```toml
 [network]
-parser = "gaia"   # Scenariul A: firewall trimite GAIA direct la IDS-RS
-parser = "cef"    # Scenariul B: ArcSight Forwarder trimite CEF la IDS-RS
+parser = "gaia"      # Scenariul A: firewall trimite GAIA direct la IDS-RS
+parser = "cef"       # Scenariul B: ArcSight Forwarder trimite CEF la IDS-RS
+parser = "gaia_cef"  # Scenariul C: ArcSight pune LEA blob in CEF Name (Gaia vechi, LEA v5)
 ```
 
 In productie reala vei folosi cel mai probabil `parser = "cef"` daca ai deja
 un ArcSight SmartConnector instalat, deoarece acesta normalizeaza totul la CEF.
 Modul `"gaia"` este util cand conectezi firewall-ul **direct** la IDS-RS, fara intermediar.
+Modul `"gaia_cef"` este pentru cazul specific in care ArcSight primeste log-uri LEA v5
+de la Checkpoint vechi si le pune in campul Name al CEF-ului, nu in extensii.
 
 ---
 
@@ -714,11 +762,12 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 33 passed`
+Rezultat asteptat: `test result: ok. 43 passed`
 
 Testele acopera:
 - Parser GAIA: drop valid, accept parsat (nu ignorat), broadcast fara src, ICMP fara service, format invalid
 - Parser CEF: drop valid, accept parsat, syslog header, syslog priority header, non-CEF, campuri incomplete
+- Parser Gaia-CEF: drop valid, accept valid, fara src, fara service, proto UDP/ICMP mapping, case-insensitive action, non-CEF, actiune irelevanta, dest_ip optional
 - Detector Fast Scan: alert, sub prag, cooldown, cleanup, IP-uri separate, max_hits_per_ip, max_tracked_ips LRU
 - Detector Slow Scan: alert dedicat, cooldown, independenta fata de Fast Scan (`slow_test_config()`)
 - Detector Accept Scan: alert accept, drop nu declanseaza accept scan, accept nu declanseaza fast scan, cooldown accept
@@ -738,6 +787,9 @@ Proiectul include fisiere de log pre-generate, gata de replay:
 | `sample_slow_cef.log` | CEF | 35 | Acelasi scenariu, format CEF | Alerta Slow Scan |
 | `sample_normal_gaia.log` | GAIA | 5 | 5 drop-uri pe porturi comune (sub prag) | Fara alerta |
 | `sample_normal_cef.log` | CEF | 5 | Acelasi scenariu, format CEF | Fara alerta |
+| `sample_fast_gaia_cef.log` | GAIA-CEF | 20 | 20 drop-uri LEA in CEF Name, porturi unice | Alerta Fast Scan |
+| `sample_slow_gaia_cef.log` | GAIA-CEF | 35 | 35 drop-uri LEA in CEF Name, porturi unice | Alerta Slow Scan |
+| `sample_normal_gaia_cef.log` | GAIA-CEF | 5 | 5 drop-uri LEA in CEF Name (sub prag) | Fara alerta |
 | `sample2_gaia.log` | GAIA | 56 | Log-uri reale Checkpoint (accept + drop mixt) | Depinde de continut |
 
 ---
@@ -750,6 +802,9 @@ python3 tester/tester.py fast
 
 # CEF (config.toml: parser = "cef")
 python3 tester/tester.py fast --cef
+
+# GAIA-CEF (config.toml: parser = "gaia_cef")
+python3 tester/tester.py fast --gaia-cef
 ```
 
 IDS-RS ar trebui sa afiseze o alerta `Fast Scan detectat!` in terminalul sau.
@@ -762,6 +817,9 @@ python3 tester/tester.py slow
 
 # CEF
 python3 tester/tester.py slow --cef
+
+# GAIA-CEF
+python3 tester/tester.py slow --gaia-cef
 ```
 
 IDS-RS ar trebui sa afiseze o alerta `Slow Scan detectat!`.
@@ -774,6 +832,9 @@ python3 tester/tester.py accept-scan --format gaia --ports 10 --delay 0.05
 
 # Format CEF
 python3 tester/tester.py accept-scan --format cef --ports 10 --delay 0.05
+
+# Format GAIA-CEF
+python3 tester/tester.py accept-scan --format gaia_cef --ports 10 --delay 0.05
 ```
 
 IDS-RS ar trebui sa afiseze o alerta `Accept Scan` cu badge **magenta** in terminal.
@@ -787,6 +848,9 @@ python3 tester/tester.py normal
 
 # CEF
 python3 tester/tester.py normal --cef
+
+# GAIA-CEF
+python3 tester/tester.py normal --gaia-cef
 ```
 
 IDS-RS **nu** ar trebui sa genereze nicio alerta.
@@ -813,10 +877,12 @@ Genereaza log-uri din mers, util pentru scenarii custom:
 ```bash
 python3 tester/tester.py fast-scan --format gaia --ports 20 --delay 0.1
 python3 tester/tester.py fast-scan --format cef --ports 20 --delay 0.1
+python3 tester/tester.py fast-scan --format gaia_cef --ports 20 --delay 0.1
 python3 tester/tester.py slow-scan --format gaia --ports 40
 python3 tester/tester.py slow-scan --format cef --ports 40 --delay 3
 python3 tester/tester.py accept-scan --format gaia --ports 10 --delay 0.1
 python3 tester/tester.py accept-scan --format cef --ports 10 --delay 0.1
+python3 tester/tester.py accept-scan --format gaia_cef --ports 10 --delay 0.1
 ```
 
 #### Sample Mode
@@ -850,6 +916,8 @@ python3 tester/tester.py sample tester/sample2_gaia.log fast-cef
 ├──────────────────────────────────────────┼──────────────────────────────────────────────┤
 │ tester.py fast --cef                     │ Replay sample_fast_cef.log                   │
 ├──────────────────────────────────────────┼──────────────────────────────────────────────┤
+│ tester.py fast --gaia-cef                │ Replay sample_fast_gaia_cef.log              │
+├──────────────────────────────────────────┼──────────────────────────────────────────────┤
 │ tester.py slow                           │ Replay sample_slow_gaia.log (drop events)    │
 ├──────────────────────────────────────────┼──────────────────────────────────────────────┤
 │ tester.py normal                         │ Replay sample_normal_gaia.log (no alert)     │
@@ -873,7 +941,8 @@ python3 tester/tester.py sample tester/sample2_gaia.log fast-cef
 | `--host` | `127.0.0.1` | Adresa IP a IDS-RS |
 | `--port` | `5555` | Portul UDP al IDS-RS |
 | `--cef` | `false` | Format CEF in loc de GAIA (preset-uri) |
-| `--format` | `gaia` | Formatul log-urilor: `gaia` sau `cef` (fast-scan/slow-scan) |
+| `--gaia-cef` | `false` | Format GAIA-CEF in loc de GAIA (preset-uri) |
+| `--format` | `gaia` | Formatul log-urilor: `gaia`, `cef` sau `gaia_cef` (fast-scan/slow-scan) |
 | `--source` | `192.168.11.7` | IP-ul sursa simulat (fast-scan/slow-scan) |
 | `--ports` | `20` / `40` / `10` | Numar de porturi unice (fast-scan/slow-scan/accept-scan) |
 | `--delay` | variabil | Delay intre batch-uri in secunde |
@@ -881,12 +950,14 @@ python3 tester/tester.py sample tester/sample2_gaia.log fast-cef
 
 ### Schimbare parser in config.toml
 
-Testele GAIA functioneaza cu `parser = "gaia"`, iar testele CEF cu `parser = "cef"`.
+Testele GAIA functioneaza cu `parser = "gaia"`, testele CEF cu `parser = "cef"`,
+iar testele GAIA-CEF cu `parser = "gaia_cef"`.
 Schimba in `config.toml` si reporneste IDS-RS:
 
 ```toml
 [network]
-parser = "cef"    # in loc de "gaia"
+parser = "cef"       # in loc de "gaia"
+parser = "gaia_cef"  # pentru Checkpoint LEA blob in CEF Name
 ```
 
 ---
@@ -908,7 +979,8 @@ ids-rs/
 │   └── parser/
 │       ├── mod.rs          # Trait LogParser, LogEvent, factory function
 │       ├── gaia.rs         # Parser Checkpoint Gaia (format real syslog)
-│       └── cef.rs          # Parser CEF / ArcSight
+│       ├── cef.rs          # Parser CEF / ArcSight
+│       └── gaia_cef.rs     # Parser Gaia LEA blob in CEF Name (via ArcSight)
 └── tester/
     ├── tester.py              # Script Python de testare (fast/slow/normal/replay/sample)
     ├── sample_fast_gaia.log   # 20 drop-uri GAIA (Fast Scan)
@@ -916,8 +988,11 @@ ids-rs/
     ├── sample_slow_gaia.log   # 35 drop-uri GAIA (Slow Scan)
     ├── sample_slow_cef.log    # 35 drop-uri CEF  (Slow Scan)
     ├── sample_normal_gaia.log # 5 drop-uri GAIA  (sub prag, trafic normal)
-    ├── sample_normal_cef.log  # 5 drop-uri CEF   (sub prag, trafic normal)
-    └── sample2_gaia.log       # 56 log-uri reale Checkpoint GAIA (accept + drop mixt)
+    ├── sample_normal_cef.log       # 5 drop-uri CEF   (sub prag, trafic normal)
+    ├── sample_fast_gaia_cef.log   # 20 drop-uri GAIA-CEF (Fast Scan)
+    ├── sample_slow_gaia_cef.log   # 35 drop-uri GAIA-CEF (Slow Scan)
+    ├── sample_normal_gaia_cef.log # 5 drop-uri GAIA-CEF  (sub prag, trafic normal)
+    └── sample2_gaia.log           # 56 log-uri reale Checkpoint GAIA (accept + drop mixt)
 ```
 
 ### Dependente principale
@@ -960,7 +1035,7 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
 | Derive Macros          | `config.rs`                          |
 | Modules                | `parser/mod.rs`, `main.rs`          |
 | Lifetime-uri           | `parser/gaia.rs` (`extract_field`)  |
-| Unit Tests             | `parser/gaia.rs`, `parser/cef.rs`, `detector.rs` |
+| Unit Tests             | `parser/gaia.rs`, `parser/cef.rs`, `parser/gaia_cef.rs`, `detector.rs` |
 
 ---
 
@@ -1037,7 +1112,14 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
 - [x] **#2 — Cache transport SMTP** (`alerter.rs`) — `AsyncSmtpTransport` construit o singura data
   in `Alerter::new()`. Erorile SMTP detectate la startup.
 
-- [x] **#18 — Teste unitare Slow Scan** (`detector.rs`) — 3 teste dedicate. Total: **33 passed**.
+- [x] **#18 — Teste unitare Slow Scan** (`detector.rs`) — 3 teste dedicate.
+
+- [x] **#19 — Parser Gaia-CEF** (`parser/gaia_cef.rs`) — Firewall-urile Checkpoint Gaia (LEA v5)
+  trimit log-uri prin ArcSight, care pune tot blob-ul LEA in campul Name (index 5) al CEF-ului,
+  nu in extensii (index 7). Parser-ul `gaia_cef` extrage perechi `key="value"` din Name cu
+  verificare boundary, mapeaza numere protocol IANA (6→tcp, 17→udp, 1→icmp), filtreaza drop/accept.
+  Integrat in factory (`mod.rs`), validare config (`config.rs`), tester (`tester.py` cu
+  `--format gaia_cef` si `--gaia-cef`). 10 teste unitare noi. Total: **43 passed**.
 
 ---
 

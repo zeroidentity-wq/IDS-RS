@@ -287,9 +287,9 @@ impl AppConfig {
         if self.network.listen_address.is_empty() {
             errors.push("network.listen_address nu poate fi gol".to_string());
         }
-        if !matches!(self.network.parser.as_str(), "gaia" | "cef") {
+        if !matches!(self.network.parser.as_str(), "gaia" | "cef" | "gaia_cef") {
             errors.push(format!(
-                "network.parser = {:?} este invalid. Valori acceptate: \"gaia\", \"cef\"",
+                "network.parser = {:?} este invalid. Valori acceptate: \"gaia\", \"cef\", \"gaia_cef\"",
                 self.network.parser
             ));
         }
