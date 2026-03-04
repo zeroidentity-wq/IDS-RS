@@ -34,7 +34,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 | **Alertare** | SIEM (UDP CEF), Email (SMTP async) |
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
-| **Teste** | 43 teste unitare — toate trec |
+| **Teste** | 48 teste unitare — toate trec |
 | **Clippy** | 7 warnings pre-existente (cosmetice, niciuna funcțională) |
 
 ### Implementat
@@ -46,7 +46,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Rate Limiting UDP (Token Bucket)
 - [x] Protectie memorie: MAX_HITS_PER_IP (FIFO) + MAX_TRACKED_IPS (LRU eviction)
 - [x] Validare config cu raportare cumulata (16 constrangeri)
-- [x] Teste unitare: 43 passed (parseri, detector, alerter)
+- [x] Teste unitare: 48 passed (parseri, detector, alerter)
 
 ### De implementat
 
@@ -762,7 +762,7 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 43 passed`
+Rezultat asteptat: `test result: ok. 48 passed`
 
 Testele acopera:
 - Parser GAIA: drop valid, accept parsat (nu ignorat), broadcast fara src, ICMP fara service, format invalid
@@ -1115,11 +1115,13 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
 - [x] **#18 — Teste unitare Slow Scan** (`detector.rs`) — 3 teste dedicate.
 
 - [x] **#19 — Parser Gaia-CEF** (`parser/gaia_cef.rs`) — Firewall-urile Checkpoint Gaia (LEA v5)
-  trimit log-uri prin ArcSight, care pune tot blob-ul LEA in campul Name (index 5) al CEF-ului,
-  nu in extensii (index 7). Parser-ul `gaia_cef` extrage perechi `key="value"` din Name cu
-  verificare boundary, mapeaza numere protocol IANA (6→tcp, 17→udp, 1→icmp), filtreaza drop/accept.
+  trimit log-uri prin ArcSight. Parser-ul `gaia_cef` accepta 3 formate de intrare:
+  (1) LEA blob in campul CEF Name (index 5), (2) LEA blob in extensia CEF `rawEvent=` sau `cs6=`
+  (cu unescape `\=` → `=`), (3) LEA blob raw fara wrapper CEF. Detectie automata cu fallback
+  prin `find_lea_blob()`. Extrage perechi `key="value"` cu verificare boundary (nu match substring
+  ca `rule_action`), mapeaza numere protocol IANA (6→tcp, 17→udp, 1→icmp), filtreaza drop/accept.
   Integrat in factory (`mod.rs`), validare config (`config.rs`), tester (`tester.py` cu
-  `--format gaia_cef` si `--gaia-cef`). 10 teste unitare noi. Total: **43 passed**.
+  `--format gaia_cef` si `--gaia-cef`). 15 teste unitare (10 initiale + 5 rawEvent). Total: **48 passed**.
 
 ---
 
