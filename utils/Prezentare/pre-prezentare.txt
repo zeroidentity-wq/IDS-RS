@@ -1,0 +1,23 @@
+IDS-RS — Intrusion Detection System
+
+IDS-RS este un sistem de detectie a intruziunilor in retea, dezvoltat intern, scris in Rust. Primeste log-uri de la firewall-ul intern pe UDP, le parseaza, coreleaza evenimentele per IP sursa si detecteaza automat tiparele de scanare a porturilor. Cand un IP depaseste pragul configurat — de exemplu 20 de porturi unice in 10 secunde — sistemul genereaza alerta in timp real, simultan pe SIEM (ArcSight, format CEF) si pe email.
+
+De ce este necesar. Firewall-ul opereaza per-conexiune — evalueaza fiecare pachet independent, fara corelare intre evenimente. Nu exista niciun mecanism nativ care sa agregeze 50 de drop-uri de la acelasi IP sursa si sa concluzioneze ca este o scanare de porturi. Aceasta corelare lipseste complet din stiva actuala. Fara ea, o statie compromisa poate enumera reteaua interna sistematic fara sa declanseze vreo alerta. IDS-RS adauga exact acest strat — corelare temporala per IP sursa peste log-urile existente.
+
+Problema pe care o rezolva. Firewall-ul raporteaza fiecare conexiune blocata individual, fara sa identifice tipare. Un IP care incearca 50 de porturi in 10 secunde genereaza 50 de log-uri separate. Informatia exista — dar nu este procesata si corelata automat. Echipa afla despre scanari dupa fapt, nu in momentul in care se intampla.
+
+Ce detecteaza. Trei tipuri de scanare: Fast Scan (scanare agresiva, zeci de porturi in secunde), Slow Scan (scanare discreta, distribuita pe minute) si Accept Scan (enumerare servicii active). Toate pragurile si ferestrele de timp sunt configurabile.
+
+Ce primeste echipa. Alerta in SIEM cu IP sursa, IP tinta, lista porturilor si severitate. Pe email — un mesaj HTML structurat cu detaliile evenimentului si comenzi RHEL gata de copy-paste pentru investigare si blocare imediata.
+
+Beneficii concrete. Timpul de raspuns scade de la zile sau saptamani la secunde. Detectia functioneaza 24/7, fara sa depinda de disponibilitatea unui analist. Fiecare alerta vine cu comenzi gata de executat — inginerul nu trebuie sa compuna nimic, doar copy-paste in terminal. Sistemul este compatibil cu infrastructura existenta (Checkpoint + ArcSight) si se implementeaza gradual, fara impact asupra serviciilor.
+
+Cost zero. Dezvoltat intern — zero licente recurente, zero dependenta de furnizor extern. Echivalentul comercial (Darktrace, Vectra, ExtraHop) costa zeci de mii de euro pe an. IDS-RS ofera aceeasi functionalitate de baza fara costuri suplimentare.
+
+Conformitate. Sistemul demonstreaza monitorizare activa a retelei interne — cerinta in ISO 27001 si NIS2. Fiecare alerta este inregistrata in SIEM, oferind audit trail complet si evidenta concreta pentru audituri de securitate.
+
+Securitate si fiabilitate. Rate limiting impotriva flood-ului UDP, limita de memorie per IP si globala, sanitizare CEF anti-injection, 16 validari semantice la pornire si 51 de teste unitare.
+
+Potential de extindere. Platforma este modulara. Cu acces la log-uri de la switch-uri si routere, se pot adauga detectii noi: dispozitive neautorizate, MAC spoofing, miscare laterala, beaconing C2, brute-force, anomalii de routing — acoperire de la Layer 2 la Layer 7, fara sa se rescrie ce exista.
+
+Sistemul ruleaza deja in productie pe log-urile de firewall.
