@@ -343,7 +343,7 @@ impl Detector {
         // ceea ce ne permite sa o refolosim pentru Accept Scan (pasul 5) cu `accept_hits`.
         let fast_window = Duration::from_secs(self.config.fast_scan.time_window_secs);
         if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, fast_window, now) {
-            if ports.len() > self.config.fast_scan.port_threshold
+            if ports.len() >= self.config.fast_scan.port_threshold
                 && !self.in_cooldown(&self.fast_cooldowns, ip)
             {
                 self.fast_cooldowns.insert(ip, now);
@@ -360,7 +360,7 @@ impl Detector {
         // --- 4. Verificam Slow Scan (pe port_hits — drop-uri) ---
         let slow_window = Duration::from_secs(self.config.slow_scan.time_window_mins * 60);
         if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, slow_window, now) {
-            if ports.len() > self.config.slow_scan.port_threshold
+            if ports.len() >= self.config.slow_scan.port_threshold
                 && !self.in_cooldown(&self.slow_cooldowns, ip)
             {
                 self.slow_cooldowns.insert(ip, now);
@@ -387,7 +387,7 @@ impl Detector {
         // accept-uri) — si amandoua vor fi trimise la SIEM si email, independent.
         let accept_window = Duration::from_secs(self.config.accept_scan.time_window_secs);
         if let Some(ports) = self.unique_ports_in_window(&self.accept_hits, ip, accept_window, now) {
-            if ports.len() > self.config.accept_scan.port_threshold
+            if ports.len() >= self.config.accept_scan.port_threshold
                 && !self.in_cooldown(&self.accept_cooldowns, ip)
             {
                 self.accept_cooldowns.insert(ip, now);
@@ -596,8 +596,8 @@ mod tests {
     fn test_no_alert_below_threshold() {
         let detector = Detector::new(test_config());
 
-        // 3 porturi unice = exact la prag (nu PESTE prag).
-        for port in 1..=3 {
+        // 2 porturi unice = sub pragul de 3 (>=3 declanseaza alerta).
+        for port in 1..=2 {
             let alerts = detector.process_event(&make_event("10.0.0.1", port));
             assert!(alerts.is_empty(), "Nu ar trebui alerta la {} porturi", port);
         }
@@ -607,10 +607,10 @@ mod tests {
     fn test_fast_scan_alert() {
         let detector = Detector::new(test_config());
 
-        // 4 porturi unice = peste pragul de 3 -> trebuie alerta Fast Scan.
-        for port in 1..=4 {
+        // 3 porturi unice = egal cu pragul de 3 (>=) -> alerta Fast Scan la al 3-lea.
+        for port in 1..=3 {
             let alerts = detector.process_event(&make_event("10.0.0.1", port));
-            if port == 4 {
+            if port == 3 {
                 assert_eq!(alerts.len(), 1);
                 assert!(matches!(alerts[0].scan_type, ScanType::Fast));
             }
@@ -621,7 +621,7 @@ mod tests {
     fn test_cooldown_prevents_duplicate_alert() {
         let detector = Detector::new(test_config());
 
-        // Trimitem 5 porturi - prima alerta la port 4.
+        // Trimitem 5 porturi - prima alerta la port 3 (prag >= 3).
         for port in 1..=5 {
             detector.process_event(&make_event("10.0.0.1", port));
         }
@@ -709,12 +709,12 @@ mod tests {
 
     #[test]
     fn test_accept_scan_alert() {
-        // 4 porturi ACCEPTATE unice cu prag = 3 → alerta la al 4-lea port.
+        // 3 porturi ACCEPTATE unice cu prag = 3 (>=) → alerta la al 3-lea port.
         let detector = Detector::new(test_config());
 
-        for port in 1..=4 {
+        for port in 1..=3 {
             let alerts = detector.process_event(&make_accept_event("10.1.0.1", port));
-            if port == 4 {
+            if port == 3 {
                 assert_eq!(alerts.len(), 1, "Trebuia o alerta Accept Scan la {} porturi", port);
                 assert!(
                     matches!(alerts[0].scan_type, ScanType::AcceptScan),
@@ -852,19 +852,19 @@ mod tests {
 
     #[test]
     fn test_slow_scan_alert() {
-        // 4 porturi unice (drop) cu prag slow = 3 → alerta Slow Scan la al 4-lea port.
+        // 3 porturi unice (drop) cu prag slow = 3 (>=) → alerta Slow Scan la al 3-lea port.
         let detector = Detector::new(slow_test_config());
 
-        for port in 1..=4u16 {
+        for port in 1..=3u16 {
             let alerts = detector.process_event(&make_event("192.168.1.1", port));
-            if port == 4 {
+            if port == 3 {
                 assert_eq!(alerts.len(), 1, "Trebuia o alerta Slow Scan la {} porturi", port);
                 assert!(
                     matches!(alerts[0].scan_type, ScanType::Slow),
                     "Tipul alertei trebuie sa fie Slow, nu {:?}",
                     alerts[0].scan_type
                 );
-                assert_eq!(alerts[0].unique_ports.len(), 4);
+                assert_eq!(alerts[0].unique_ports.len(), 3);
             } else {
                 assert!(alerts.is_empty(), "Fara alerta sub prag (port {})", port);
             }
@@ -877,7 +877,7 @@ mod tests {
         // cat timp cooldown-ul este activ.
         let detector = Detector::new(slow_test_config());
 
-        // Generam alerta initiala (4 porturi drop → prag 3 depasit).
+        // Generam alerta initiala (3 porturi drop → prag 3 atins cu >=).
         for port in 1..=4u16 {
             detector.process_event(&make_event("192.168.2.1", port));
         }
@@ -894,7 +894,7 @@ mod tests {
     fn test_slow_scan_independent_from_fast() {
         // Slow Scan si Fast Scan sunt urmarite independent.
         // Cu slow_test_config: Fast threshold = 1000, Slow threshold = 3.
-        // 4 porturi drop → doar Slow Scan se declanseaza (Fast nu are prag depasit).
+        // 3+ porturi drop → doar Slow Scan se declanseaza (Fast prag=1000, neatins).
         let detector = Detector::new(slow_test_config());
 
         let mut got_slow = false;

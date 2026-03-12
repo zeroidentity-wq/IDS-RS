@@ -112,7 +112,7 @@ pub fn print_banner(config: &AppConfig) {
 
     // Praguri de detectie.
     let thresh_line = format!(
-        "  Fast:   >{} ports/{}s       Slow:  >{} ports/{}min",
+        "  Fast:  >={} ports/{}s       Slow: >={} ports/{}min",
         config.detection.fast_scan.port_threshold,
         config.detection.fast_scan.time_window_secs,
         config.detection.slow_scan.port_threshold,

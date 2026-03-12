@@ -43,21 +43,21 @@ max_tracked_ips = 100000
 
 [detection.fast_scan]
 # Numar de porturi unice care declanseaza alerta de Fast Scan.
-# Alerta se emite cand un IP acceseaza > port_threshold porturi unice
+# Alerta se emite cand un IP acceseaza >= port_threshold porturi unice
 # in time_window_secs secunde.
 port_threshold = 15
 time_window_secs = 10
 
 [detection.slow_scan]
 # Numar de porturi unice care declanseaza alerta de Slow Scan.
-# Alerta se emite cand un IP acceseaza > port_threshold porturi unice
+# Alerta se emite cand un IP acceseaza >= port_threshold porturi unice
 # in time_window_mins minute.
 port_threshold = 30
 time_window_mins = 5
 
 [detection.accept_scan]
 # Numar de porturi unice ACCEPTATE (permise de firewall) care declanseaza
-# alerta de Accept Scan. Alerta se emite cand un IP acceseaza > port_threshold
+# alerta de Accept Scan. Alerta se emite cand un IP acceseaza >= port_threshold
 # porturi DESCHISE in time_window_secs secunde.
 # Accept Scan detecteaza enumerarea serviciilor active (open port enumeration).
 # Pragul este mai mic decat Fast Scan (traficul accept poate fi mai "normal").
