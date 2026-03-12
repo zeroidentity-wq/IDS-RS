@@ -1,711 +1,475 @@
-# IDS-RS — Sistem de Detectie a Intruziunilor in Reteaua Interna
+# IDS-RS — Intrusion Detection System
 
-## Propunere de implementare pentru conducere
-
----
-
-## PREZENTARE ORALA — Ghid pentru 5 minute
-
-> Aceste puncte sunt gandite pentru a fi citite sau parafrazate in fata audientei.
-> Fiecare bloc dureaza aproximativ 1 minut.
+## Sistem de detectie a scanarilor de retea din log-uri de firewall
 
 ---
 
-### MINUTUL 1 — Deschiderea (Problema)
+## DISCURS PREZENTARE — 6 minute
 
-Vreau sa va rog sa va ganditi la un lucru: chiar acum, in aceasta secunda,
-firewall-ul nostru intern blocheaza conexiuni. Genereaza log-uri.
-Cineva sau ceva incearca sa ajunga undeva unde nu are voie.
-
-**Stim cine?** Nu.
-**Stim de cand?** Nu.
-**Stim ce a incercat?** Nu.
-
-Nu pentru ca informatia nu exista — ci pentru ca **nimeni nu o citeste**.
-
-Firewall-ul face treaba lui perfect. Blocheaza. Inregistreaza. Dar nu
-gandeste. Nu coreleaza. Nu bate pe nimeni pe umar sa spuna: "Uite,
-statia asta a incercat 50 de servicii diferite in ultimele 10 secunde —
-ceva nu e in regula."
-
-Si asta e diferenta intre a avea **protectie** si a avea **vizibilitate**.
-
-Noi avem protectie. Ne lipseste vizibilitatea.
-
-Un studiu IBM din 2023 arata ca organizatiile au nevoie in medie de
-**204 zile** ca sa detecteze o compromitere interna. 7 luni in care
-un dispozitiv infectat se plimba liber prin retea. Nu pentru ca nu
-exista indicii — ci pentru ca nimeni nu le vede.
+> Text complet — se citeste sau se parafraseaza.
+> Continutul de mai jos acopera tot ce e in document.
 
 ---
 
-### MINUTUL 2 — Solutia (Ce face IDS-RS)
+### MINUTUL 1 — Problema si ce am construit
 
-IDS-RS este un sistem pe care l-am dezvoltat intern. Face un singur lucru,
-si il face bine: **se uita la ceea ce firewall-ul raporteaza si vede tiparele
-pe care un om nu le poate observa in mii de log-uri.**
+Firewall-ul intern genereaza log-uri pentru fiecare conexiune pe care
+o blocheaza. Aceste log-uri nu sunt corelate automat. Firewall-ul
+lucreaza per-conexiune — blocheaza un IP pe portul 22, apoi acelasi
+IP pe 443, apoi pe 3389, si tot asa. Dar nu coreleaza ca toate vin
+de la aceeasi sursa, in cateva secunde, pe zeci de porturi diferite.
 
-Daca o statie interna bate la 20 de usi diferite in 10 secunde — nu este
-activitate normala. IDS-RS vede asta si trimite alerta **in secunde**,
-nu in zile.
+Informatia exista in log-uri — nu o procesam.
 
-Detectam trei tipuri de comportament:
-- **Scanare rapida** — cineva alearga pe hol si trage de fiecare usa
-- **Scanare lenta** — cineva verifica o usa pe zi, stiind ca viteza ar fi observata
-- **Scanare cu acces** — cel mai periculos: cineva gaseste usile care **se deschid**
-
-Alerta ajunge instant pe doua canale: in SIEM-ul nostru central si pe email
-la echipa IT, cu comenzi gata de executat — copy-paste direct in firewall.
+Am construit un sistem care rezolva asta. IDS-RS este un Intrusion
+Detection System scris in Rust. Primeste log-urile de la firewall pe
+UDP, le parseaza, le coreleaza per IP sursa si detecteaza automat
+tiparele de scanare. Cand un IP bate la 20 de porturi diferite in
+10 secunde, sistemul trimite alerta in timp real — pe SIEM si pe email.
 
 ---
 
-### MINUTUL 3 — De ce conteaza (Impactul real)
+### MINUTUL 2 — Cum functioneaza: parseri, detectie, praguri
 
-Fara IDS-RS, o statie compromisa poate opera zile intregi fara sa fie observata.
-Scaneaza reteaua, gaseste servere, se misca lateral. Cand descoperim problema,
-este deja prea tarziu — datele au fost accesate.
+Sistemul asculta pe un port UDP si intelege trei formate de log:
+Checkpoint Gaia nativ, CEF prin ArcSight, si un format combinat
+Gaia-CEF pentru cazul in care ArcSight pune evenimentul brut in
+campul Name sau rawEvent.
 
-Cu IDS-RS, diferenta este dramatica:
+Din fiecare log extrage: IP sursa, IP destinatie, port, protocol
+si actiunea — drop sau accept.
 
-**Fara:** scanare → nimeni nu observa → zile → miscare laterala → incident
-**Cu:** scanare → alerta in secunde → echipa izoleaza → incident neutralizat
+Detectia functioneaza pe trei niveluri:
+- Fast Scan — peste 15 porturi unice in 10 secunde (nmap, masscan)
+- Slow Scan — peste 30 de porturi in 5 minute (scanare discreta)
+- Accept Scan — porturi care raspund, nu doar cele blocate
 
-Trecerea de la **reactiv** la **proactiv** nu este un lux. Este diferenta
-intre a descoperi o bresa dupa 7 luni si a o opri in 5 minute.
-
-Un singur incident nereportat poate costa mai mult decat toata investitia
-in acest sistem. IDS-RS nu inlocuieste firewall-ul — **il face vizibil**.
-
----
-
-### MINUTUL 4 — Securitatea sistemului insusi
-
-Un punct important: IDS-RS nu doar detecteaza amenintari — **se protejeaza
-activ pe sine.**
-
-Un atacator sofisticat ar putea incerca:
-- Sa **inunde** IDS-ul cu trafic fals ca sa-l doboare → avem Rate Limiting
-- Sa **umfle** memoria cu milioane de IP-uri false → avem limita de IP-uri cu evictie automata
-- Sa **injecteze** alerte false in SIEM prin log-uri manipulate → avem sanitizare anti-injection
-- Sa trimita o configuratie gresita care sa-l blocheze → avem 16 validari automate la pornire
-
-Sistemul nu poate fi pacalit, suprasaturat sau doborat prin metode cunoscute.
-Acest lucru este critic — un IDS care poate fi oprit de atacator nu are nicio valoare.
+Toate pragurile si ferestrele de timp se configureaza din config.toml.
 
 ---
 
-### MINUTUL 5 — Inchiderea (Ce cerem)
+### MINUTUL 3 — Ce primeste echipa cand se detecteaza ceva
 
-Sistemul este functional, testat, documentat. 33 de teste unitare, toate trec.
-Dezvoltat intern — **zero costuri de licenta**, zero dependenta de furnizor extern.
+Alerta pleaca simultan pe doua canale.
 
-Ce avem nevoie:
-- Un port UDP pe firewall — o singura regula de forwarding
-- Un server (fizic sau virtual) — resurse minime
-- Coordonare cu echipa de retea pentru configurarea initiala
+In SIEM ajunge un eveniment CEF standard — cu Source Address,
+Target Address, numarul de porturi, lista porturilor si severitate.
+Se coreleaza direct cu orice altceva din ArcSight.
 
-Implementarea este graduala, fara impact asupra serviciilor in productie.
+Pe email primiti un mesaj HTML structurat cu IP sursa, IP tinta,
+lista porturilor, timestamp si comenzi gata de executat pentru RHEL —
+ss, grep in log-uri, tcpdump, firewall-cmd pentru blocare imediata.
+Copy-paste direct in terminal.
 
-Intrebarea nu este **daca** cineva va incerca ceva in reteaua noastra.
-Intrebarea este: **vom sti cand se intampla?**
-
-Cu IDS-RS, raspunsul este **da, in secunde.**
+Fiecare IP are cooldown — o singura alerta per IP, per tip de scanare.
 
 ---
 
-> *Sfat pentru prezentare: dupa minutul 5, deschide terminalul cu IDS-RS pornit
-> si ruleaza `python3 tester/tester.py fast` — audienta va vedea alerta in
-> timp real. O demonstratie live de 30 secunde valoreaza mai mult decat
-> 10 slide-uri.*
+### MINUTUL 4 — Securitatea sistemului si beneficii
+
+Sistemul se protejeaza singur: Rate Limiting cu Token Bucket impotriva
+flood-ului UDP, limita de memorie per IP (10.000, FIFO), limita globala
+de IP-uri (100.000, LRU), sanitizare CEF anti-injection, si 16 validari
+semantice la pornire.
+
+51 de teste unitare, toate trec. Dezvoltat intern — zero licente, zero
+dependenta de vendor. Echivalentul comercial costa zeci de mii de euro/an.
+
+Din punct de vedere de conformitate — demonstram monitorizare activa a
+retelei interne, cerinta in ISO 27001 si NIS2.
+
+---
+
+### MINUTUL 5 — Ce putem face in plus cu acces la mai multe log-uri
+
+Platforma e modulara. Cu acces la alte surse de log-uri adaugam
+detectii noi fara sa rescriem ce exista.
+
+Din log-uri firewall: miscare laterala, beaconing C2, brute-force,
+scanare distribuita.
+
+Din log-uri switching: dispozitive neautorizate (MAC necunoscut),
+MAC spoofing, port security violations, DHCP rogue, anomalii STP.
+
+Din log-uri routing: adiacente OSPF pierdute, rute neautorizate,
+ACL violations.
+
+Impreuna — firewall, switching, routing — acopera Layer 2 la Layer 7.
+
+---
+
+### MINUTUL 6 — Ce avem nevoie (30s)
+
+Sistemul ruleaza deja in productie pe log-urile de firewall.
+
+Pentru extindere: acces la export syslog de pe switch-uri si routere,
+timp de dezvoltare pentru parseri noi, coordonare cu echipa de retea.
+
+Implementare graduala, fara impact asupra serviciilor.
+
+Aveti documentul complet cu toate detaliile tehnice.
+
+---
+
+> *Dupa discurs: deschide terminalul cu IDS-RS pornit si ruleaza
+> `python3 tester/tester.py fast` — audienta va vedea o alerta
+> generata in timp real.*
 
 ---
 ---
 
-## 1. DE CE AVEM NEVOIE DE ACEST PROIECT
+## 1. PROBLEMA
 
-### Contextul nostru
+### Ce se intampla acum
 
-Reteaua noastra este una **restransa si securizata**. Nu vorbim despre
-atacuri venite din internet — perimetrul extern este protejat. Amenintarea
-reala vine **din interior**.
+Firewall-ul intern genereaza log-uri pentru fiecare conexiune blocata.
+Aceste log-uri nu sunt corelate automat — firewall-ul raporteaza
+fiecare blocaj individual, fara sa identifice tipare.
 
-Imaginati-va cladirea noastra. Avem gard, avem poarta cu bariera, avem
-legitimatii. Nimeni din afara nu intra. Dar ce se intampla **inauntru**?
+Un IP care incearca 50 de porturi in 10 secunde genereaza 50 de log-uri
+separate. Fiecare log e corect, dar nimeni nu le coreleaza.
 
-Daca un angajat conecteaza un laptop personal infectat la reteaua interna,
-acel laptop incepe sa "se uite" in jur — verifica ce calculatoare exista,
-ce servicii ruleaza, ce porturi sunt deschise. Sau un utilizator curios
-care instaleaza un tool de scanare "sa vada ce gaseste". Sau un cont
-compromis prin phishing care devine un punct de plecare pentru miscari
-laterale in retea.
+### Problema concreta
 
-**Firewall-ul intern vede fiecare tentativa. Dar nimeni nu se uita.**
+- Log-urile exista dar nu sunt procesate in timp real
+- Nu exista corelare automata a evenimentelor per IP sursa
+- Echipa afla despre scanari dupa fapt, nu in momentul in care se intampla
+- O statie compromisa poate scana reteaua zile fara sa fie detectata
 
-### Ce se intampla astazi
+### Statistici relevante
 
-Firewall-ul genereaza mii de log-uri pe ora. Fiecare conexiune blocata
-este inregistrata — dar aceste log-uri stau in fisiere pe care **nimeni
-nu le citeste in timp real**. Este ca si cum ai avea camere de supraveghere
-in toata cladirea, dar niciun ecran nu este monitorizat.
-
-Intrebarea nu este daca cineva va incerca ceva in reteaua interna.
-Intrebarea este: **vom sti cand se intampla?**
-
-- Un laptop infectat care scaneaza reteaua poate fi activ **zile intregi**
-  fara sa fie observat
-- Un utilizator care testeaza limite poate escalada privilegii inainte
-  sa intervina cineva
-- Fara vizibilitate in timp real, echipa IT reactioneaza **dupa fapt**,
-  nu in momentul in care se intampla
-
-### De ce conteaza
-
-Conform rapoartelor internationale de securitate cibernetica:
-
-- **60% din incidentele de securitate** au origine interna — angajati,
-  contractori, echipamente compromise
-- **Timpul mediu de detectie** a unei miscari laterale in retea este
-  de **204 zile**
-- **83% din compromiterile reussite** au fost precedate de o faza de
-  **scanare a retelei** care ar fi putut fi detectata
-
-Intr-o retea restransa ca a noastra, avantajul este ca **stim exact
-cine este inauntru**. Dezavantajul este ca, fara monitorizare,
-presupunem ca toti cei din interior sunt de incredere — si asta
-este cea mai periculoasa presupunere in securitate.
+- **60%** din incidentele de securitate au origine interna
+- **204 zile** — timpul mediu de detectie a unei compromitere interne (IBM 2023)
+- **83%** din compromiterile reussite au fost precedate de scanare de retea
 
 ---
 
 ## 2. SOLUTIA: IDS-RS
 
-### Ce este IDS-RS
+### Ce este
 
-IDS-RS este un **Sistem de Detectie a Intruziunilor** dezvoltat intern,
-care monitorizeaza in timp real log-urile firewall-ului intern si
-detecteaza automat comportamente suspecte din reteaua noastra.
+IDS-RS — Intrusion Detection System scris in Rust. Primeste log-uri
+de la firewall pe UDP, le parseaza, coreleaza evenimentele per IP sursa
+si detecteaza automat scanarile de retea. Trimite alerte pe SIEM si email.
 
-### Cum functioneaza — pe intelesul tuturor
-
-Ganditi-va la IDS-RS ca la un **dispecer inteligent pentru camerele de
-supraveghere**:
+### Flux de procesare
 
 ```
-  FIREWALL INTERN         IDS-RS                ECHIPA IT
- (Camerele video)     (Dispecerul)       (Echipa de interventie)
-       |                   |                       |
-       |  "Cineva incearca |                       |
-       |   usa serverului" |                       |
-       |------------------>|                       |
-       |  "Aceeasi persoana|                       |
-       |   la alta usa"    |                       |
-       |------------------>|                       |
-       |  "Si la alta..."  |  "ATENTIE! Cineva     |
-       |------------------>|   din interior testeaza|
-       |                   |   sistematic 50 de     |
-       |                   |   puncte de acces!"    |
-       |                   |---------------------->|
-       |                   |   [Email + SIEM]        |
+  Firewall (syslog UDP)
+       |
+       v
+  IDS-RS :5555
+  ┌─────────────────────────┐
+  │  Parser                 │   Checkpoint Gaia / CEF / Gaia-CEF
+  │  ↓                      │
+  │  Detector (DashMap)     │   Corelare per IP sursa
+  │  ↓                      │   Fast Scan / Slow Scan / Accept Scan
+  │  Alerter                │   Cand pragul e depasit
+  └────────┬────────┬───────┘
+           │        │
+           v        v
+     SIEM (CEF)   Email (SMTP)
+     ArcSight     Echipa IT
 ```
-
-**Firewall-ul** raporteaza fiecare conexiune blocata individual —
-nu stie ca 50 de blocari de la aceeasi sursa inseamna o scanare.
-
-**IDS-RS** coreleaza aceste evenimente si vede **tiparul**:
-"Statia 192.168.10.45 a incercat 50 de servicii diferite in 10
-secunde — aceasta nu este activitate normala."
-
-**Echipa IT** primeste instant o alerta cu IP-ul sursa, ce a incercat
-si comenzi gata de executat pentru investigare si izolare.
-
----
-
-## 3. CE PUTEM DETECTA
-
-### Trei tipuri de comportament suspect
-
-**Scanare Rapida (Fast Scan):**
-O statie care testeaza zeci de servicii in cateva secunde. Comportament
-tipic pentru un malware care "se uita in jur" imediat dupa infectare.
-Echivalentul cuiva care alearga pe hol si trage de fiecare usa.
-
-**Scanare Lenta (Slow Scan):**
-O statie care testeaza cate un serviciu la cateva minute — incercand
-sa fie discreta. IDS-RS monitorizeaza pe perioade extinse si detecteaza
-si acest tipar. Echivalentul cuiva care verifica o usa pe zi, stiind
-ca o verificare rapida ar fi observata.
-
-**Scanare cu Acces (Accept Scan):**
-Identifica cazurile in care cineva descopera servicii care **raspund** —
-nu doar cele blocate. Cel mai periculos tip, deoarece persoana gaseste
-efectiv puncte de acces functionale in retea.
-
-### Vizibilitate pe multiple canale
-
-| Canal | Ce primiti |
-|-------|-----------|
-| **SIEM** | Alerte in platforma centralizata, corelate cu alte evenimente |
-| **Email** | Notificare detaliata cu comenzi de reactie gata de executat |
-
----
-
-## 4. FUNCTIONALITATI IMPLEMENTATE
-
-### Detectie — ce detecteaza sistemul
-
-| Functionalitate | Descriere | Status |
-|----------------|-----------|--------|
-| **Fast Scan** | Detecteaza scanari agresive — zeci de porturi in secunde | Implementat |
-| **Slow Scan** | Detecteaza scanari discrete — porturi distribuite pe minute | Implementat |
-| **Accept Scan** | Detecteaza enumerarea serviciilor **deschise** (cel mai periculos tip) | Implementat |
-| **Cooldown per IP** | Previne sute de alerte identice pentru aceeasi sursa | Implementat |
-
-### Alertare — cum aflati
-
-| Functionalitate | Descriere | Status |
-|----------------|-----------|--------|
-| **SIEM (ArcSight)** | Alerte CEF cu IP sursa, IP tinta, porturi, severitate | Implementat |
-| **Email** | Email structurat cu detalii + comenzi copy-paste de reactie | Implementat |
-| **Dashboard terminal** | Alerte colorate in timp real (rosu/galben/magenta) | Implementat |
-| **Webhook (Slack/Teams)** | Notificari prin HTTP POST | Planificat |
-| **Raport zilnic** | Sinteza 24h cu top atacatori si clasificare subretele | Planificat |
-
-### Parseri — ce firewall-uri intelege
-
-| Parser | Format | Status |
-|--------|--------|--------|
-| **Checkpoint Gaia** | Format nativ syslog Checkpoint | Implementat |
-| **CEF / ArcSight** | Common Event Format (standard multi-vendor) | Implementat |
-| **FortiGate** | Format nativ Fortinet | Planificat |
-
-### Securitatea sistemului IDS-RS
-
-IDS-RS nu doar detecteaza amenintari — **se protejeaza activ pe sine** impotriva manipularii
-si supraincarcarii. Fiecare masura raspunde unui vector de atac real:
-
-#### Sanitizare CEF anti-injection
-
-**Problema:** Un atacator sofisticat poate incerca sa injecteze alerte false in SIEM
-prin caractere speciale in log-urile firewall-ului (newline, pipe, backslash).
-
-**Solutia:** Toate campurile text din alertele trimise la SIEM sunt sanitizate inainte
-de trimitere. Caracterele structurale CEF (`|`, `\n`, `\r`, `\`) sunt escapate conform
-standardului, impiedicand injectarea de linii syslog sau campuri false.
-
-**Rezultat:** SIEM-ul primeste exclusiv alerte generate de IDS-RS — nicio alerta falsa
-nu poate fi fabricata prin manipularea log-urilor.
-
-#### Rate Limiting UDP (Token Bucket)
-
-**Problema:** Un flood de pachete UDP (IP-uri spoofate, amplificare DNS/NTP) poate
-satura CPU-ul IDS-ului, cauzand pierderea alertelor reale.
-
-**Solutia:** Algoritm Token Bucket — permite burst-uri scurte legitime dar limiteaza
-rata medie de procesare. Pachetele in exces sunt silentios ignorate.
-
-**Rezultat:** IDS-ul proceseaza traficul real chiar si sub atac — CPU-ul este protejat,
-alertele reale nu se pierd. Rata si burst-ul sunt configurabile.
-
-#### Protectie memorie per IP (MAX_HITS_PER_IP)
-
-**Problema:** Un scanner agresiv poate genera zeci de mii de evenimente pe secunda,
-umfland memoria alocata pentru acel IP intre doua cicluri de curatare.
-
-**Solutia:** Fiecare IP are o limita de intrari in memorie (implicit 10.000). Cand
-limita este depasita, cele mai vechi date sunt eliminate automat (FIFO). Datele recente
-— cele relevante pentru detectie — sunt mereu pastrate.
-
-**Rezultat:** Memoria este controlata chiar si sub scanare agresiva. Detectia nu este
-afectata — pragurile de alerta sunt cu mult sub limita de 10.000.
-
-#### Protectie DashMap (MAX_TRACKED_IPS + LRU Eviction)
-
-**Problema:** Un atacator poate trimite pachete cu IP-uri sursa false (spoofate),
-creand milioane de intrari noi in memorie. Cleanup-ul nu ajuta — toate sunt "recente".
-
-**Solutia:** Numarul total de IP-uri urmarite este limitat (implicit 100.000). Cand
-limita este atinsa, IP-ul cel mai vechi (LRU — Least Recently Used) este eliminat
-automat din toate structurile interne.
-
-**Rezultat:** Memoria totala este limitata indiferent de numarul de IP-uri sursa.
-IDS-ul nu poate fi doborat prin flood de IP-uri spoofate.
-
-#### Validare configuratie la pornire
-
-**Problema:** O configuratie gresita (fereastra de timp 0, SMTP fara server,
-praguri inconsistente) poate cauza comportament imprevizibil sau crash in productie.
-
-**Solutia:** La pornire, 16 constrangeri semantice sunt verificate automat.
-Toate erorile sunt raportate simultan — nu se porneste cu configuratie invalida.
-
-**Rezultat:** Erori detectate **inainte** de punerea in functiune, nu in productie.
-
-### Rezumat securitate
-
-```
-  VECTOR DE ATAC                    PROTECTIA IDS-RS
-  ============================      ============================
-  Injectie alerte false in SIEM  →  Sanitizare CEF anti-injection
-  Flood UDP → saturare CPU       →  Rate Limiting (Token Bucket)
-  Scanner agresiv → OOM per IP   →  MAX_HITS_PER_IP (FIFO)
-  IP spoofing → OOM global       →  MAX_TRACKED_IPS (LRU eviction)
-  Config gresita → crash         →  Validare 16 constrangeri la startup
-  Cleanup periodic                →  Curatare automata date expirate
-```
-
----
-
-## 5. BENEFICII PENTRU ORGANIZATIE
-
-### Control intern complet
-
-- **Stim in secunde** cand o statie din retea incepe sa se comporte suspect
-- **Fiecare tentativa de scanare** este inregistrata si alertata — nimic nu trece neobservat
-- **Comenzi de reactie gata pregatite** — echipa nu pierde timp cautand ce sa execute
-
-### Operare simpla
-
-- **Un singur fisier de configurare** — fara cunostinte de programare
-- **Configurarea se modifica fara oprire** — ajustari in timp real
-- **Sistemul se intretine singur** — curatare automata, fara interventie manuala
-
-### Avantaje pentru organizatie
-
-- **Dezvoltat intern** — control complet, fara licente, fara dependenta
-  de furnizor extern
-- **Compatibil cu infrastructura existenta** — functioneaza cu firewall-urile
-  si SIEM-ul pe care le avem deja
-- **Implementare graduala** — fara impact asupra serviciilor in productie
-
----
-
-## 6. CE VEDETI CONCRET
-
-### Arhitectura sistemului
-
-```
-                          +-------------------+
-  Firewall (intern)  --> | UDP :5555         |
-  log-uri syslog         | Parser            |
-                          |   - Gaia          |
-                          |   - CEF           |
-                          |   - FortiGate (*) |
-                          |  (*) = planificat |
-                          +--------+----------+
-                                   |
-                                   v
-                          +-------------------+
-                          | Detector          |
-                          | Analiza per IP    |
-                          | Fast Scan check   |
-                          | Slow Scan check   |
-                          | Accept Scan check |
-                          +--------+----------+
-                                   |
-                            Scanare detectata?
-                           /                \
-                          v                  v
-                  +---------------+   +---------------+
-                  | SIEM (UDP)    |   | Email (SMTP)  |
-                  | ArcSight :514 |   | Echipa IT     |
-                  +---------------+   +---------------+
-```
-
-### Calatoria unui eveniment — de la activitate suspecta la alerta
-
-O statie infectata din retea bate la 20 de servicii diferite. Firewall-ul
-blocheaza fiecare tentativa si trimite un log. IDS-RS le coreleaza:
-
-```
-  Statie interna           Firewall              IDS-RS              SIEM / Email
-  192.168.10.45            (blocheaza)           (detecteaza)        (notifica)
-       |                       |                     |                    |
-       |--- tcp/80 ---------->| BLOCAT               |                    |
-       |--- tcp/443 --------->| BLOCAT               |                    |
-       |--- tcp/22 ---------->| BLOCAT               |                    |
-       |--- tcp/3389 -------->| BLOCAT               |                    |
-       |    ...x20             |                     |                    |
-       |                       |-- log #1 --------->|                    |
-       |                       |-- log #2 --------->|                    |
-       |                       |-- ...              |                    |
-       |                       |-- log #20 -------->| 20 porturi unice   |
-       |                       |                     | in 10 secunde!     |
-       |                       |                     |-- ALERTA -------->|
-```
-
-### Cum arata alerta in SIEM (ArcSight)
-
-Echipa vede direct in consola SIEM un eveniment clar, cu toate detaliile:
-
-```
-+-----------------+-----------------+-----------------+------+----------+-----------------------------------------+
-| Time            | Source Address  | Target Address  | Cnt  | Priority | Message                                 |
-+-----------------+-----------------+-----------------+------+----------+-----------------------------------------+
-| Feb 26 14:30:00 | 192.168.10.45  | 10.0.0.1        |  20  | High     | Fast Scan detectat: 20 porturi unice    |
-|                 |                 |                 |      |          | in 10s | ports: 21,22,23,80,443,...     |
-+-----------------+-----------------+-----------------+------+----------+-----------------------------------------+
-```
-
-Campuri disponibile pentru investigare:
-- **Source Address** — statia care scaneaza (cine)
-- **Target Address** — ce tinta a fost scanata (unde)
-- **Cnt** — cate porturi unice au fost testate (cat de agresiv)
-- **ScannedPorts** — lista completa a porturilor (ce a cautat)
-
-### Cum arata email-ul de alerta
-
-Echipa IT primeste un **email HTML formatat profesional**, cu design modern
-si tot ce trebuie sa stie si sa faca. Subiectul email-ului:
-
-```
-🔴 [Fast Scan][SCANARE RETEA] IDS-RS 192.168.10.45 20 porturi
-```
-
-Structura email-ului:
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  ████████████  HEADER (gradient rosu)  ████████████████  │
-│                                                          │
-│  IDS-RS — Intrusion Detection System                     │
-│  🔴 ALERTA SCANARE RETEA                                │
-│                                                          │
-│  ┌─────────────┐  ┌──────────────────────┐               │
-│  │  Fast Scan  │  │  Severitate: RIDICATA │              │
-│  └─────────────┘  └──────────────────────┘               │
-├──────────────────────────────────────────────────────────┤
-│                                                          │
-│  DETALII EVENIMENT                                       │
-│  ──────────────────────────                              │
-│  IP Sursa           192.168.10.45                        │
-│  IP Destinatie      10.0.0.1                             │
-│  Porturi scanate    20                                   │
-│  Timestamp          2026-02-26 14:30:00                  │
-│                                                          │
-├──────────────────────────────────────────────────────────┤
-│                                                          │
-│  PORTURI DETECTATE                                       │
-│  ▌ 21, 22, 23, 25, 53, 80, 110, 143, 443, 993,        │
-│  ▌ 995, 3389, 8080, 8443, 3306, 1433, 5432,            │
-│  ▌ 27017, 6379, 11211                                   │
-│                                                          │
-├──────────────────────────────────────────────────────────┤
-│                                                          │
-│  COMENZI RAPIDE — RHEL 9.6                               │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │  # Conexiuni active de la/catre acest IP:          │  │
-│  │  ss -tnp | grep 192.168.10.45                      │  │
-│  │                                                    │  │
-│  │  # Cautare in log-urile de securitate si sistem:   │  │
-│  │  grep 192.168.10.45 /var/log/secure                │  │
-│  │       /var/log/messages 2>/dev/null                 │  │
-│  │                                                    │  │
-│  │  # Cautare in journal (ultimele 200 linii):        │  │
-│  │  journalctl -n 200 --no-pager |                    │  │
-│  │       grep 192.168.10.45                           │  │
-│  │                                                    │  │
-│  │  # Captura live trafic (primele 30 pachete):       │  │
-│  │  tcpdump -i any host 192.168.10.45 -n -c 30       │  │
-│  │                                                    │  │
-│  │  # Blocare imediata cu firewalld (persistenta):    │  │
-│  │  firewall-cmd --add-rich-rule='rule family="ipv4"  │  │
-│  │       source address="192.168.10.45" drop'         │  │
-│  │       --permanent && firewall-cmd --reload         │  │
-│  │                                                    │  │
-│  │  # Verificare daca IP-ul este activ (ARP):         │  │
-│  │  ip neigh show | grep 192.168.10.45                │  │
-│  └────────────────────────────────────────────────────┘  │
-│                                                          │
-├──────────────────────────────────────────────────────────┤
-│  ████████████  FOOTER (dark)  ████████████████████████   │
-│                                                          │
-│         ASCII ART CONFIGURABIL                           │
-│                                                          │
-│   Generat automat de IDS-RS | Nu raspundeti la email     │
-└──────────────────────────────────────────────────────────┘
-```
-
-Inginerul de garda vede instant: **cine** scaneaza, **ce** a scanat,
-si are comenzi **gata de executat** — copy/paste direct in terminal RHEL.
-
-Tipuri de alerta in email:
-
-| Tip scanare | Severitate | Descriere |
-|-------------|-----------|-----------|
-| **Fast Scan** | RIDICATA | Zeci de porturi blocate in secunde |
-| **Slow Scan** | MEDIE | Porturi blocate distribuite pe minute |
-| **Accept Scan** | MEDIE-MICA | Porturi deschise accesate sistematic |
 
 ### Scenarii de conectare
 
-IDS-RS se adapteaza la infrastructura existenta, fara schimbari majore:
-
-**Scenariul A — Firewall direct catre IDS-RS:**
+**Direct de la firewall:**
 ```
-  Checkpoint                    IDS-RS
-  Firewall intern     -------->  UDP :5555
-                      syslog     parser = "gaia"
+  Checkpoint Gaia  ──syslog──>  IDS-RS :5555   parser = "gaia"
 ```
 
-**Scenariul B — Prin platforma ArcSight (SIEM deja existent):**
+**Prin ArcSight:**
 ```
-  Firewall       ArcSight            IDS-RS
-  intern  -----> SmartConnector ---->  UDP :5555
-          syslog (normalizeaza        parser = "cef"
-                  la format CEF)
+  Firewall  ──>  ArcSight SmartConnector  ──>  IDS-RS :5555   parser = "cef"
 ```
 
-In ambele cazuri, conectarea inseamna o singura regula de forwarding
-pe firewall sau pe ArcSight — fara modificari ale politicilor de securitate.
+**Prin ArcSight Forwarder (raw syslog):**
+```
+  ArcSight Forwarder  ──raw syslog──>  IDS-RS :5555   parser = "gaia_cef"
+```
 
-### Structura proiectului
+---
+
+## 3. DETECTIE — Ce detecteaza si cum
+
+### Trei tipuri de scanare
+
+| Tip | Prag default | Fereastra | Ce inseamna |
+|-----|-------------|-----------|-------------|
+| **Fast Scan** | 15 porturi unice | 10 secunde | Scanare agresiva (nmap -F, masscan) |
+| **Slow Scan** | 30 porturi unice | 5 minute | Scanare discreta, evaziune praguri |
+| **Accept Scan** | 5 porturi unice | 30 secunde | Enumerare servicii active (porturi deschise) |
+
+Toate pragurile si ferestrele de timp sunt configurabile in config.toml.
+
+### Cum functioneaza detectia
+
+Pentru fiecare log primit, IDS-RS:
+1. Parseaza linia si extrage: IP sursa, IP destinatie, port, protocol, actiune
+2. Adauga portul in lista de porturi unice pentru acel IP sursa (DashMap)
+3. Verifica daca numarul de porturi unice depaseste pragul in fereastra de timp
+4. Daca da — genereaza alerta si activeaza cooldown pentru acel IP
+
+### Cooldown per IP
+
+Dupa o alerta, acelasi IP nu genereaza alta alerta de acelasi tip
+pentru o perioada configurabila. Previne sute de alerte identice.
+
+---
+
+## 4. ALERTARE — Ce primeste echipa
+
+### Alerta in SIEM (ArcSight)
+
+Eveniment CEF standard:
+
+```
++-----------------+-----------------+------+----------+------------------------------------+
+| Source Address  | Target Address  | Cnt  | Priority | Message                            |
++-----------------+-----------------+------+----------+------------------------------------+
+| 192.168.10.45   | 10.0.0.1       |  20  | High     | Fast Scan: 20 porturi in 10s       |
+|                 |                 |      |          | ports: 21,22,23,80,443,...          |
++-----------------+-----------------+------+----------+------------------------------------+
+```
+
+Campuri disponibile:
+- **Source Address** — IP-ul care scaneaza
+- **Target Address** — IP-ul scanat
+- **Cnt** — numarul de porturi unice
+- **cs1 (ScannedPorts)** — lista completa a porturilor
+
+### Alerta pe email
+
+Email HTML structurat cu:
+
+```
+  DETALII EVENIMENT
+  ─────────────────
+  Tip:              Fast Scan
+  Severitate:       RIDICATA
+  IP Sursa:         192.168.10.45
+  IP Destinatie:    10.0.0.1
+  Porturi scanate:  20
+  Timestamp:        2026-02-26 14:30:00
+
+  PORTURI DETECTATE
+  21, 22, 23, 25, 53, 80, 110, 443, 3389, 8080, ...
+
+  COMENZI RAPIDE — RHEL
+  ──────────────────────
+  ss -tnp | grep 192.168.10.45
+  grep 192.168.10.45 /var/log/secure /var/log/messages
+  tcpdump -i any host 192.168.10.45 -n -c 30
+  firewall-cmd --add-rich-rule='rule family="ipv4"
+       source address="192.168.10.45" drop' --permanent
+  ip neigh show | grep 192.168.10.45
+```
+
+Comenzile sunt gata de copy-paste — inginerul nu trebuie sa compuna nimic.
+
+### Tipuri de alerta
+
+| Tip scanare | Severitate | Signature ID |
+|-------------|-----------|--------------|
+| **Fast Scan** | Ridicata (7/10) | 1001 |
+| **Slow Scan** | Medie (5/10) | 1002 |
+| **Accept Scan** | Medie (5/10) | 1003 |
+
+---
+
+## 5. SECURITATEA SISTEMULUI
+
+### Vectori de atac si protectii implementate
+
+| Vector de atac | Protectie | Cum functioneaza |
+|---------------|-----------|-----------------|
+| **Flood UDP** (IP spoofing, amplificare) | Rate Limiting — Token Bucket | Limiteaza rata de procesare, ignora excesul |
+| **Scanner agresiv** (OOM per IP) | MAX_HITS_PER_IP = 10.000 | FIFO — elimina cele mai vechi, pastreaza cele recente |
+| **Milioane de IP-uri spoofate** (OOM global) | MAX_TRACKED_IPS = 100.000 | LRU eviction — elimina IP-ul cel mai vechi |
+| **Injectie alerte false** in SIEM | Sanitizare CEF | Escape `\|`, `\n`, `\r`, `\\` in campuri text |
+| **Config gresita** → crash | 16 validari la pornire | Raporteaza toate erorile simultan, nu porneste |
+
+Toate valorile sunt configurabile in config.toml.
+
+### Teste
+
+- **51 teste unitare** — parseri, detector, alerter, sanitizare
+- **Tester Python** — simulator trafic cu preset-uri: fast, slow, normal
+- **Clippy** — 0 warnings noi din codul aplicatiei
+
+---
+
+## 6. BENEFICII
+
+### Tehnice
+
+- Detectie automata 24/7 — nu depinde de disponibilitatea unui analist
+- Timp de raspuns: de la zile/saptamani la secunde
+- Corelare automata a evenimentelor per IP sursa
+- Comenzi de reactie gata de executat in fiecare alerta
+
+### Operationale
+
+- Un singur fisier de configurare (config.toml)
+- Curatare automata a datelor expirate
+- Compatibil cu infrastructura existenta (Checkpoint + ArcSight)
+- Implementare graduala, fara impact asupra serviciilor
+
+### Financiare
+
+- Dezvoltat intern — zero licente recurente
+- Zero dependenta de furnizor extern
+- Echivalentul comercial (Darktrace, Vectra, ExtraHop): zeci de mii EUR/an
+
+### Conformitate
+
+- Monitorizare activa a retelei interne — cerinta ISO 27001, NIS2
+- Audit trail complet — fiecare alerta inregistrata in SIEM
+- Evidenta concreta pentru audituri de securitate
+
+---
+
+## 7. PARSERI IMPLEMENTATI
+
+| Parser | Format | Sursa | Status |
+|--------|--------|-------|--------|
+| **Checkpoint Gaia** | Syslog nativ Checkpoint | Direct de la firewall | Implementat |
+| **CEF / ArcSight** | Common Event Format | Prin SmartConnector | Implementat |
+| **Gaia-CEF** | LEA blob in CEF Name / rawEvent / raw | Prin ArcSight Forwarder | Implementat |
+| **FortiGate** | Format nativ Fortinet | Direct de la firewall | Planificat |
+
+### Gaia-CEF — trei scenarii acceptate automat
+
+Parser-ul `gaia_cef` detecteaza automat formatul cu fallback:
+
+1. **Blob LEA in CEF Name** (index 5) — ArcSight pune blob-ul in campul Name
+2. **Blob LEA in extensia CEF** (rawEvent= sau cs6=) — cu unescape `\=` → `=`
+3. **Blob LEA raw** — fara wrapper CEF, direct `key="value"` sau `key=value`
+
+Accepta valori cu si fara ghilimele. Boundary check — `rule_action` nu se
+confunda cu `action`, `service_id` nu se confunda cu `service`.
+
+---
+
+## 8. ARHITECTURA SI STRUCTURA
+
+### Componente
 
 ```
 ids-rs/
-├── config.toml             # Configurare (un singur fisier, totul aici)
+├── config.toml             # Configurare completa (un singur fisier)
 ├── src/
-│   ├── main.rs             # Orchestrare: receptie, procesare, alerte
-│   ├── config.rs           # Citire si validare configurare
-│   ├── detector.rs         # Motor detectie: Fast / Slow / Accept Scan
-│   ├── alerter.rs          # Trimitere alerte: SIEM (UDP) + Email (SMTP)
-│   ├── display.rs          # Afisare in terminal (dashboard live)
+│   ├── main.rs             # UDP listener, orchestrare async (tokio)
+│   ├── config.rs           # Deserializare TOML + 16 validari semantice
+│   ├── detector.rs         # DashMap per IP, Fast/Slow/Accept Scan, cooldown
+│   ├── alerter.rs          # SIEM (UDP CEF) + Email (SMTP async, lettre)
+│   ├── display.rs          # Output terminal colorat (colored)
 │   └── parser/
-│       ├── mod.rs          # Interfata comuna pentru parseri
-│       ├── gaia.rs         # Parser Checkpoint Gaia
-│       └── cef.rs          # Parser CEF / ArcSight
-│       (fortigate.rs)      # Parser Fortinet FortiGate (planificat)
+│       ├── mod.rs          # Trait LogParser + factory create_parser()
+│       ├── gaia.rs         # Parser Checkpoint Gaia (regex)
+│       ├── cef.rs          # Parser CEF (split pipe + key=value)
+│       └── gaia_cef.rs     # Parser Gaia-CEF (3 strategii, boundary check)
 └── tester/
-    ├── tester.py           # Simulator trafic pentru testare
-    └── sample_*.log        # Log-uri de test pre-generate
+    ├── tester.py           # Simulator trafic: preset-uri + generare dinamica
+    └── sample_*.log        # 9 fisiere sample pre-generate
 ```
 
----
+### Stack tehnic
 
-## 7. OBIECTIVE DE IMPLEMENTARE
-
-Implementarea se desfasoara in **8 obiective**:
-
----
-
-### OBIECTIVUL 1 — Motor de detectie scanari
-> Livram: detectie automata Fast Scan + Slow Scan cu praguri configurabile
-
-Sistemul primeste log-urile de la firewall si identifica in timp real
-statiile care scaneaza reteaua interna — atat scanari agresive (secunde),
-cat si discrete (minute).
-
----
-
-### OBIECTIVUL 2 — Integrare cu platforma SIEM
-> Livram: alerte automate in ArcSight, corelabile cu alte evenimente
-
-Alertele ajung in SIEM in format standard CEF, cu IP sursa, IP tinta,
-lista porturilor si severitate. Protejate impotriva manipularii prin
-sanitizare anti-injection.
+| Componenta | Librarie |
+|-----------|---------|
+| Async runtime | tokio |
+| Structuri concurente | DashMap |
+| Parsare config | serde + toml |
+| Email SMTP | lettre (async) |
+| Regex | regex |
+| Timestamp | chrono |
+| Logging | tracing |
+| Erori | anyhow |
+| Output colorat | colored |
 
 ---
 
-### OBIECTIVUL 3 — Notificari email cu comenzi de reactie
-> Livram: email structurat cu detalii + comenzi copy-paste pentru investigare
+## 9. POTENTIAL DE DEZVOLTARE
 
-Echipa primeste email-uri clare cu tot ce trebuie sa stie si sa faca:
-IP-ul sursa, ce a scanat, si comenzi gata de executat pentru verificare
-log-uri, conexiuni active si blocare temporara.
+### 9.1 Extindere detectii din log-uri FIREWALL (sursa actuala)
 
----
+| Detectie | Logica | Aplicabilitate |
+|----------|--------|---------------|
+| **Miscare laterala** | 1 IP → 20+ IP-uri interne pe porturi 445/3389/22/135 in 5 min | Ransomware, worm propagation |
+| **Beaconing (C2)** | Conexiuni la interval constant (stddev < 2s) catre acelasi IP extern | Cobalt Strike, RAT, malware |
+| **Scanare distribuita** | 10+ IP-uri sursa → aceeasi tinta, 20+ porturi in 2 min | Botnet recon, APT |
+| **Brute-force** | 50+ conexiuni pe acelasi port catre aceeasi tinta in 1 min | SSH/RDP brute-force |
+| **Exfiltrare** | Volum anormal de trafic, ore non-lucru, porturi non-standard | Data exfiltration |
+| **Policy violation** | Acces inter-segment interzis (ex: Workstations → DMZ direct) | Configurare gresita sau intentie |
 
-### OBIECTIVUL 4 — Suport multi-vendor firewall
-> Livram: compatibilitate cu Checkpoint Gaia, CEF (standard) si Fortinet FortiGate (planificat)
+### 9.2 Detectii noi din log-uri SWITCHING (viitor)
 
-Sistemul intelege log-urile de la doua tipuri majore de firewall (Gaia si CEF),
-cu FortiGate planificat ca urmatorul parser. Arhitectura modulara permite
-adaugarea altor producatori in viitor fara a modifica restul sistemului.
+| Detectie | Ce apare in log | Aplicabilitate |
+|----------|----------------|---------------|
+| **Dispozitiv neautorizat** | MAC necunoscut pe un port switch | Rogue device, laptop personal |
+| **MAC spoofing** | Acelasi MAC pe doua porturi diferite | Man-in-the-middle |
+| **Port security violation** | Max MAC exceeded / MAC not in allowed list | Echipament neautorizat + port fizic |
+| **DHCP rogue** | DHCP OFFER de pe port non-trusted | Redirectare trafic |
+| **Anomalii STP** | Root Bridge change, Topology Change | Atac L2, interceptare trafic |
+| **Link Up/Down suspect** | Conectari/deconectari repetate in afara programului | Manipulare fizica |
 
----
+### 9.3 Detectii noi din log-uri ROUTING (viitor)
 
-### OBIECTIVUL 5 — Detectie avansata si auto-protectie
-> Livram: detectie Accept Scan + rate limiting + gestionare inteligenta memorie
+| Detectie | Ce apare in log | Aplicabilitate |
+|----------|----------------|---------------|
+| **Adiacenta pierduta** | OSPF/BGP Neighbor DOWN | Defectiune sau atac routing |
+| **Ruta neautorizata** | Ruta noua anuntata via OSPF/BGP | Route hijacking |
+| **Route flapping** | Ruta UP/DOWN repetat | Echipament defect sau DoS |
+| **ACL violation** | Pachet blocat de ACL pe router | Tentativa acces inter-segment |
 
-Detectia este extinsa cu identificarea porturilor care raspund (Accept
-Scan). Sistemul se protejeaza singur impotriva supraincarcarii si
-gestioneaza memoria automat, fara interventie.
-
----
-
-### OBIECTIVUL 6 — Securizare si protectie anti-abuz
-> Livram: sanitizare anti-injection CEF, rate limiting UDP, limite memorie per IP
-
-Sistemul se protejeaza singur: sanitizarea datelor previne manipularea
-alertelor din SIEM, rate limiting-ul protejeaza procesarea impotriva
-flood-ului de log-uri, iar memoria este limitata per IP cu evictie
-automata a datelor vechi — fara risc de suprasaturare.
-
----
-
-### OBIECTIVUL 7 — Validare configuratie si testare
-> Livram: validare automata cu 16+ reguli, suite de teste unitare, tester de simulare
-
-Configuratia este verificata automat la pornire — toate erorile sunt
-raportate dintr-o singura rulare. Proiectul include teste unitare
-pentru fiecare componenta si un tester Python care simuleaza trafic
-de scanare pentru verificarea detectiei in conditii controlate.
-
----
-
-### OBIECTIVUL 8 — Operare autonoma si monitorizare live
-> Livram: dashboard live, hot reload configuratie, mentenanta automata
-
-Sistemul ruleaza 24/7 fara interventie: curatare automata a datelor
-expirate, reincarcarea configuratiei fara oprire, statistici in timp
-real si validare automata a configuratiei la pornire.
-
----
-
-## 8. SUMAR
+### 9.4 Rezumat acoperire
 
 ```
-  FARA IDS-RS                           CU IDS-RS
-  ==================                    ==================
+  SURSA LOG-URI          ACUM                    POTENTIAL
+  ════════════════       ═══════════════         ═════════════════════════
+  Firewall               Scanari porturi         + Lateral movement
+  (ACTIV)                (fast/slow/accept)      + Beaconing C2
+                                                 + Brute-force
+                                                 + Scanare distribuita
+                                                 + Exfiltrare
+                                                 + Policy violations
 
-  O statie interna scaneaza             O statie interna scaneaza
-  reteaua                              reteaua
-       |                                     |
-       v                                     v
-  Firewall-ul blocheaza                 Firewall-ul blocheaza
-  (log pierdut in mii                   IDS-RS vede tiparul
-   de alte log-uri)                     in SECUNDE
-       |                                     |
-       v                                     v
-  Nimeni nu observa                     Alerta instantanee:
-  ore / zile / niciodata               Email + SIEM
-       |                                     |
-       v                                     v
-  Statia compromisa                     Echipa izoleaza statia
-  continua sa opereze                   in MINUTE
-       |                                     |
-       v                                     v
-  MISCARE LATERALA                      INCIDENT NEUTRALIZAT
-  NEDETECTATA                           INAINTE DE ESCALADARE
+  Switching              —                       Dispozitive neautorizate
+  (VIITOR)                                       MAC spoofing
+                                                 Port security
+                                                 DHCP rogue
+                                                 Anomalii STP
+
+  Routing                —                       Adiacente pierdute
+  (VIITOR)                                       Rute neautorizate
+                                                 Route flapping
+                                                 ACL violations
 ```
 
-**IDS-RS ne da controlul asupra a ceea ce se intampla in reteaua noastra.
-Nu inlocuieste firewall-ul — il face vizibil.**
+Firewall + Switching + Routing = acoperire Layer 2 — Layer 7.
+
+Platforma IDS-RS suporta deja mai multi parseri si tipuri de detectie.
+Extinderea este naturala — parseri noi, detectori noi, aceeasi alertare.
 
 ---
 
-## 9. CERERE DE AVIZARE
+## 10. CERERE
 
-Solicitam aprobarea pentru implementarea sistemului IDS-RS in
-infrastructura interna, conform celor 8 obiective prezentate.
+Sistemul ruleaza deja in productie pe log-urile de firewall.
+
+**Ce avem nevoie pentru extindere:**
+
+- Acces la export syslog de pe switch-uri si routere (UDP)
+- Timp de dezvoltare pentru parseri noi
+- Coordonare cu echipa de retea pentru configurarea initiala
 
 **Ce livram:**
-- Sistem complet functional, testat si documentat
-- Fara costuri de licenta — solutie dezvoltata intern
-- Implementare graduala, fara impact asupra serviciilor existente
-- Compatibilitate cu infrastructura actuala de firewall si SIEM
 
-**Ce avem nevoie:**
-- Acces la log-urile firewall-ului intern prin port UDP dedicat
-- Un server (fizic sau virtual) pentru rularea IDS-RS
-- Coordonare cu echipa de retea pentru configurarea initiala
+- Sistem functional, testat (51 teste), documentat
+- Dezvoltat intern — zero costuri de licenta
+- Implementare graduala, fara impact asupra serviciilor
+- Compatibil cu infrastructura existenta
 
 ---
