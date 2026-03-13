@@ -123,6 +123,16 @@ pub fn print_banner(config: &AppConfig) {
         format!("║{:<width$}║", thresh_line, width = inner_width).cyan()
     );
 
+    // Whitelist — afisam numarul de intrari daca exista.
+    let wl_count = config.detection.whitelist.len();
+    if wl_count > 0 {
+        let wl_line = format!("  Whitelist: {} intrari (IP/CIDR excluse din detectie)", wl_count);
+        println!(
+            "{}",
+            format!("║{:<width$}║", wl_line, width = inner_width).cyan()
+        );
+    }
+
     println!("{}", format!("╚{}╝", border).bold().cyan());
     println!();
 }

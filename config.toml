@@ -41,6 +41,15 @@ max_hits_per_ip = 10000
 # (LRU — Least Recently Used) este eliminat pentru a face loc celui nou.
 max_tracked_ips = 100000
 
+# IP-uri si subretele excluse din detectie (trafic legitim cunoscut).
+# Accepta IP-uri individuale si CIDR. Aceste IP-uri nu genereaza alerte.
+# Exemplu: servere care comunica normal pe zeci de porturi (AD, mail, etc.)
+whitelist = [
+    # "10.0.1.10",       # srv-dc01 (AD — DNS, Kerberos, LDAP, SMB)
+    # "10.0.1.20",       # srv-mail (SMTP, IMAP, POP3)
+    # "10.0.2.0/24",     # subnet management
+]
+
 [detection.fast_scan]
 # Numar de porturi unice care declanseaza alerta de Fast Scan.
 # Alerta se emite cand un IP acceseaza >= port_threshold porturi unice
@@ -88,13 +97,13 @@ password = ""
 # Poate contine banner ASCII al echipei, disclaimer, etc.
 # Folositi """ pentru text multi-linie in TOML.
 email_footer = """
-       ____  ____  ____  ____
-      / ___|| ___|| __ )|___ \\
-      \\___ \\|___ \\|  _ \\  __) |
-       ___) |___) | |_) |/ __/
-      |____/|____/|____/|_____|
+   ____  ____  ____  ____       _       ____
+  / ___|| ___|| __ )|___ \\     / \\     |  _ \\
+  \\___ \\|___ \\|  _ \\  __) |   / _ \\    | | | |
+   ___) |___) | |_) |/ __/   / ___ \\ _ | |_| |
+  |____/|____/|____/|_____| /_/   \\_(_)|____/
 
-  Generat automat de S5B2"""
+  Generat automat de S5B2 A.D."""
 
 # -----------------------------------------------------------------------------
 # Mentenanta memorie

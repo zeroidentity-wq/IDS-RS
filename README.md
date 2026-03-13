@@ -34,7 +34,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 | **Alertare** | SIEM (UDP CEF), Email (SMTP async) |
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
-| **Teste** | 48 teste unitare — toate trec |
+| **Teste** | 53 teste unitare — toate trec |
 | **Clippy** | 7 warnings pre-existente (cosmetice, niciuna funcțională) |
 
 ### Implementat
@@ -46,7 +46,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Rate Limiting UDP (Token Bucket)
 - [x] Protectie memorie: MAX_HITS_PER_IP (FIFO) + MAX_TRACKED_IPS (LRU eviction)
 - [x] Validare config cu raportare cumulata (16 constrangeri)
-- [x] Teste unitare: 48 passed (parseri, detector, alerter)
+- [x] Teste unitare: 53 passed (parseri, detector, alerter, whitelist)
 
 ### De implementat
 
@@ -200,6 +200,10 @@ parser = "gaia"                # Parser activ: "gaia", "cef" sau "gaia_cef"
 
 [detection]
 alert_cooldown_secs = 300      # Cooldown intre alerte pentru acelasi IP
+whitelist = [                  # IP-uri/CIDR excluse din detectie
+    # "10.0.1.10",             # srv-dc01
+    # "10.0.2.0/24",           # subnet management
+]
 
 [detection.fast_scan]
 port_threshold = 15            # Alerta daca IP acceseaza >= N porturi unice...
@@ -762,7 +766,7 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 48 passed`
+Rezultat asteptat: `test result: ok. 53 passed`
 
 Testele acopera:
 - Parser GAIA: drop valid, accept parsat (nu ignorat), broadcast fara src, ICMP fara service, format invalid
@@ -771,6 +775,7 @@ Testele acopera:
 - Detector Fast Scan: alert, sub prag, cooldown, cleanup, IP-uri separate, max_hits_per_ip, max_tracked_ips LRU
 - Detector Slow Scan: alert dedicat, cooldown, independenta fata de Fast Scan (`slow_test_config()`)
 - Detector Accept Scan: alert accept, drop nu declanseaza accept scan, accept nu declanseaza fast scan, cooldown accept
+- Detector Whitelist: IP individual blocheaza alerta, CIDR blocheaza subnet, IP ne-whitelistat genereaza alerta, CIDR boundary corect, Accept Scan blocat de whitelist
 - Alerter: 7 teste sanitize_cef (anti-injection CEF)
 
 ---
@@ -1121,7 +1126,7 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
   prin `find_lea_blob()`. Extrage perechi `key="value"` cu verificare boundary (nu match substring
   ca `rule_action`), mapeaza numere protocol IANA (6→tcp, 17→udp, 1→icmp), filtreaza drop/accept.
   Integrat in factory (`mod.rs`), validare config (`config.rs`), tester (`tester.py` cu
-  `--format gaia_cef` si `--gaia-cef`). 15 teste unitare (10 initiale + 5 rawEvent). Total: **48 passed**.
+  `--format gaia_cef` si `--gaia-cef`). 15 teste unitare (10 initiale + 5 rawEvent). Total la momentul implementarii: **48 passed**.
 
 ---
 
@@ -1574,7 +1579,7 @@ udp_burst_size = 10000
 
 ### Impact ridicat
 
-- [ ] **#12 — Whitelist IP-uri** — in retea interna exista scanere de vulnerabilitati legitime (Nessus, OpenVAS), agenti de monitoring sau echipa de securitate care face pentest intern. Fara whitelist, toate genereaza false positives. *Implementare: `[detection.whitelist]` in `config.toml` cu lista de IP-uri/CIDR excluse din detectie.*
+- [x] **#12 — Whitelist IP-uri** — `detection.whitelist` in `config.toml` cu IP-uri individuale si CIDR. IP-urile din whitelist sunt excluse complet din detectie (nu consuma memorie, nu genereaza alerte). Validare la pornire, afisare in banner. 5 teste unitare.
 
 - [ ] **#11 — Raport zilnic prin email catre echipa IT/Security** — un task async
   programat sa ruleze o data pe zi (ex: la 08:00) care compileaza si trimite

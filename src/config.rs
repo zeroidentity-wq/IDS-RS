@@ -106,6 +106,12 @@ pub struct DetectionConfig {
     #[serde(default = "default_max_tracked_ips")]
     pub max_tracked_ips: usize,
 
+    /// Lista de IP-uri si subrețele excluse din detecție.
+    /// Accepta IP-uri individuale ("10.0.1.10") si CIDR ("10.0.2.0/24").
+    /// IP-urile din whitelist nu genereaza alerte (trafic legitim cunoscut).
+    #[serde(default)]
+    pub whitelist: Vec<String>,
+
     pub fast_scan: FastScanConfig,
     pub slow_scan: SlowScanConfig,
 
@@ -206,13 +212,13 @@ pub struct EmailConfig {
 
 fn default_email_footer() -> String {
     "\
-       ____  ____  ____  ____\n\
-      / ___|| ___|| __ )|___ \\\n\
-      \\___ \\|___ \\|  _ \\  __) |\n\
-       ___) |___) | |_) |/ __/\n\
-      |____/|____/|____/|_____|\n\
+   ____  ____  ____  ____       _       ____\n\
+  / ___|| ___|| __ )|___ \\     / \\     |  _ \\\n\
+  \\___ \\|___ \\|  _ \\  __) |   / _ \\    | | | |\n\
+   ___) |___) | |_) |/ __/   / ___ \\ _ | |_| |\n\
+  |____/|____/|____/|_____| /_/   \\_(_)|____/\n\
 \n\
-  Generat automat de S5B2 | Nu raspundeti la acest email"
+  Generat automat de S5B2 A.D. | Nu raspundeti la acest email"
         .to_string()
 }
 
@@ -311,6 +317,36 @@ impl AppConfig {
         }
 
         // --- Detection ---
+
+        // Validare whitelist: fiecare intrare trebuie sa fie IP valid sau CIDR valid.
+        for entry in &self.detection.whitelist {
+            if entry.contains('/') {
+                // CIDR: verificam IP-ul si prefixul
+                let parts: Vec<&str> = entry.splitn(2, '/').collect();
+                if parts.len() != 2 {
+                    errors.push(format!(
+                        "detection.whitelist: intrare CIDR invalida: \"{}\"", entry
+                    ));
+                    continue;
+                }
+                let ip_valid = parts[0].parse::<std::net::IpAddr>().is_ok();
+                let prefix_valid = parts[1].parse::<u8>().map(|p| {
+                    if parts[0].contains(':') { p <= 128 } else { p <= 32 }
+                }).unwrap_or(false);
+                if !ip_valid || !prefix_valid {
+                    errors.push(format!(
+                        "detection.whitelist: intrare CIDR invalida: \"{}\"", entry
+                    ));
+                }
+            } else {
+                // IP individual
+                if entry.parse::<std::net::IpAddr>().is_err() {
+                    errors.push(format!(
+                        "detection.whitelist: IP invalid: \"{}\"", entry
+                    ));
+                }
+            }
+        }
 
         if self.detection.alert_cooldown_secs == 0 {
             errors.push(

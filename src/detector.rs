@@ -4,9 +4,9 @@
 //
 // Acest modul implementeaza logica centrala a IDS-ului:
 //   1. Inregistreaza evenimentele "drop" si "accept" (IP sursa + port destinatie)
-//   2. Detecteaza Fast Scan:   > X porturi BLOCATE unice in Y secunde
-//   3. Detecteaza Slow Scan:   > Z porturi BLOCATE unice in W minute
-//   4. Detecteaza Accept Scan: > N porturi ACCEPTATE unice in M secunde
+//   2. Detecteaza Fast Scan:   >= X porturi BLOCATE unice in Y secunde
+//   3. Detecteaza Slow Scan:   >= Z porturi BLOCATE unice in W minute
+//   4. Detecteaza Accept Scan: >= N porturi ACCEPTATE unice in M secunde
 //   5. Gestioneaza cooldown-ul alertelor (anti-spam)
 //   6. Curata periodic datele vechi din memorie
 //
@@ -45,6 +45,72 @@ use chrono::{DateTime, Local};
 use dashmap::DashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
+
+// =============================================================================
+// Whitelist — IP-uri si subretele excluse din detectie
+// =============================================================================
+
+/// Intrare in whitelist: IP individual sau subnet CIDR.
+///
+/// Parsata din string-urile din config.toml la constructia Detector-ului.
+/// Matching-ul CIDR se face prin bitmask: (ip & mask) == (network & mask).
+#[derive(Debug, Clone)]
+enum WhitelistEntry {
+    /// IP individual (ex: "10.0.1.10").
+    Single(IpAddr),
+    /// Subnet CIDR IPv4 (ex: "10.0.2.0/24"). Stocam adresa de retea si masca.
+    CidrV4(u32, u32),
+    /// Subnet CIDR IPv6 (ex: "fd00::/64"). Stocam adresa de retea si masca.
+    CidrV6(u128, u128),
+}
+
+impl WhitelistEntry {
+    /// Parseaza un string din config.toml intr-o intrare whitelist.
+    /// Formatul validat deja in config.rs::validate().
+    fn parse(entry: &str) -> Option<Self> {
+        if entry.contains('/') {
+            let parts: Vec<&str> = entry.splitn(2, '/').collect();
+            let ip: IpAddr = parts[0].parse().ok()?;
+            let prefix: u8 = parts[1].parse().ok()?;
+            match ip {
+                IpAddr::V4(addr) => {
+                    let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+                    let network = u32::from(addr) & mask;
+                    Some(WhitelistEntry::CidrV4(network, mask))
+                }
+                IpAddr::V6(addr) => {
+                    let mask = if prefix == 0 { 0u128 } else { !0u128 << (128 - prefix) };
+                    let network = u128::from(addr) & mask;
+                    Some(WhitelistEntry::CidrV6(network, mask))
+                }
+            }
+        } else {
+            let ip: IpAddr = entry.parse().ok()?;
+            Some(WhitelistEntry::Single(ip))
+        }
+    }
+
+    /// Verifica daca un IP se potriveste cu aceasta intrare.
+    fn matches(&self, ip: &IpAddr) -> bool {
+        match self {
+            WhitelistEntry::Single(wl_ip) => wl_ip == ip,
+            WhitelistEntry::CidrV4(network, mask) => {
+                if let IpAddr::V4(addr) = ip {
+                    (u32::from(*addr) & mask) == *network
+                } else {
+                    false
+                }
+            }
+            WhitelistEntry::CidrV6(network, mask) => {
+                if let IpAddr::V6(addr) = ip {
+                    (u128::from(*addr) & mask) == *network
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
 
 // =============================================================================
 // Structuri de date
@@ -187,6 +253,9 @@ pub struct Detector {
     /// (drop sau accept), deci este sursa de adevar pentru capacitate totala.
     last_seen: DashMap<IpAddr, Instant>,
 
+    /// IP-uri si subretele excluse din detectie (parsate din config la constructie).
+    whitelist: Vec<WhitelistEntry>,
+
     /// Configurarea pragurilor de detectie (owned, cloned din AppConfig).
     config: DetectionConfig,
 }
@@ -197,6 +266,13 @@ impl Detector {
     /// NOTA RUST: `DashMap::new()` creeaza un map gol, pre-alocat cu
     /// numar optim de shard-uri (de obicei = numar de CPU cores).
     pub fn new(config: DetectionConfig) -> Self {
+        // Parsam whitelist-ul din config la constructie (o singura data).
+        let whitelist: Vec<WhitelistEntry> = config
+            .whitelist
+            .iter()
+            .filter_map(|entry| WhitelistEntry::parse(entry))
+            .collect();
+
         Self {
             port_hits: DashMap::new(),
             accept_hits: DashMap::new(),
@@ -204,8 +280,14 @@ impl Detector {
             slow_cooldowns: DashMap::new(),
             accept_cooldowns: DashMap::new(),
             last_seen: DashMap::new(),
+            whitelist,
             config,
         }
+    }
+
+    /// Verifica daca un IP este in whitelist (exclus din detectie).
+    pub fn is_whitelisted(&self, ip: &IpAddr) -> bool {
+        self.whitelist.iter().any(|entry| entry.matches(ip))
     }
 
     /// Proceseaza un eveniment de log si returneaza alertele detectate.
@@ -228,6 +310,13 @@ impl Detector {
     pub fn process_event(&self, event: &LogEvent) -> Vec<Alert> {
         let now = Instant::now();
         let ip = event.source_ip;
+
+        // --- 0. Whitelist check ---
+        // IP-urile din whitelist sunt excluse complet din detectie.
+        // Nu consuma memorie in DashMap, nu genereaza alerte.
+        if self.is_whitelisted(&ip) {
+            return Vec::new();
+        }
 
         // --- 1. Limitare globala IP-uri (anti-IP-spoofing flood) ---
         //
@@ -565,6 +654,7 @@ mod tests {
             alert_cooldown_secs: 5,
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
+            whitelist: Vec::new(),
             fast_scan: FastScanConfig {
                 port_threshold: 3,
                 time_window_secs: 10,
@@ -835,6 +925,7 @@ mod tests {
             alert_cooldown_secs: 5,
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
+            whitelist: Vec::new(),
             fast_scan: FastScanConfig {
                 port_threshold: 1_000, // prag mare — nu se declanseaza in teste slow
                 time_window_secs: 10,
@@ -913,5 +1004,79 @@ mod tests {
 
         assert!(got_slow, "Trebuia o alerta Slow Scan");
         assert!(!got_fast, "Fast Scan NU trebuia sa se declanseze cu prag 1000");
+    }
+
+    // =========================================================================
+    // Teste Whitelist (#12)
+    // =========================================================================
+
+    #[test]
+    fn test_whitelist_single_ip_blocks_alert() {
+        // IP-ul 10.0.0.1 este in whitelist → nu trebuie sa genereze alerta.
+        let mut config = test_config();
+        config.whitelist = vec!["10.0.0.1".to_string()];
+        let detector = Detector::new(config);
+
+        // Trimitem 5 porturi (peste prag 3) — fara alerta.
+        for port in 1..=5 {
+            let alerts = detector.process_event(&make_event("10.0.0.1", port));
+            assert!(alerts.is_empty(), "IP in whitelist nu trebuie sa genereze alerta");
+        }
+    }
+
+    #[test]
+    fn test_whitelist_cidr_blocks_alert() {
+        // Subnet-ul 10.0.0.0/24 este in whitelist → 10.0.0.50 nu genereaza alerta.
+        let mut config = test_config();
+        config.whitelist = vec!["10.0.0.0/24".to_string()];
+        let detector = Detector::new(config);
+
+        for port in 1..=5 {
+            let alerts = detector.process_event(&make_event("10.0.0.50", port));
+            assert!(alerts.is_empty(), "IP din subnet whitelist nu trebuie sa genereze alerta");
+        }
+    }
+
+    #[test]
+    fn test_whitelist_does_not_block_other_ips() {
+        // 10.0.0.1 in whitelist, dar 10.0.0.2 NU — trebuie sa genereze alerta.
+        let mut config = test_config();
+        config.whitelist = vec!["10.0.0.1".to_string()];
+        let detector = Detector::new(config);
+
+        for port in 1..=3 {
+            let alerts = detector.process_event(&make_event("10.0.0.2", port));
+            if port == 3 {
+                assert_eq!(alerts.len(), 1, "IP-ul care NU e in whitelist trebuie sa genereze alerta");
+            }
+        }
+    }
+
+    #[test]
+    fn test_whitelist_cidr_boundary() {
+        // 10.0.1.0/24 in whitelist → 10.0.2.1 NU e acoperit.
+        let mut config = test_config();
+        config.whitelist = vec!["10.0.1.0/24".to_string()];
+        let detector = Detector::new(config);
+
+        for port in 1..=3 {
+            let alerts = detector.process_event(&make_event("10.0.2.1", port));
+            if port == 3 {
+                assert_eq!(alerts.len(), 1, "IP din alt subnet nu e acoperit de whitelist");
+            }
+        }
+    }
+
+    #[test]
+    fn test_whitelist_accept_scan_blocked() {
+        // Whitelist blocheaza si Accept Scan, nu doar Fast/Slow.
+        let mut config = test_config();
+        config.whitelist = vec!["10.1.0.1".to_string()];
+        let detector = Detector::new(config);
+
+        for port in 1..=5 {
+            let alerts = detector.process_event(&make_accept_event("10.1.0.1", port));
+            assert!(alerts.is_empty(), "Accept Scan trebuie blocat de whitelist");
+        }
     }
 }
