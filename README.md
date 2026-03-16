@@ -21,6 +21,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [Protectie DashMap — MAX\_TRACKED\_IPS si LRU Eviction](#protectie-dashmap--max_tracked_ips-si-lru-eviction)
 - [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection)
 - [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket)
+- [Hostname Resolve — Mapping Static IP→Hostname](#hostname-resolve--mapping-static-iphostname)
 - [Concepte Rust acoperite](#concepte-rust-acoperite)
 
 ---
@@ -46,16 +47,18 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Rate Limiting UDP (Token Bucket)
 - [x] Protectie memorie: MAX_HITS_PER_IP (FIFO) + MAX_TRACKED_IPS (LRU eviction)
 - [x] Validare config cu raportare cumulata (16 constrangeri)
+- [x] Whitelist IP-uri (IP + CIDR) — excluse complet din detectie
+- [x] Hostname mapping static (`[network.hostnames]`) — afisare in CLI, SIEM (shost=/dhost=) si email
 - [x] Teste unitare: 53 passed (parseri, detector, alerter, whitelist)
 
 ### De implementat
 
 - [ ] Parser FortiGate (format Fortinet)
 - [ ] Raport zilnic email cu clasificare subretele
-- [ ] Whitelist IP-uri (IP + CIDR)
-- [ ] Webhook alerting (Slack/Teams)
-- [ ] Statistici live in terminal (AtomicU64 counters)
 - [ ] Hot reload config la SIGHUP
+- [ ] Lateral Movement detection (#22)
+- [ ] Distributed Scan detection (#23)
+- [ ] Beaconing C2 detection (#24)
 
 ---
 
@@ -190,6 +193,7 @@ Constrangerile validate:
 | `alerting.email.to` (daca enabled) | cel putin un destinatar |
 | `network.udp_burst_size` (daca `udp_rate_limit` > 0) | ≥ 1 |
 | `network.udp_burst_size` (daca `udp_rate_limit` > 0) | ≥ `udp_rate_limit` (warning) |
+| `network.hostnames` cheile | fiecare cheie trebuie sa fie un IP valid |
 
 ```toml
 [network]
@@ -197,6 +201,11 @@ listen_address = "0.0.0.0"    # Interfata de ascultare
 listen_port = 5555             # Port UDP pentru receptie log-uri
 parser = "gaia"                # Parser activ: "gaia", "cef" sau "gaia_cef"
 # debug = true                 # Mod debug: afiseaza fiecare pachet cu validare parsare
+
+[network.hostnames]            # Mapping static IP → hostname (optional)
+# "10.0.1.10" = "srv-dc01"    # Afisat in alerte CLI, SIEM (shost=/dhost=) si email
+# "10.0.1.20" = "srv-mail"
+# "10.0.2.50" = "ws-admin01"
 
 [detection]
 alert_cooldown_secs = 300      # Cooldown intre alerte pentru acelasi IP
@@ -1559,6 +1568,366 @@ udp_burst_size = 10000
 
 ---
 
+## Hostname Resolve — Mapping Static IP→Hostname
+
+> **AFISARE CONTEXT** — Implementat in `src/config.rs`, `src/display.rs`, `src/alerter.rs`, `src/main.rs`.
+
+### Ce problema rezolva
+
+IDS-RS ruleaza intr-o **retea izolata fara internet**. Cand se detecteaza o scanare, alerta afiseaza
+IP-uri numerice: `10.0.1.10 → 10.0.1.20`. Operatorul trebuie sa deschida un tabel separat
+(spreadsheet, CMDB) ca sa identifice cine e sursa si cine e tinta. In incidente reale, fiecare secunda
+conteaza — iar o eroare de identificare poate duce la blocarea serverului gresit.
+
+Deoarece reteaua este izolata, **nu exista DNS extern** pe care IDS-ul sa il interogeze.
+Reverse DNS (PTR records) ar presupune un server DNS intern configurat si disponibil —
+ceea ce nu este garantat. Reverse DNS adauga si latenta la fiecare eveniment procesat.
+
+### Solutia: Mapping static in `config.toml`
+
+In loc de DNS, folosim un tabel de mapare IP→hostname configurat manual:
+
+```toml
+[network.hostnames]
+"10.0.1.10" = "srv-dc01"       # Domain Controller
+"10.0.1.20" = "srv-mail"       # Exchange Server
+"10.0.2.50" = "ws-admin01"     # Workstation admin
+"10.0.3.1"  = "fw-dmz"         # Firewall DMZ
+```
+
+Avantaje fata de DNS:
+- **Zero latenta** — lookup in `HashMap` in memorie, O(1)
+- **Zero dependinte** — nu necesita server DNS functional in retea
+- **Deterministic** — hostname-ul nu se schimba in functie de starea DNS
+- **Controlat** — adminul decide exact ce hostname apare in alerte
+
+Dezavantaje:
+- **Manual** — trebuie mentinut sincronizat cu CMDB/inventar
+- **Incomplet** — IP-urile necunoscute apar fara hostname (dar asta e si informatie utila: un IP fara hostname = potential masina neautorizata)
+
+### Fluxul de date
+
+```
+config.toml                     main.rs
+[network.hostnames]    ──parse──>  HashMap<IpAddr, String>
+"10.0.1.10" = "srv-dc01"                   │
+"10.0.1.20" = "srv-mail"                   │
+                                            ├─────> display.rs    (CLI output)
+                                            │       format_ip() → "10.0.1.10 (srv-dc01)"
+                                            │
+                                            ├─────> alerter.rs    (SIEM CEF)
+                                            │       shost=srv-dc01 dhost=srv-mail
+                                            │
+                                            └─────> alerter.rs    (Email HTML)
+                                                    "10.0.1.10 (srv-dc01)" in tabel
+```
+
+### Unde apare hostname-ul
+
+**1. Terminal (CLI) — eveniment firewall:**
+```
+[2026-03-16 12:00:00]  DROP  Src=10.0.1.10 (srv-dc01) DstPort=443 Proto=tcp Action=drop
+```
+
+**2. Terminal (CLI) — alerta:**
+```
+────────────────────────────────────────────────────────────────────
+[2026-03-16 12:00:01] ▶▶▶  ALERT  [FAST SCAN] [IP: 10.0.1.10 (srv-dc01)] | 15 porturi unice detectate!
+  Porturi: 21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 995, 3306, 3389, 8080
+────────────────────────────────────────────────────────────────────
+```
+
+**3. SIEM (CEF) — campurile `shost` si `dhost`:**
+```
+<38>Mar 16 12:00:01 ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0
+  |1001|Fast Port Scan Detected|7
+  |rt=1742122801000 src=10.0.1.10 shost=srv-dc01 dst=10.0.1.20 dhost=srv-mail
+   cnt=15 act=alert msg=Fast Scan detectat: 15 porturi unice in 10 secunde
+   cs1Label=ScannedPorts cs1=21,22,23,...
+```
+
+Campurile `shost` (Source Host Name) si `dhost` (Destination Host Name) sunt standard CEF.
+ArcSight le mapeaza automat in Active Channel si dashboard-uri — operatorul vede direct
+hostname-ul fara sa caute IP-ul in inventar.
+
+**4. Email — tabelul de detalii:**
+
+```
+┌─────────────────┬──────────────────────────────┐
+│ IP Sursa        │ 10.0.1.10 (srv-dc01)         │
+│ IP Destinatie   │ 10.0.1.20 (srv-mail)         │
+│ Porturi scanate │ 15                            │
+│ Timestamp       │ 2026-03-16 12:00:01           │
+└─────────────────┴──────────────────────────────┘
+```
+
+**5. Banner la pornire:**
+```
+║  Hostnames: 4 mapping-uri IP->hostname configurate                                                          ║
+```
+
+### Implementarea in Rust
+
+#### Pasul 1: Configurare — `config.rs`
+
+Adaugam un `HashMap<String, String>` in `NetworkConfig`:
+
+```rust
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkConfig {
+    // ... campuri existente ...
+
+    /// Mapping static IP → hostname.
+    /// Cheile sunt String-uri (limitare TOML — cheile de tabel sunt mereu String),
+    /// parsate in IpAddr la startup in main.rs.
+    #[serde(default)]
+    pub hostnames: HashMap<String, String>,
+}
+```
+
+**De ce `HashMap<String, String>` si nu `HashMap<IpAddr, String>`?**
+
+TOML stocheaza cheile de tabel ca string-uri. Serde nu poate deserializa direct o cheie TOML
+intr-un `IpAddr` fara un custom deserializer. Solutia simpla: stocam ca `String` → `String`
+in config, si parsam in `IpAddr` → `String` o singura data la startup in `main.rs`.
+
+Validarea se face in `validate()` — daca o cheie nu este un IP valid, eroarea este raportata:
+
+```rust
+for (ip_str, _hostname) in &self.network.hostnames {
+    if ip_str.parse::<std::net::IpAddr>().is_err() {
+        errors.push(format!(
+            "network.hostnames: cheia \"{}\" nu este un IP valid", ip_str
+        ));
+    }
+}
+```
+
+#### Pasul 2: Parsare la startup — `main.rs`
+
+Convertim `HashMap<String, String>` → `HashMap<IpAddr, String>` o singura data:
+
+```rust
+let hostnames: HashMap<IpAddr, String> = config
+    .network
+    .hostnames
+    .iter()
+    .filter_map(|(ip_str, name)| {
+        ip_str.parse::<IpAddr>().ok().map(|ip| (ip, name.clone()))
+    })
+    .collect();
+```
+
+Acest HashMap este apoi transmis prin referinta (`&hostnames`) la functiile display
+si prin clonare la `Alerter::new()` (care il detine permanent).
+
+**De ce `filter_map` si nu `map` + `unwrap`?**
+
+`filter_map` sare silentios peste cheile invalide (nu face panic). In teorie,
+`validate()` a verificat deja cheile, dar **defense-in-depth**: daca cumva o cheie
+invalida trece de validare, nu vrem sa crape IDS-ul.
+
+#### Pasul 3: Afisare in CLI — `display.rs`
+
+Un helper privat formateaza IP-ul cu hostname:
+
+```rust
+/// Returneaza "IP (hostname)" daca hostname-ul exista, altfel doar "IP".
+fn format_ip(ip: &IpAddr, hostnames: &HashMap<IpAddr, String>) -> String {
+    match hostnames.get(ip) {
+        Some(name) => format!("{} ({})", ip, name),
+        None => ip.to_string(),
+    }
+}
+```
+
+`HashMap::get()` returneaza `Option<&String>`:
+- `Some(name)` = IP-ul are hostname configurat → afisam ambele
+- `None` = IP necunoscut → afisam doar IP-ul numeric
+
+Functiile `log_firewall_event()` si `log_alert()` primesc `&HashMap<IpAddr, String>`
+ca parametru si folosesc `format_ip()` in loc de `ip.to_string()`:
+
+```rust
+pub fn log_firewall_event(
+    ip: &IpAddr,
+    port: u16,
+    protocol: &str,
+    action: &str,
+    hostnames: &HashMap<IpAddr, String>,   // NOU: mapping IP→hostname
+) {
+    // ...
+    println!(
+        "{} {} Src={} DstPort={} ...",
+        ts.dimmed(),
+        badge,
+        format_ip(ip, hostnames).bright_blue(),   // "10.0.1.10 (srv-dc01)"
+        // ...
+    );
+}
+```
+
+#### Pasul 4: SIEM CEF — `alerter.rs`
+
+In mesajul CEF, adaugam campurile `shost` si `dhost` (standard ArcSight):
+
+```rust
+// Campul shost (Source Hostname) — prezent doar daca hostname-ul este configurat.
+let shost_field = match self.hostnames.get(&alert.source_ip) {
+    Some(name) => format!(" shost={}", sanitize_cef(name)),
+    None => String::new(),   // String gol = campul nu apare in CEF
+};
+```
+
+**Atentie la `sanitize_cef()`!** Hostname-urile sunt configurate de admin in `config.toml`,
+deci in teorie sunt de incredere. Dar defense-in-depth: daca cineva pune un hostname
+malitios (`"evil\nFake CEF:0|..."`), sanitizarea previne injectia. Aplicam aceeasi
+protectie ca la celelalte campuri CEF — consistenta este mai importanta decat optimizarea.
+
+Campurile sunt **conditionale** — apar doar daca hostname-ul exista:
+
+```
+src=10.0.1.10 shost=srv-dc01 dst=10.0.1.20 dhost=srv-mail   ← ambele hostname-uri configurate
+src=10.0.1.10 dst=192.168.5.99                                ← niciun hostname configurat
+src=10.0.1.10 shost=srv-dc01 dst=192.168.5.99                 ← doar sursa configurata
+```
+
+Aceasta abordare este compatibila cu ArcSight: campurile lipsa sunt ignorate, nu cauzeaza erori.
+
+#### Pasul 5: Email HTML — `alerter.rs`
+
+In template-ul HTML, hostname-urile sunt injectate langa IP prin placeholder-e:
+
+```html
+<tr><td>IP Sursa</td><td>__SRC_IP__ __SRC_HOST__</td></tr>
+<tr><td>IP Destinatie</td><td>__DST_IP__ __DST_HOST__</td></tr>
+```
+
+Placeholder-ul `__SRC_HOST__` devine `(srv-dc01)` sau string gol (daca hostname necunoscut).
+
+### Concepte Rust explicate
+
+#### `HashMap<K, V>` — tabel hash din standard library
+
+`HashMap` stocheaza perechi cheie→valoare cu acces O(1) amortizat.
+In cazul nostru: `HashMap<IpAddr, String>` — cheia este un IP, valoarea este hostname-ul.
+
+```rust
+use std::collections::HashMap;
+
+let mut hostnames = HashMap::new();
+hostnames.insert("10.0.1.10".parse().unwrap(), "srv-dc01".to_string());
+
+// Lookup: O(1) amortizat
+match hostnames.get(&ip) {
+    Some(name) => println!("{} ({})", ip, name),   // gasit
+    None => println!("{}", ip),                     // negasit
+}
+```
+
+`HashMap` nu este thread-safe — nu implementeaza `Sync`. Dar in cazul nostru:
+- Creat o singura data la startup (nu se modifica dupa)
+- Transmis prin `&HashMap` (referinta imutabila) catre display functions
+- Clonat in Alerter (care il detine ca owner, dar nu il modifica)
+
+Deci nu avem nevoie de `DashMap` sau `Arc<RwLock<...>>` — referinta imutabila
+partajata este suficienta si zero-overhead.
+
+#### `.iter().filter_map(...)` — transformare cu filtrare
+
+```rust
+let hostnames: HashMap<IpAddr, String> = config
+    .network
+    .hostnames                           // HashMap<String, String> din TOML
+    .iter()                              // iterator peste (&String, &String)
+    .filter_map(|(ip_str, name)| {       // transforma SI filtreaza
+        ip_str.parse::<IpAddr>()         // Result<IpAddr, Error>
+            .ok()                        // Result → Option (Err → None)
+            .map(|ip| (ip, name.clone()))// Some(IpAddr) → Some((IpAddr, String))
+    })
+    .collect();                          // construieste HashMap-ul final
+```
+
+`filter_map` combina `.filter()` + `.map()` intr-un singur pas:
+- Closure-ul returneaza `Option<T>`
+- `Some(val)` → pastrat in rezultat
+- `None` → eliminat (filtrat)
+
+Alternativa cu `map` + `unwrap` ar fi panicked pe eroare de parsare.
+`filter_map` + `.ok()` este pattern-ul idiomatic Rust pentru "incearca si ignora esecurile".
+
+#### `#[serde(default)]` — campuri optionale in TOML
+
+```rust
+#[serde(default)]
+pub hostnames: HashMap<String, String>,
+```
+
+`#[serde(default)]` inseamna: daca sectiunea `[network.hostnames]` lipseste complet
+din `config.toml`, serde apeleaza `Default::default()` care pentru `HashMap` returneaza
+un HashMap gol. Fara acest atribut, lipsa sectiunii ar cauza o eroare de deserializare.
+
+Aceasta face feature-ul **retrocompatibil**: configuratiile vechi (fara `[network.hostnames]`)
+continua sa functioneze exact ca inainte.
+
+#### De ce `hostnames.clone()` la crearea Alerter-ului?
+
+```rust
+let alerter = Arc::new(Alerter::new(
+    config.alerting.clone(),
+    config.detection.clone(),
+    hostnames.clone(),          // ← de ce clone?
+)?);
+```
+
+`Alerter` **detine** (owns) hostname-urile. Main loop-ul tine o referinta separata
+(`&hostnames`) pentru functiile display. Daca am pasa doar referinta la Alerter,
+ar aparea lifetime issues: Alerter-ul este wrapped in `Arc` si poate supravietui
+scope-ului original al HashMap-ului.
+
+Costul clone-ului: O(n) la startup, o singura data. Pentru 100-500 hostname-uri
+(retea cu 1000 IP-uri), < 0.01ms. Overhead neglijabil.
+
+### Configurare
+
+```toml
+[network.hostnames]
+"10.0.1.10" = "srv-dc01"       # Domain Controller — DNS, Kerberos, LDAP
+"10.0.1.20" = "srv-mail"       # Exchange — SMTP, IMAP
+"10.0.1.30" = "srv-backup"     # Backup server — Veeam
+"10.0.2.50" = "ws-admin01"     # Workstation administrator
+"10.0.3.1"  = "fw-dmz"         # Firewall DMZ interface
+```
+
+| Situatie | Comportament |
+|----------|-------------|
+| Sectiunea lipseste complet | Feature dezactivat, afisare doar IP-uri (retrocompatibil) |
+| IP configurat gasit in eveniment | Afisare `IP (hostname)` in CLI, `shost=`/`dhost=` in CEF, hostname in email |
+| IP neconfigurat in eveniment | Afisare doar `IP` (fara paranteze, fara hostname) |
+| Cheie invalida (nu e IP valid) | Eroare la startup — raportata in validate() |
+
+### Intrebari frecvente
+
+**De ce nu reverse DNS in loc de mapping static?**
+
+In retea izolata fara internet, reverse DNS (PTR records) presupune un server DNS intern
+configurat cu toate inregistrarile. In practica, multe retele izolate au DNS partial
+sau inexistent. Mapping-ul static este deterministic si nu depinde de nicio infrastructura.
+
+**De ce nu DHCP lease table?**
+
+DHCP lease files au format diferit per implementare (ISC, dnsmasq, Windows DHCP),
+se schimba la fiecare reinnoire, si necesita acces la fisierul de lease al serverului
+DHCP. Mapping-ul static este simplu si controlat de admin.
+
+**Cum mentin hostnames actualizate?**
+
+Ideal, prin automatizare: un script periodic care extrage inventarul din CMDB/AD
+si genereaza sectiunea `[network.hostnames]` in `config.toml`. Cand va fi implementat
+`#16 — Hot reload config la SIGHUP`, update-ul se aplica fara restart.
+
+---
+
 ## TODO — Securitate si hardening
 
 ### Medie
@@ -1581,6 +1950,8 @@ udp_burst_size = 10000
 
 - [x] **#12 — Whitelist IP-uri** — `detection.whitelist` in `config.toml` cu IP-uri individuale si CIDR. IP-urile din whitelist sunt excluse complet din detectie (nu consuma memorie, nu genereaza alerte). Validare la pornire, afisare in banner. 5 teste unitare.
 
+- [x] **#21 — Hostname resolve** — mapping static `[network.hostnames]` in `config.toml` (IP → hostname). Hostname-urile sunt afisate in: alerte CLI (`[IP: 10.0.1.10 (srv-dc01)]`), SIEM CEF (`shost=srv-dc01 dhost=srv-mail`), email (coloana IP Sursa/Destinatie). Validare cheilor IP la pornire. Util in reteaua izolata fara DNS.
+
 - [ ] **#11 — Raport zilnic prin email catre echipa IT/Security** — un task async
   programat sa ruleze o data pe zi (ex: la 08:00) care compileaza si trimite
   un email de sinteza cu activitatea din ultimele 24 de ore. Design complet gandit:
@@ -1600,13 +1971,15 @@ udp_burst_size = 10000
 
 ### Impact mediu
 
-- [ ] **#19 — Parser FortiGate (Fortinet)** — format propriu, diferit de Gaia si CEF. Adaugat ca optiune `parser = "fortigate"` in `config.toml`. Implementeaza `trait LogParser` in `src/parser/fortigate.rs`.
+- [ ] **#20 — Parser FortiGate (Fortinet)** — format propriu, diferit de Gaia si CEF. Adaugat ca optiune `parser = "fortigate"` in `config.toml`. Implementeaza `trait LogParser` in `src/parser/fortigate.rs`.
 
-- [ ] **#13 — Webhook alerting (Slack/Teams)** — trimitere alerte prin HTTP POST catre webhook-uri Slack sau Microsoft Teams. *Implementare: `[alerting.webhook]` in `config.toml` cu `enabled`, `url`, `format` (slack/teams).*
+- [ ] **#22 — Lateral Movement** — 1 IP intern → N dest_ip diferite pe porturi specifice (445, 3389, 22, 135). SignatureID 1004.
+
+- [ ] **#23 — Distributed Scan** — N surse diferite → aceeasi tinta pe aceleasi porturi. Perspectiva inversata. SignatureID 1005.
+
+- [ ] **#24 — Beaconing C2** — src→(dst, port) la intervale regulate (stddev mic). SignatureID 1006.
 
 - [ ] **#16 — SIGHUP config reload** — reincarca `config.toml` fara restart, fara pierdere de context din memorie.
-
-- [ ] **#15 — Statistici live in terminal** — counteri `AtomicU64` pentru pachete procesate, alerte generate, IP-uri tracked. Afisare periodica in terminal fara impact pe performanta.
 
 - [ ] **Diferentiere IP intern vs extern** — RFC1918 (`10.x`, `192.168.x`, `172.16-31.x`) vs IP-uri publice. Un atac din interior merita severitate/label diferit in SIEM si email.
 
@@ -1638,7 +2011,9 @@ udp_burst_size = 10000
 |---|-----------|
 | #1 | Mesaje SIEM citesc time_window din config (nu hardcodate) |
 | #10 | Accept Scan — `accept_hits` separate, SigID 1003, magenta CLI |
+| #12 | Whitelist IP-uri (IP + CIDR) — excluse complet din detectie |
 | #17 | Cleanup task sleep-first (nu interval tick imediat) |
+| #21 | Hostname resolve — mapping static `[network.hostnames]`, afisare in CLI/SIEM/email |
 | — | `dest_ip` in LogEvent/Alert, `dst=` in CEF, porturi in `msg` |
 
 ### Calitate cod

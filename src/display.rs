@@ -35,6 +35,8 @@ use crate::detector::{Alert, ScanType};
 use crate::parser::LogEvent;
 use chrono::Local;
 use colored::*;
+use std::collections::HashMap;
+use std::net::IpAddr;
 
 /// Latimea separatorului orizontal (in caractere).
 const SEPARATOR_WIDTH: usize = 120;
@@ -133,6 +135,16 @@ pub fn print_banner(config: &AppConfig) {
         );
     }
 
+    // Hostnames — afisam numarul de mapping-uri IP→hostname daca exista.
+    let hn_count = config.network.hostnames.len();
+    if hn_count > 0 {
+        let hn_line = format!("  Hostnames: {} mapping-uri IP->hostname configurate", hn_count);
+        println!(
+            "{}",
+            format!("║{:<width$}║", hn_line, width = inner_width).cyan()
+        );
+    }
+
     println!("{}", format!("╚{}╝", border).bold().cyan());
     println!();
 }
@@ -205,7 +217,7 @@ pub fn log_error(message: &str) {
 // ---------------------------------------------------------------------------
 
 /// Afiseaza o alerta de securitate cu formatare vizual distincta.
-pub fn log_alert(alert: &Alert) {
+pub fn log_alert(alert: &Alert, hostnames: &HashMap<IpAddr, String>) {
     let ts = alert
         .timestamp
         .format("[%Y-%m-%d %H:%M:%S]")
@@ -230,6 +242,8 @@ pub fn log_alert(alert: &Alert) {
 
     let arrows = "▶▶▶";
 
+    let src_display = format_ip(&alert.source_ip, hostnames);
+
     match alert.scan_type {
         ScanType::Fast => {
             println!();
@@ -239,7 +253,7 @@ pub fn log_alert(alert: &Alert) {
                 ts.bold().white(),
                 arrows.red().bold(),
                 " ALERT ".on_red().white().bold(),
-                format!("[IP: {}]", alert.source_ip).red().bold(),
+                format!("[IP: {}]", src_display).red().bold(),
                 alert.unique_ports.len().to_string().red().bold()
             );
             println!("  Porturi: {}{}", port_list, suffix);
@@ -254,7 +268,7 @@ pub fn log_alert(alert: &Alert) {
                 ts.bold().white(),
                 arrows.yellow().bold(),
                 " ALERT ".on_yellow().black().bold(),
-                format!("[IP: {}]", alert.source_ip).yellow().bold(),
+                format!("[IP: {}]", src_display).yellow().bold(),
                 alert.unique_ports.len().to_string().yellow().bold()
             );
             println!("  Porturi: {}{}", port_list, suffix);
@@ -272,7 +286,7 @@ pub fn log_alert(alert: &Alert) {
                 ts.bold().white(),
                 arrows.magenta().bold(),
                 " ALERT ".on_magenta().white().bold(),
-                format!("[IP: {}]", alert.source_ip).magenta().bold(),
+                format!("[IP: {}]", src_display).magenta().bold(),
                 alert.unique_ports.len().to_string().magenta().bold()
             );
             println!("  Porturi: {}{}", port_list, suffix);
@@ -303,7 +317,13 @@ pub fn log_alert_sent(destination: &str, alert_type: &str) {
 /// Badge-uri:
 ///   " DROP " albastru  → conexiune BLOCATA de firewall (port inchis/filtrat)
 ///   " ACCPT" verde     → conexiune PERMISA de firewall (port deschis)
-pub fn log_firewall_event(ip: &std::net::IpAddr, port: u16, protocol: &str, action: &str) {
+pub fn log_firewall_event(
+    ip: &IpAddr,
+    port: u16,
+    protocol: &str,
+    action: &str,
+    hostnames: &HashMap<IpAddr, String>,
+) {
     let ts = timestamp();
     // Badge dinamic: albastru pentru drop, verde pentru accept.
     // NOTA RUST: `if-else` ca expresie — returneaza ColoredString din ambele ramuri.
@@ -317,7 +337,7 @@ pub fn log_firewall_event(ip: &std::net::IpAddr, port: u16, protocol: &str, acti
         "{} {} Src={} DstPort={} Proto={} Action={}",
         ts.dimmed(),
         badge,
-        format!("{}", ip).bright_blue(),
+        format_ip(ip, hostnames).bright_blue(),
         format!("{}", port).bright_blue(),
         protocol.bright_blue(),
         action.bright_blue()
@@ -413,4 +433,13 @@ pub fn log_debug_parse_fail(line: &str, parser_name: &str, expected: &str) {
 // ---------------------------------------------------------------------------
 fn timestamp() -> String {
     Local::now().format("[%Y-%m-%d %H:%M:%S]").to_string()
+}
+
+/// Formateaza un IP cu hostname-ul sau (daca exista in mapping).
+/// Returneaza "IP (hostname)" daca hostname-ul este cunoscut, altfel doar "IP".
+fn format_ip(ip: &IpAddr, hostnames: &HashMap<IpAddr, String>) -> String {
+    match hostnames.get(ip) {
+        Some(name) => format!("{} ({})", ip, name),
+        None => ip.to_string(),
+    }
 }

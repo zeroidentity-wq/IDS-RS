@@ -57,6 +57,8 @@ mod parser;
 use alerter::Alerter;
 use config::AppConfig;
 use detector::Detector;
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -239,8 +241,24 @@ async fn main() -> anyhow::Result<()> {
     // tokio cu "full" features foloseste un thread pool, deci task-urile
     // pot rula pe thread-uri diferite -> TREBUIE Arc, nu Rc.
     //
+    // Parsam mapping-ul IP→hostname din config.toml.
+    // Cheia in TOML este String (IP), o convertim la IpAddr pentru lookup rapid.
+    // Validarea cheilor se face in config.rs::validate().
+    let hostnames: HashMap<IpAddr, String> = config
+        .network
+        .hostnames
+        .iter()
+        .filter_map(|(ip_str, name)| {
+            ip_str.parse::<IpAddr>().ok().map(|ip| (ip, name.clone()))
+        })
+        .collect();
+
     let detector = Arc::new(Detector::new(config.detection.clone()));
-    let alerter = Arc::new(Alerter::new(config.alerting.clone(), config.detection.clone())?);
+    let alerter = Arc::new(Alerter::new(
+        config.alerting.clone(),
+        config.detection.clone(),
+        hostnames.clone(),
+    )?);
 
     display::log_info("Detector initializat (DashMap thread-safe)");
 
@@ -452,6 +470,7 @@ async fn main() -> anyhow::Result<()> {
                                     event.dest_port,
                                     &event.protocol,
                                     &event.action,
+                                    &hostnames,
                                 );
 
                                 // Pastram log-ul original la nivel debug pentru audit/troubleshooting.
@@ -462,8 +481,8 @@ async fn main() -> anyhow::Result<()> {
 
                                 // Procesam alertele generate (daca exista).
                                 for alert in alerts {
-                                    // Afisam alerta in terminal (colorat).
-                                    display::log_alert(&alert);
+                                    // Afisam alerta in terminal (colorat, cu hostname-uri).
+                                    display::log_alert(&alert, &hostnames);
 
                                     // Trimitem alerta catre SIEM si email (async).
                                     alerter.send_alert(&alert).await;

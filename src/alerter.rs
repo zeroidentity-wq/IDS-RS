@@ -43,6 +43,8 @@ use lettre::{
     transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 
@@ -101,7 +103,9 @@ fn build_html_body(
     scan_type: &str,
     severity: &str,
     src_ip: &str,
+    src_hostname: &str,
     dst_ip: &str,
+    dst_hostname: &str,
     port_count: usize,
     timestamp: &str,
     ports: &str,
@@ -176,8 +180,8 @@ fn build_html_body(
   <div class="sec">
     <div class="sec-title">Detalii eveniment</div>
     <table class="tbl">
-      <tr><td>IP Sursa</td><td>__SRC_IP__</td></tr>
-      <tr><td>IP Destinatie</td><td>__DST_IP__</td></tr>
+      <tr><td>IP Sursa</td><td>__SRC_IP__ __SRC_HOST__</td></tr>
+      <tr><td>IP Destinatie</td><td>__DST_IP__ __DST_HOST__</td></tr>
       <tr><td>Porturi scanate</td><td>__PORT_COUNT__</td></tr>
       <tr><td>Timestamp</td><td>__TIMESTAMP__</td></tr>
     </table>
@@ -215,11 +219,25 @@ fn build_html_body(
 </body>
 </html>"#;
 
+    // Formatam hostname-urile: "(hostname)" daca exista, altfel string gol.
+    let src_host_display = if src_hostname.is_empty() {
+        String::new()
+    } else {
+        format!("({})", src_hostname)
+    };
+    let dst_host_display = if dst_hostname.is_empty() {
+        String::new()
+    } else {
+        format!("({})", dst_hostname)
+    };
+
     template
         .replace("__SCAN_TYPE__", scan_type)
         .replace("__SEVERITY__", severity)
         .replace("__SRC_IP__", src_ip)
+        .replace("__SRC_HOST__", &src_host_display)
         .replace("__DST_IP__", dst_ip)
+        .replace("__DST_HOST__", &dst_host_display)
         .replace("__PORT_COUNT__", &port_count.to_string())
         .replace("__TIMESTAMP__", timestamp)
         .replace("__PORTS__", ports)
@@ -271,6 +289,8 @@ pub struct Alerter {
     // Transport SMTP pre-construit la initializare (None daca email dezactivat).
     // Reutilizat la fiecare alerta — evita reconectarea TLS la fiecare email.
     mailer: Option<AsyncSmtpTransport<Tokio1Executor>>,
+    /// Mapping IP → hostname pentru afisare in alerte SIEM (shost=/dhost=) si email.
+    hostnames: HashMap<IpAddr, String>,
 }
 
 impl Alerter {
@@ -279,7 +299,11 @@ impl Alerter {
     /// Returneaza `Result<Self>` deoarece construirea transportului SMTP poate esua
     /// (hostname invalid, port gresit, etc.). Erorile de configurare sunt detectate
     /// la startup, nu la prima alerta.
-    pub fn new(config: AlertingConfig, detection: DetectionConfig) -> Result<Self> {
+    pub fn new(
+        config: AlertingConfig,
+        detection: DetectionConfig,
+        hostnames: HashMap<IpAddr, String>,
+    ) -> Result<Self> {
         // Construim mailer-ul O SINGURA DATA la startup, nu la fiecare alerta.
         let mailer = if config.email.enabled {
             Some(build_mailer(&config.email)?)
@@ -290,6 +314,7 @@ impl Alerter {
             config,
             detection,
             mailer,
+            hostnames,
         })
     }
 
@@ -418,13 +443,27 @@ impl Alerter {
             None => String::new(),
         };
 
+        // Campurile shost/dhost (Source/Destination Hostname in ArcSight).
+        // Prezente doar daca hostname-ul este configurat in [network.hostnames].
+        let shost_field = match self.hostnames.get(&alert.source_ip) {
+            Some(name) => format!(" shost={}", sanitize_cef(name)),
+            None => String::new(),
+        };
+        let dhost_field = match alert.dest_ip {
+            Some(ref ip) => match self.hostnames.get(ip) {
+                Some(name) => format!(" dhost={}", sanitize_cef(name)),
+                None => String::new(),
+            },
+            None => String::new(),
+        };
+
         let syslog_ts = alert.timestamp.format("%b %e %H:%M:%S");
         let rt_ms = alert.timestamp.timestamp_millis();
 
         let message = format!(
             "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
              |{sig_id}|{event_name}|{sev}\
-             |rt={rt_ms} src={src}{dst} cnt={cnt} act=alert \
+             |rt={rt_ms} src={src}{shost}{dst}{dhost} cnt={cnt} act=alert \
              msg={msg} cs1Label=ScannedPorts cs1={ports}",
             sev = cef_severity,
             syslog_ts = syslog_ts,
@@ -432,7 +471,9 @@ impl Alerter {
             event_name = event_name_safe,
             rt_ms = rt_ms,
             src = alert.source_ip,
+            shost = shost_field,
             dst = dst_field,
+            dhost = dhost_field,
             cnt = alert.unique_ports.len(),
             msg = msg_text,
             ports = port_list_full,
@@ -511,13 +552,26 @@ impl Alerter {
             None => "N/A".to_string(),
         };
 
+        // Hostname-uri din mapping-ul static.
+        let src_hostname = self
+            .hostnames
+            .get(&alert.source_ip)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let dst_hostname = match alert.dest_ip {
+            Some(ref ip) => self.hostnames.get(ip).map(|s| s.as_str()).unwrap_or(""),
+            None => "",
+        };
+
         let timestamp = alert.timestamp.format("%Y-%m-%d %H:%M:%S");
 
         let html_body = build_html_body(
             &alert.scan_type.to_string(),
             severity,
             &alert.source_ip.to_string(),
+            src_hostname,
             &dest_ip_display,
+            dst_hostname,
             port_count,
             &timestamp.to_string(),
             &port_list_display,

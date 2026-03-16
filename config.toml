@@ -20,6 +20,14 @@ parser = "gaia_cef"
 udp_rate_limit = 10000
 udp_burst_size = 20000
 
+# Mapping static IP → hostname (optional).
+# Folosit pentru afisare in alerte CLI, email si SIEM (shost=/dhost= in CEF).
+# Reteaua fiind izolata si fara DNS, hostname-urile sunt configurate manual.
+[network.hostnames]
+# "10.0.1.10" = "srv-dc01"
+# "10.0.1.20" = "srv-mail"
+# "10.0.2.50" = "ws-admin01"
+
 # -----------------------------------------------------------------------------
 # Praguri de detectie pentru scanari de retea
 # -----------------------------------------------------------------------------

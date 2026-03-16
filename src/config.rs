@@ -36,6 +36,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Structura principala de configurare a aplicatiei.
@@ -72,6 +73,12 @@ pub struct NetworkConfig {
     /// Implicit: 10.000 pachete.
     #[serde(default = "default_udp_burst_size")]
     pub udp_burst_size: u64,
+
+    /// Mapping static IP → hostname (ex: "10.0.1.10" = "srv-dc01").
+    /// Folosit pentru afisare in alerte CLI, email si SIEM (shost=/dhost= in CEF).
+    /// Reteaua fiind izolata, nu avem DNS extern — hostname-urile sunt configurate manual.
+    #[serde(default)]
+    pub hostnames: HashMap<String, String>,
 }
 
 fn default_udp_burst_size() -> u64 {
@@ -299,6 +306,15 @@ impl AppConfig {
                 self.network.parser
             ));
         }
+        // Validare hostnames: cheile trebuie sa fie IP-uri valide.
+        for (ip_str, _hostname) in &self.network.hostnames {
+            if ip_str.parse::<std::net::IpAddr>().is_err() {
+                errors.push(format!(
+                    "network.hostnames: cheia \"{}\" nu este un IP valid", ip_str
+                ));
+            }
+        }
+
         if self.network.udp_rate_limit > 0 && self.network.udp_burst_size == 0 {
             errors.push(
                 "network.udp_burst_size = 0 cand udp_rate_limit > 0: burst_size trebuie sa fie cel putin 1"
