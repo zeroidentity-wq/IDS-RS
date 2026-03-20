@@ -55,3 +55,7 @@ regex = "1"
 # Error handling ergonomic - anyhow::Result permite propagarea oricarei erori
 # cu context aditional, fara a defini tipuri de eroare custom.
 anyhow = "1"
+
+# Atomic swap pentru Arc - permite inlocuirea atomica a config-ului partajat
+# intre task-uri async fara lock. Folosit pentru hot reload config la SIGHUP.
+arc-swap = "1"

@@ -41,9 +41,11 @@
 
 use crate::config::DetectionConfig;
 use crate::parser::LogEvent;
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Local};
 use dashmap::DashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // =============================================================================
@@ -254,10 +256,14 @@ pub struct Detector {
     last_seen: DashMap<IpAddr, Instant>,
 
     /// IP-uri si subretele excluse din detectie (parsate din config la constructie).
-    whitelist: Vec<WhitelistEntry>,
+    /// Wrapat in ArcSwap pentru hot reload atomic la SIGHUP (#16).
+    whitelist: ArcSwap<Vec<WhitelistEntry>>,
 
-    /// Configurarea pragurilor de detectie (owned, cloned din AppConfig).
-    config: DetectionConfig,
+    /// Configurarea pragurilor de detectie.
+    /// Wrapat in ArcSwap pentru hot reload atomic la SIGHUP (#16).
+    /// `ArcSwap::load()` returneaza un `Guard` (pointer atomic, lock-free) —
+    /// cost: un load atomic per acces, neglijabil la scala UDP processing.
+    config: ArcSwap<DetectionConfig>,
 }
 
 impl Detector {
@@ -280,14 +286,37 @@ impl Detector {
             slow_cooldowns: DashMap::new(),
             accept_cooldowns: DashMap::new(),
             last_seen: DashMap::new(),
-            whitelist,
-            config,
+            whitelist: ArcSwap::from_pointee(whitelist),
+            config: ArcSwap::from_pointee(config),
         }
+    }
+
+    /// Actualizeaza configurarea detectorului la runtime (hot reload SIGHUP).
+    ///
+    /// NOTA RUST — SAFETY:
+    /// Aceasta metoda necesita `&mut self`, ceea ce inseamna acces EXCLUSIV.
+    /// In practica, `Detector` este wrapat in `Arc` si partajat intre task-uri,
+    /// deci nu putem obtine `&mut` direct. Solutia: campurile `config` si
+    /// `whitelist` sunt wrappate in `ArcSwap` pentru swap atomic lock-free.
+    ///
+    /// Starea de detectie (DashMap-urile) NU este afectata — IP-urile urmarite,
+    /// port hit-urile si cooldown-urile raman intacte dupa reload.
+    pub fn update_config(&self, new_config: DetectionConfig) {
+        // Re-parsam whitelist-ul din noua configurare.
+        let new_whitelist: Vec<WhitelistEntry> = new_config
+            .whitelist
+            .iter()
+            .filter_map(|entry| WhitelistEntry::parse(entry))
+            .collect();
+
+        // Swap atomic: noua configurare devine activa imediat.
+        self.config.store(Arc::new(new_config));
+        self.whitelist.store(Arc::new(new_whitelist));
     }
 
     /// Verifica daca un IP este in whitelist (exclus din detectie).
     pub fn is_whitelisted(&self, ip: &IpAddr) -> bool {
-        self.whitelist.iter().any(|entry| entry.matches(ip))
+        self.whitelist.load().iter().any(|entry| entry.matches(ip))
     }
 
     /// Proceseaza un eveniment de log si returneaza alertele detectate.
@@ -310,6 +339,12 @@ impl Detector {
     pub fn process_event(&self, event: &LogEvent) -> Vec<Alert> {
         let now = Instant::now();
         let ip = event.source_ip;
+
+        // Incarcam config-ul o singura data per eveniment (load atomic, lock-free).
+        // `Guard` din ArcSwap tine o referinta la snapshot-ul curent al config-ului.
+        // Daca un SIGHUP reload schimba config-ul in timpul procesarii, acest
+        // eveniment continua cu config-ul vechi — urmatorul il va folosi pe cel nou.
+        let cfg = self.config.load();
 
         // --- 0. Whitelist check ---
         // IP-urile din whitelist sunt excluse complet din detectie.
@@ -354,7 +389,7 @@ impl Detector {
         // port_hits → nu era considerat "urmarit" → evictia nu se activa corect.
         // Acum: `last_seen` urmareste orice IP, indiferent de actiune.
         let is_new_ip = !self.last_seen.contains_key(&ip);
-        if is_new_ip && self.last_seen.len() >= self.config.max_tracked_ips {
+        if is_new_ip && self.last_seen.len() >= cfg.max_tracked_ips {
             // Gasim IP-ul cu cel mai vechi last_seen (Least Recently Used).
             let lru_ip: Option<IpAddr> = self
                 .last_seen
@@ -415,7 +450,7 @@ impl Detector {
             });
 
             // Cap la max_hits_per_ip: pastram doar cele mai recente intrari.
-            let max_hits = self.config.max_hits_per_ip;
+            let max_hits = cfg.max_hits_per_ip;
             if hits.len() > max_hits {
                 let overflow = hits.len() - max_hits;
                 hits.drain(..overflow);
@@ -430,9 +465,9 @@ impl Detector {
         // Aceasta este o REFACTORIZARE necesara: inainte functia accesa `self.port_hits`
         // direct (hardcodat). Acum poate lucra cu orice DashMap de tip corect,
         // ceea ce ne permite sa o refolosim pentru Accept Scan (pasul 5) cu `accept_hits`.
-        let fast_window = Duration::from_secs(self.config.fast_scan.time_window_secs);
+        let fast_window = Duration::from_secs(cfg.fast_scan.time_window_secs);
         if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, fast_window, now) {
-            if ports.len() >= self.config.fast_scan.port_threshold
+            if ports.len() >= cfg.fast_scan.port_threshold
                 && !self.in_cooldown(&self.fast_cooldowns, ip)
             {
                 self.fast_cooldowns.insert(ip, now);
@@ -447,9 +482,9 @@ impl Detector {
         }
 
         // --- 4. Verificam Slow Scan (pe port_hits — drop-uri) ---
-        let slow_window = Duration::from_secs(self.config.slow_scan.time_window_mins * 60);
+        let slow_window = Duration::from_secs(cfg.slow_scan.time_window_mins * 60);
         if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, slow_window, now) {
-            if ports.len() >= self.config.slow_scan.port_threshold
+            if ports.len() >= cfg.slow_scan.port_threshold
                 && !self.in_cooldown(&self.slow_cooldowns, ip)
             {
                 self.slow_cooldowns.insert(ip, now);
@@ -474,9 +509,9 @@ impl Detector {
         // Separarea completa de Fast/Slow Scan inseamna ca un IP poate declansa
         // simultan o alerta Fast Scan (din drop-uri) SI o alerta Accept Scan (din
         // accept-uri) — si amandoua vor fi trimise la SIEM si email, independent.
-        let accept_window = Duration::from_secs(self.config.accept_scan.time_window_secs);
+        let accept_window = Duration::from_secs(cfg.accept_scan.time_window_secs);
         if let Some(ports) = self.unique_ports_in_window(&self.accept_hits, ip, accept_window, now) {
-            if ports.len() >= self.config.accept_scan.port_threshold
+            if ports.len() >= cfg.accept_scan.port_threshold
                 && !self.in_cooldown(&self.accept_cooldowns, ip)
             {
                 self.accept_cooldowns.insert(ip, now);
@@ -553,7 +588,7 @@ impl Detector {
     fn in_cooldown(&self, cooldowns: &DashMap<IpAddr, Instant>, ip: IpAddr) -> bool {
         if let Some(last_alert) = cooldowns.get(&ip) {
             // `elapsed()` = cat timp a trecut de la momentul stocat.
-            last_alert.elapsed() < Duration::from_secs(self.config.alert_cooldown_secs)
+            last_alert.elapsed() < Duration::from_secs(self.config.load().alert_cooldown_secs)
         } else {
             false
         }
@@ -624,7 +659,7 @@ impl Detector {
         });
 
         // --- Curatam cooldown-urile expirate (toate trei tipuri) ---
-        let cooldown_dur = Duration::from_secs(self.config.alert_cooldown_secs);
+        let cooldown_dur = Duration::from_secs(self.config.load().alert_cooldown_secs);
         self.fast_cooldowns
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
         self.slow_cooldowns

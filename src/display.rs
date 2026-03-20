@@ -358,6 +358,17 @@ pub fn log_stats(tracked_ips: usize, cleaned_ips: usize) {
     );
 }
 
+/// Confirma reincarcarea configuratiei la SIGHUP (badge cyan).
+pub fn log_reload(message: &str) {
+    let ts = timestamp();
+    println!(
+        "{} {} {}",
+        ts.bold().white(),
+        " LOAD ".on_cyan().black().bold(),
+        message.cyan()
+    );
+}
+
 /// Afiseaza numarul de pachete UDP dropate de rate limiter (periodic).
 ///
 /// Format: [timestamp] [ RATE ] 1234 pachete UDP dropate (rate limit)

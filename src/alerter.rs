@@ -38,6 +38,7 @@ use crate::config::{AlertingConfig, DetectionConfig, EmailConfig};
 use crate::detector::{Alert, ScanType};
 use crate::display;
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use lettre::{
     message::header::ContentType,
     transport::smtp::authentication::Credentials,
@@ -45,6 +46,7 @@ use lettre::{
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 
@@ -284,13 +286,15 @@ fn build_mailer(cfg: &EmailConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>>
 /// clonam datele de configurare la initializare, apoi le folosim fara
 /// a mai avea nevoie de referinta la config-ul original.
 pub struct Alerter {
-    config: AlertingConfig,
-    detection: DetectionConfig,
-    // Transport SMTP pre-construit la initializare (None daca email dezactivat).
-    // Reutilizat la fiecare alerta — evita reconectarea TLS la fiecare email.
-    mailer: Option<AsyncSmtpTransport<Tokio1Executor>>,
+    /// Configurare alerting (SIEM + email). Wrapat in ArcSwap pentru hot reload (#16).
+    config: ArcSwap<AlertingConfig>,
+    /// Configurare detectie (praguri, ferestre de timp) — citita pentru mesaje alerta.
+    detection: ArcSwap<DetectionConfig>,
+    /// Transport SMTP pre-construit (None daca email dezactivat).
+    /// ArcSwap permite rebuild-ul la reload (schimbare SMTP server/port/credentials).
+    mailer: ArcSwap<Option<AsyncSmtpTransport<Tokio1Executor>>>,
     /// Mapping IP → hostname pentru afisare in alerte SIEM (shost=/dhost=) si email.
-    hostnames: HashMap<IpAddr, String>,
+    hostnames: ArcSwap<HashMap<IpAddr, String>>,
 }
 
 impl Alerter {
@@ -311,11 +315,49 @@ impl Alerter {
             None
         };
         Ok(Self {
-            config,
-            detection,
-            mailer,
-            hostnames,
+            config: ArcSwap::from_pointee(config),
+            detection: ArcSwap::from_pointee(detection),
+            mailer: ArcSwap::from_pointee(mailer),
+            hostnames: ArcSwap::from_pointee(hostnames),
         })
+    }
+
+    /// Actualizeaza configurarea alerter-ului la runtime (hot reload SIGHUP #16).
+    ///
+    /// Rebuild-ul mailer-ului este necesar daca se schimba SMTP server/port/TLS/credentials.
+    /// Daca rebuild-ul esueaza, pastram mailer-ul vechi si logam eroarea.
+    pub fn update_config(
+        &self,
+        new_alerting: AlertingConfig,
+        new_detection: DetectionConfig,
+        new_hostnames: HashMap<IpAddr, String>,
+    ) {
+        // Rebuild mailer daca email e activat in noua configurare.
+        let new_mailer = if new_alerting.email.enabled {
+            match build_mailer(&new_alerting.email) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    display::log_error(&format!(
+                        "SIGHUP: rebuild SMTP esuat, pastrez mailer-ul vechi: {:#}", e
+                    ));
+                    // Pastram mailer-ul vechi — nu facem swap.
+                    // Early return nu e nevoie, punem None si lasam swap-ul sa nu se faca.
+                    // De fapt, mai bine nu facem swap pe mailer deloc.
+                    // Dar e mai simplu sa returnam aici.
+                    self.config.store(Arc::new(new_alerting));
+                    self.detection.store(Arc::new(new_detection));
+                    self.hostnames.store(Arc::new(new_hostnames));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        self.config.store(Arc::new(new_alerting));
+        self.detection.store(Arc::new(new_detection));
+        self.mailer.store(Arc::new(new_mailer));
+        self.hostnames.store(Arc::new(new_hostnames));
     }
 
     /// Trimite alerta catre toate destinatiile configurate.
@@ -330,13 +372,15 @@ impl Alerter {
     /// Pattern: "log and continue" vs "fail fast".
     ///
     pub async fn send_alert(&self, alert: &Alert) {
-        if self.config.siem.enabled {
+        let cfg = self.config.load();
+        if cfg.siem.enabled {
             if let Err(e) = self.send_siem_alert(alert).await {
                 display::log_error(&format!("Eroare trimitere alerta SIEM: {:#}", e));
             }
         }
 
-        if let Some(ref mailer) = self.mailer {
+        let mailer_guard = self.mailer.load();
+        if let Some(ref mailer) = **mailer_guard {
             if let Err(e) = self.send_email_alert(alert, mailer).await {
                 display::log_error(&format!("Eroare trimitere email: {:#}", e));
             }
@@ -354,7 +398,7 @@ impl Alerter {
     /// `.await` = asteapta pana cand datele sunt trimise.
     ///
     /// In realitate, UDP send este aproape instant (nu asteapta confirmare),
-    /// dar Rust/tokio ne forteaza sa tratam ca async - consistenta API.
+    /// dar Rust/tokio ne forțează sa tratam ca async - consistenta API.
     ///
     async fn send_siem_alert(&self, alert: &Alert) -> Result<()> {
         // Formatam mesajul in format CEF peste Syslog RFC 3164 pentru ArcSight.
@@ -363,7 +407,7 @@ impl Alerter {
         //   <PRIORITY>TIMESTAMP HOSTNAME CEF:0|Vendor|Product|Ver|SigID|Name|Sev|Extensions
         //
         // Prioritate syslog: facility=4 (security) × 8 + severity=6 (info) = 38
-        // Campuri CEF Extensions: rt, src, cnt, act, msg, cs1Label, cs1
+        // Câmpuri CEF Extensions: rt, src, cnt, act, msg, cs1Label, cs1
 
         // Tuple: (SignatureID, EventName, DescriereMsg, SeveritateCEF)
         //
@@ -374,6 +418,7 @@ impl Alerter {
         //
         // Comentariul anterior spunea severitate 5 pentru AcceptScan, dar
         // codul folosea 7 hardcodat pentru toate tipurile — inconsistenta fixata.
+        let det = self.detection.load();
         let (sig_id, event_name, scan_label, cef_severity) = match alert.scan_type {
             ScanType::Fast => (
                 "1001",
@@ -381,7 +426,7 @@ impl Alerter {
                 format!(
                     "Fast Scan detectat: {} porturi unice in {} secunde",
                     alert.unique_ports.len(),
-                    self.detection.fast_scan.time_window_secs,
+                    det.fast_scan.time_window_secs,
                 ),
                 7u8,
             ),
@@ -391,7 +436,7 @@ impl Alerter {
                 format!(
                     "Slow Scan detectat: {} porturi unice in {} minute",
                     alert.unique_ports.len(),
-                    self.detection.slow_scan.time_window_mins,
+                    det.slow_scan.time_window_mins,
                 ),
                 6u8,
             ),
@@ -401,7 +446,7 @@ impl Alerter {
                 format!(
                     "Accept Scan detectat: {} porturi deschise accesate in {} secunde",
                     alert.unique_ports.len(),
-                    self.detection.accept_scan.time_window_secs,
+                    det.accept_scan.time_window_secs,
                 ),
                 5u8,
             ),
@@ -445,12 +490,13 @@ impl Alerter {
 
         // Campurile shost/dhost (Source/Destination Hostname in ArcSight).
         // Prezente doar daca hostname-ul este configurat in [network.hostnames].
-        let shost_field = match self.hostnames.get(&alert.source_ip) {
+        let hn = self.hostnames.load();
+        let shost_field = match hn.get(&alert.source_ip) {
             Some(name) => format!(" shost={}", sanitize_cef(name)),
             None => String::new(),
         };
         let dhost_field = match alert.dest_ip {
-            Some(ref ip) => match self.hostnames.get(ip) {
+            Some(ref ip) => match hn.get(ip) {
                 Some(name) => format!(" dhost={}", sanitize_cef(name)),
                 None => String::new(),
             },
@@ -484,7 +530,8 @@ impl Alerter {
             .await
             .context("Nu pot crea socket UDP pentru SIEM")?;
 
-        let dest = format!("{}:{}", self.config.siem.host, self.config.siem.port);
+        let cfg = self.config.load();
+        let dest = format!("{}:{}", cfg.siem.host, cfg.siem.port);
         socket
             .send_to(message.as_bytes(), &dest)
             .await
@@ -513,7 +560,8 @@ impl Alerter {
         alert: &Alert,
         mailer: &AsyncSmtpTransport<Tokio1Executor>,
     ) -> Result<()> {
-        let cfg = &self.config.email;
+        let alert_cfg = self.config.load();
+        let cfg = &alert_cfg.email;
 
         let port_count = alert.unique_ports.len();
 
@@ -553,13 +601,13 @@ impl Alerter {
         };
 
         // Hostname-uri din mapping-ul static.
-        let src_hostname = self
-            .hostnames
+        let hn = self.hostnames.load();
+        let src_hostname = hn
             .get(&alert.source_ip)
             .map(|s| s.as_str())
             .unwrap_or("");
         let dst_hostname = match alert.dest_ip {
-            Some(ref ip) => self.hostnames.get(ip).map(|s| s.as_str()).unwrap_or(""),
+            Some(ref ip) => hn.get(ip).map(|s| s.as_str()).unwrap_or(""),
             None => "",
         };
 

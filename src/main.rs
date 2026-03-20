@@ -55,6 +55,7 @@ mod display;
 mod parser;
 
 use alerter::Alerter;
+use arc_swap::ArcSwap;
 use config::AppConfig;
 use detector::Detector;
 use std::collections::HashMap;
@@ -197,12 +198,12 @@ async fn main() -> anyhow::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "config.toml".to_string());
 
-    let config = AppConfig::load(&config_path)?;
+    let mut config = AppConfig::load(&config_path)?;
 
     // =========================================================================
     // 3. BANNER DE START
     // =========================================================================
-    let debug_mode = config.network.debug;
+    let mut debug_mode = config.network.debug;
     display::print_banner(&config);
 
     if debug_mode {
@@ -244,20 +245,26 @@ async fn main() -> anyhow::Result<()> {
     // Parsam mapping-ul IP→hostname din config.toml.
     // Cheia in TOML este String (IP), o convertim la IpAddr pentru lookup rapid.
     // Validarea cheilor se face in config.rs::validate().
-    let hostnames: HashMap<IpAddr, String> = config
-        .network
-        .hostnames
-        .iter()
-        .filter_map(|(ip_str, name)| {
-            ip_str.parse::<IpAddr>().ok().map(|ip| (ip, name.clone()))
-        })
-        .collect();
+    /// Parseaza mapping-ul IP→hostname din config.toml.
+    /// Functie separata pentru reutilizare la reload SIGHUP (#16).
+    fn parse_hostnames(config: &AppConfig) -> HashMap<IpAddr, String> {
+        config
+            .network
+            .hostnames
+            .iter()
+            .filter_map(|(ip_str, name)| {
+                ip_str.parse::<IpAddr>().ok().map(|ip| (ip, name.clone()))
+            })
+            .collect()
+    }
+
+    let hostnames = Arc::new(ArcSwap::from_pointee(parse_hostnames(&config)));
 
     let detector = Arc::new(Detector::new(config.detection.clone()));
     let alerter = Arc::new(Alerter::new(
         config.alerting.clone(),
         config.detection.clone(),
-        hostnames.clone(),
+        parse_hostnames(&config),
     )?);
 
     display::log_info("Detector initializat (DashMap thread-safe)");
@@ -362,7 +369,30 @@ async fn main() -> anyhow::Result<()> {
     rate_limit_tick.tick().await;
 
     // =========================================================================
-    // 8. MAIN LOOP - Receptie si Procesare Log-uri
+    // 8. SIGNAL HANDLER — SIGHUP pentru Hot Reload Config (#16)
+    // =========================================================================
+    //
+    // NOTA RUST — UNIX SIGNALS cu tokio:
+    //
+    // `tokio::signal::unix::signal(SignalKind::hangup())` creeaza un stream
+    // async care produce un eveniment la fiecare SIGHUP primit.
+    // `.recv().await` suspenda executia pana la urmatorul semnal.
+    //
+    // SIGHUP (Signal Hangup) este conventia UNIX pentru reload config:
+    //   kill -HUP <pid>    sau    systemctl reload ids-rs
+    //
+    // La primirea SIGHUP-ului:
+    //   1. Re-citim config.toml (validate() inclus)
+    //   2. Comparam listen_port/address/parser — daca difera, warning + skip
+    //   3. Aplicam noile valori la detector, alerter, hostnames, rate limiter
+    //   4. Starea de detectie (DashMap-urile) ramane INTACTA
+    //
+    let mut sighup = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::hangup(),
+    )?;
+
+    // =========================================================================
+    // 9. MAIN LOOP - Receptie si Procesare Log-uri
     // =========================================================================
     //
     // NOTA RUST - BUFFER pe STACK:
@@ -398,6 +428,75 @@ async fn main() -> anyhow::Result<()> {
                 println!();
                 display::log_info("Oprire gratiosa... La revedere!");
                 break;
+            }
+
+            // Branch: Hot reload config la SIGHUP (#16).
+            _ = sighup.recv() => {
+                display::log_reload("SIGHUP primit — reincarc config.toml...");
+                match AppConfig::load(&config_path) {
+                    Ok(new_config) => {
+                        // Verificam campurile care NU pot fi reincarcate (necesita restart).
+                        if new_config.network.listen_port != config.network.listen_port
+                            || new_config.network.listen_address != config.network.listen_address
+                        {
+                            display::log_warning(
+                                "SIGHUP: listen_address/listen_port modificate — necesita restart, ignorat"
+                            );
+                        }
+                        if new_config.network.parser != config.network.parser {
+                            display::log_warning(
+                                "SIGHUP: parser modificat — necesita restart, ignorat"
+                            );
+                        }
+
+                        // Aplicam noile valori la componentele reincarcabile.
+                        debug_mode = new_config.network.debug;
+
+                        // Detector: praguri, cooldown, whitelist.
+                        detector.update_config(new_config.detection.clone());
+
+                        // Alerter: SIEM, email, hostnames.
+                        let new_hostnames = parse_hostnames(&new_config);
+                        alerter.update_config(
+                            new_config.alerting.clone(),
+                            new_config.detection.clone(),
+                            new_hostnames.clone(),
+                        );
+
+                        // Hostnames partajate (folosite in main loop pentru display).
+                        hostnames.store(Arc::new(new_hostnames));
+
+                        // Rate limiter: recream daca s-a schimbat.
+                        if new_config.network.udp_rate_limit != config.network.udp_rate_limit
+                            || new_config.network.udp_burst_size != config.network.udp_burst_size
+                        {
+                            rate_limiter = if new_config.network.udp_rate_limit > 0 {
+                                display::log_reload(&format!(
+                                    "Rate limiting UDP: {} pachete/s, burst {}",
+                                    new_config.network.udp_rate_limit,
+                                    new_config.network.udp_burst_size
+                                ));
+                                Some(TokenBucket::new(
+                                    new_config.network.udp_rate_limit,
+                                    new_config.network.udp_burst_size,
+                                ))
+                            } else {
+                                display::log_reload("Rate limiting UDP dezactivat");
+                                None
+                            };
+                        }
+
+                        // Salvam config-ul nou pentru comparatii viitoare la urmatorul SIGHUP.
+                        config = new_config;
+
+                        display::log_reload("Config reincarcat cu succes");
+                    }
+                    Err(e) => {
+                        display::log_warning(&format!(
+                            "SIGHUP: reload esuat, pastrez config-ul vechi: {:#}", e
+                        ));
+                    }
+                }
             }
 
             // Branch: Afisare periodica statistici rate limiting (la fiecare 30s).
@@ -470,7 +569,7 @@ async fn main() -> anyhow::Result<()> {
                                     event.dest_port,
                                     &event.protocol,
                                     &event.action,
-                                    &hostnames,
+                                    &hostnames.load(),
                                 );
 
                                 // Pastram log-ul original la nivel debug pentru audit/troubleshooting.
@@ -482,7 +581,7 @@ async fn main() -> anyhow::Result<()> {
                                 // Procesam alertele generate (daca exista).
                                 for alert in alerts {
                                     // Afisam alerta in terminal (colorat, cu hostname-uri).
-                                    display::log_alert(&alert, &hostnames);
+                                    display::log_alert(&alert, &hostnames.load());
 
                                     // Trimitem alerta catre SIEM si email (async).
                                     alerter.send_alert(&alert).await;

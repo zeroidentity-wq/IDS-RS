@@ -93,7 +93,7 @@ pub struct LogEvent {
 /// `Option<LogEvent>` = tipul returnat. Option este un enum:
 ///   - Some(event) = parsare reusita
 ///   - None        = linia nu a putut fi parsata sau nu ne intereseaza
-/// Rust nu are null - Option este mecanismul safe de a reprezenta
+///     Rust nu are null - Option este mecanismul safe de a reprezenta
 /// absenta unei valori.
 pub trait LogParser: Send + Sync {
     /// Parseaza o linie de log si returneaza un LogEvent daca este relevanta.
