@@ -200,7 +200,7 @@ fn build_html_body(
   </div>
 
   <div class="sec" style="border-bottom: none;">
-    <div class="sec-title">Comenzi rapide &mdash; RHEL 9.6</div>
+    <div class="sec-title">Comenzi rapide &mdash;</div>
     <div class="cmd-box">
       <span class="cmd-comment"># Conexiuni active de la/catre acest IP:</span>
       <span class="cmd-line">ss -tnp | grep __SRC_IP__</span>
@@ -450,33 +450,53 @@ impl Alerter {
                 ),
                 5u8,
             ),
+            ScanType::LateralMovement => (
+                "1004",
+                "Lateral Movement Detected",
+                format!(
+                    "Lateral Movement detectat: {} destinatii unice in {} secunde",
+                    alert.unique_dests.len(),
+                    det.lateral_movement.time_window_secs,
+                ),
+                8u8,
+            ),
         };
 
-        // Lista completa de porturi pentru campul cs1 (ArcSight suporta pana la 4000 chars).
-        let port_list_full: String = alert
-            .unique_ports
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        // Pentru Lateral Movement, campul cs1 contine destinatiile unice (IP-uri),
+        // nu porturi. Pentru celelalte tipuri, cs1 contine porturile scanate.
+        let (cs1_label, cs1_value, cnt) = match alert.scan_type {
+            ScanType::LateralMovement => {
+                let dest_list = alert
+                    .unique_dests
+                    .iter()
+                    .map(|ip| ip.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                ("ContactedHosts", dest_list, alert.unique_dests.len())
+            }
+            _ => {
+                let port_list = alert
+                    .unique_ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                ("ScannedPorts", port_list, alert.unique_ports.len())
+            }
+        };
 
-        // Lista de porturi pentru campul msg — trunchiem la 512 caractere pentru
-        // compatibilitate cu syslog RFC 3164 si vizibilitate in Active Channel ArcSight.
-        // Daca lista completa incape, o folosim integral; altfel adaugam "...".
-        let port_list_msg = if port_list_full.len() <= 512 {
-            port_list_full.clone()
+        // Lista pentru campul msg — trunchiem la 512 caractere pentru
+        // compatibilitate cu syslog RFC 3164 si vizibilitate in ArcSight.
+        let cs1_msg = if cs1_value.len() <= 512 {
+            cs1_value.clone()
         } else {
-            // Construim lista pana la limita, taind la ultimul ',' complet.
-            let truncated = &port_list_full[..512];
+            let truncated = &cs1_value[..512];
             let cut = truncated.rfind(',').unwrap_or(512);
-            format!("{}...", &port_list_full[..cut])
+            format!("{}...", &cs1_value[..cut])
         };
 
-        // Mesajul campului msg: descriere + lista porturi (vizibila direct in ArcSight Event List).
-        // Sanitizare anti-injection: sanitizam scan_label (date interne, dar cu text dinamic),
-        // NU intregul format — separatorul " | " este al nostru si nu trebuie escapeat.
-        // port_list_msg contine doar cifre si virgule (u16), nu necesita sanitizare.
-        let msg_text = format!("{} | ports: {}", sanitize_cef(&scan_label), port_list_msg);
+        // Mesajul campului msg: descriere + lista valori (porturi sau IP-uri).
+        let msg_text = format!("{} | {}: {}", sanitize_cef(&scan_label), cs1_label.to_lowercase(), cs1_msg);
 
         // Sanitizare anti-injection pentru event_name (camp header CEF, separator '|').
         let event_name_safe = sanitize_cef(event_name);
@@ -510,7 +530,7 @@ impl Alerter {
             "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
              |{sig_id}|{event_name}|{sev}\
              |rt={rt_ms} src={src}{shost}{dst}{dhost} cnt={cnt} act=alert \
-             msg={msg} cs1Label=ScannedPorts cs1={ports}",
+             msg={msg} cs1Label={cs1label} cs1={cs1}",
             sev = cef_severity,
             syslog_ts = syslog_ts,
             sig_id = sig_id,
@@ -520,9 +540,10 @@ impl Alerter {
             shost = shost_field,
             dst = dst_field,
             dhost = dhost_field,
-            cnt = alert.unique_ports.len(),
+            cnt = cnt,
             msg = msg_text,
-            ports = port_list_full,
+            cs1label = cs1_label,
+            cs1 = cs1_value,
         );
 
         // Cream un socket UDP efemer (port 0 = OS alege automat).
@@ -563,36 +584,61 @@ impl Alerter {
         let alert_cfg = self.config.load();
         let cfg = &alert_cfg.email;
 
-        let port_count = alert.unique_ports.len();
-
-        let subject = format!(
-            "\u{1F534} [{}][SCANARE RETEA] IDS-RS {} {} porturi",
-            alert.scan_type, alert.source_ip, port_count
-        );
-
-        // Lista porturi pentru body — maxim 30, restul sumarizate.
-        let port_list_display = if port_count <= 30 {
-            alert
-                .unique_ports
-                .iter()
-                .map(|p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        } else {
-            let first_30: String = alert.unique_ports[..30]
-                .iter()
-                .map(|p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{} + {} more", first_30, port_count - 30)
+        // Pentru Lateral Movement subject-ul si lista arata diferit:
+        // afisam destinatii unice in loc de porturi.
+        let (subject, item_count, list_display) = match alert.scan_type {
+            ScanType::LateralMovement => {
+                let count = alert.unique_dests.len();
+                let list = alert
+                    .unique_dests
+                    .iter()
+                    .take(30)
+                    .map(|ip| ip.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let list = if count > 30 {
+                    format!("{} + {} more", list, count - 30)
+                } else {
+                    list
+                };
+                let subj = format!(
+                    "\u{1F534} [{}][MISCARE LATERALA] IDS-RS {} {} destinatii",
+                    alert.scan_type, alert.source_ip, count
+                );
+                (subj, count, list)
+            }
+            _ => {
+                let count = alert.unique_ports.len();
+                let list = if count <= 30 {
+                    alert
+                        .unique_ports
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                } else {
+                    let first_30: String = alert.unique_ports[..30]
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{} + {} more", first_30, count - 30)
+                };
+                let subj = format!(
+                    "\u{1F534} [{}][SCANARE RETEA] IDS-RS {} {} porturi",
+                    alert.scan_type, alert.source_ip, count
+                );
+                (subj, count, list)
+            }
         };
 
         // Severitate afisata in email — paralela cu severitatea CEF din send_siem_alert.
-        // Fast=7=RIDICATA, Slow=6=MEDIE, AcceptScan=5=MEDIE-MICA.
+        // Fast=7=RIDICATA, Slow=6=MEDIE, AcceptScan=5=MEDIE-MICA, LateralMovement=8=CRITICA.
         let severity = match alert.scan_type {
             ScanType::Fast => "RIDICATA",
             ScanType::Slow => "MEDIE",
             ScanType::AcceptScan => "MEDIE-MICA",
+            ScanType::LateralMovement => "CRITICA",
         };
 
         let dest_ip_display = match alert.dest_ip {
@@ -620,9 +666,9 @@ impl Alerter {
             src_hostname,
             &dest_ip_display,
             dst_hostname,
-            port_count,
+            item_count,
             &timestamp.to_string(),
-            &port_list_display,
+            &list_display,
             &cfg.email_footer,
         );
 

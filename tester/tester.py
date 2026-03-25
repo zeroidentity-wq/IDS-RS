@@ -22,6 +22,8 @@ Generare dinamica (avansat):
   python tester.py fast-scan --format gaia_cef --ports 20 --delay 0.1
   python tester.py slow-scan --format gaia --ports 40
   python tester.py accept-scan --format gaia --ports 10 --delay 0.1
+  python tester.py lateral-movement --dests 10 --lateral-port 445 --delay 0.1
+  python tester.py lateral-movement --dests 10 --lateral-port 3389 --format cef
 """
 
 import argparse
@@ -42,7 +44,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Generatoare de log-uri
 # =============================================================================
 
-def generate_gaia_log(source_ip: str, dst_port: int, action: str = "drop") -> str:
+def generate_gaia_log(source_ip: str, dst_port: int, action: str = "drop", dest_ip: str = "10.0.0.1") -> str:
     """Genereaza un log Checkpoint Gaia in formatul REAL (cu header complet)."""
     src_port = random.randint(1024, 65535)
     second = random.randint(0, 59)
@@ -51,24 +53,24 @@ def generate_gaia_log(source_ip: str, dst_port: int, action: str = "drop") -> st
         f"Checkpoint: 3Sep2007 15:12:{second:02d} {action} "
         f"{source_ip} >eth8 rule: 134; "
         f"rule_uid: {{11111111-2222-3333-BD17-711F536C7C33}}; "
-        f"service_id: port-scan; src: {source_ip}; dst: 10.0.0.1; "
+        f"service_id: port-scan; src: {source_ip}; dst: {dest_ip}; "
         f"proto: tcp; product: VPN-1 & FireWall-1; "
         f"service: {dst_port}; s_port: {src_port};"
     )
 
 
-def generate_cef_log(source_ip: str, dst_port: int, action: str = "drop") -> str:
+def generate_cef_log(source_ip: str, dst_port: int, action: str = "drop", dest_ip: str = "192.168.1.1") -> str:
     """Genereaza un log CEF (Common Event Format) realist cu syslog header."""
     severity = 5 if action == "drop" else 3
     name = "Drop" if action == "drop" else "Accept"
     ts = time.strftime("%b %d %H:%M:%S")
     return (
         f"<134>{ts} gw-checkpoint CEF:0|CheckPoint|VPN-1 & FireWall-1|R81.20|100|{name}|{severity}|"
-        f"src={source_ip} dst=192.168.1.1 dpt={dst_port} proto=TCP act={action}"
+        f"src={source_ip} dst={dest_ip} dpt={dst_port} proto=TCP act={action}"
     )
 
 
-def generate_gaia_cef_log(source_ip: str, dst_port: int, action: str = "drop") -> str:
+def generate_gaia_cef_log(source_ip: str, dst_port: int, action: str = "drop", dest_ip: str = "192.168.1.1") -> str:
     """Genereaza un log Checkpoint Gaia LEA blob impachetat in CEF Name field."""
     severity = 5 if action == "drop" else 3
     action_cap = action.capitalize()
@@ -76,18 +78,22 @@ def generate_gaia_cef_log(source_ip: str, dst_port: int, action: str = "drop") -
     ts = time.strftime("%b %d %H:%M:%S")
     return (
         f'<134>{ts} gw-checkpoint CEF:0|CheckPoint|FW-1|R77|100|'
-        f'action="{action_cap}" src="{source_ip}" dst="192.168.1.1" '
+        f'action="{action_cap}" src="{source_ip}" dst="{dest_ip}" '
         f'service="{dst_port}" proto="{proto}"|{severity}|'
     )
 
 
-def generate_log(fmt: str, source_ip: str, dst_port: int, action: str = "drop") -> str:
-    """Genereaza un log in formatul specificat (gaia, cef sau gaia_cef)."""
+def generate_log(fmt: str, source_ip: str, dst_port: int, action: str = "drop", dest_ip: Optional[str] = None) -> str:
+    """Genereaza un log in formatul specificat (gaia, cef sau gaia_cef).
+
+    dest_ip: IP destinatie optional. Daca None, se foloseste default-ul fiecarui format.
+             Util pentru Lateral Movement unde destinatia variaza per eveniment.
+    """
     if fmt == "cef":
-        return generate_cef_log(source_ip, dst_port, action)
+        return generate_cef_log(source_ip, dst_port, action, dest_ip or "192.168.1.1")
     if fmt == "gaia_cef":
-        return generate_gaia_cef_log(source_ip, dst_port, action)
-    return generate_gaia_log(source_ip, dst_port, action)
+        return generate_gaia_cef_log(source_ip, dst_port, action, dest_ip or "192.168.1.1")
+    return generate_gaia_log(source_ip, dst_port, action, dest_ip or "10.0.0.1")
 
 
 # =============================================================================
@@ -341,6 +347,65 @@ def simulate_accept_scan(
     print()
     print(f"[+] Accept Scan complet: {sent_count} log-uri trimise ({fmt.upper()})")
     print(f"    IDS-RS ar trebui sa detecteze scanarea daca pragul este < {num_ports}")
+
+
+def simulate_lateral_movement(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    source_ip: str,
+    num_dests: int,
+    lateral_port: int,
+    delay: float,
+    fmt: str,
+) -> None:
+    """
+    Simuleaza Lateral Movement (#22): trimite log-uri de tip 'accept' de la
+    un singur IP sursa catre N destinatii diferite.
+
+    Pattern simulat: un host intern (source_ip) contacteaza N masini diferite.
+    IDS-RS detecteaza pe baza de comportament (N destinatii unice), nu de port.
+
+    Pragul default din config.toml: >5 destinatii unice in 60 secunde.
+
+    Exemplu:
+      python tester.py lateral-movement --dests 10
+      python tester.py lateral-movement --dests 10 --lateral-port 3389
+    """
+    lateral_port_names = {22: "SSH", 135: "WMI/RPC", 445: "SMB", 3389: "RDP"}
+    port_name = lateral_port_names.get(lateral_port, str(lateral_port))
+
+    print(f"[*] Simulare LATERAL MOVEMENT de la {source_ip} (format: {fmt.upper()})")
+    print(f"    Destinatii: {num_dests} | Port: {lateral_port} ({port_name}) | Delay: {delay}s")
+    print(f"    IDS-RS listener: {host}:{port}")
+    print()
+
+    # Generam N destinatii in subretea 10.0.1.x - 10.0.9.x
+    base_octets = [10, 0, random.randint(1, 9)]
+    dest_ips = []
+    for i in range(num_dests):
+        last_octet = (i + 10) % 254 + 1
+        subnet = base_octets[2] + i // 254
+        dest_ips.append(f"10.0.{subnet}.{last_octet}")
+
+    sent_count = 0
+    for i, dest_ip in enumerate(dest_ips):
+        log_line = generate_log(fmt, source_ip, lateral_port, "accept", dest_ip=dest_ip)
+        send_udp(sock, host, port, log_line)
+        sent_count += 1
+
+        print(
+            f"  [{sent_count:>3}/{num_dests}] "
+            f"{source_ip} -> {dest_ip}:{lateral_port} ({port_name}) | accept"
+        )
+
+        if delay > 0 and i < len(dest_ips) - 1:
+            time.sleep(delay)
+
+    print()
+    print(f"[+] Lateral Movement complet: {sent_count} log-uri trimise ({fmt.upper()})")
+    print(f"    IDS-RS ar trebui sa detecteze miscarea laterala daca pragul < {num_dests}")
+    print(f"    Asigura-te ca [detection.lateral_movement] enabled = true in config.toml")
 
 
 def simulate_normal(
@@ -1229,6 +1294,31 @@ def main() -> None:
         help="Delay intre batch-uri in secunde (default: 0.1)",
     )
 
+    # --- lateral-movement (generare dinamica) ---
+    lateral_parser = subparsers.add_parser(
+        "lateral-movement",
+        help="Simuleaza Lateral Movement: 1 sursa -> N destinatii pe port fix (SMB/RDP/SSH/WMI)",
+    )
+    add_common_scan_args(lateral_parser)
+    lateral_parser.add_argument(
+        "--dests",
+        type=int,
+        default=10,
+        help="Numar de destinatii unice (default: 10)",
+    )
+    lateral_parser.add_argument(
+        "--lateral-port",
+        type=int,
+        default=445,
+        help="Port pe care se simuleaza conexiunile (default: 445/SMB). Orice port e valid — IDS-ul detecteaza pe baza de comportament, nu de port.",
+    )
+    lateral_parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.1,
+        help="Delay intre log-uri in secunde (default: 0.1)",
+    )
+
     # --- replay ---
     replay_parser = subparsers.add_parser(
         "replay",
@@ -1333,6 +1423,17 @@ def main() -> None:
                 num_ports=args.ports,
                 delay=args.delay,
                 batch_size=args.batch,
+                fmt=args.format,
+            )
+        elif args.command == "lateral-movement":
+            simulate_lateral_movement(
+                sock=sock,
+                host=args.host,
+                port=args.port,
+                source_ip=args.source,
+                num_dests=args.dests,
+                lateral_port=args.lateral_port,
+                delay=args.delay,
                 fmt=args.format,
             )
         elif args.command == "replay":

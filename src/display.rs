@@ -293,6 +293,36 @@ pub fn log_alert(alert: &Alert, hostnames: &HashMap<IpAddr, String>) {
             println!("{}", "─".repeat(SEPARATOR_WIDTH).magenta());
             println!();
         }
+        // Lateral Movement: portocaliu (bright_red aproximeaza orange in terminale ANSI).
+        // Cel mai inalt nivel de urgenta vizuala — indica host compromis care se
+        // misca lateral in retea. Afisam destinatii unice in loc de porturi.
+        ScanType::LateralMovement => {
+            let dest_list: String = alert
+                .unique_dests
+                .iter()
+                .take(25)
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let dest_suffix = if alert.unique_dests.len() > 25 {
+                format!(" ... (+{} more)", alert.unique_dests.len() - 25)
+            } else {
+                String::new()
+            };
+            println!();
+            println!("{}", "─".repeat(SEPARATOR_WIDTH).bright_red());
+            println!(
+                "{} {} {} [LATERAL MOVEMENT] {} | {} destinatii unice!",
+                ts.bold().white(),
+                arrows.bright_red().bold(),
+                " ALERT ".on_bright_red().white().bold(),
+                format!("[IP: {}]", src_display).bright_red().bold(),
+                alert.unique_dests.len().to_string().bright_red().bold()
+            );
+            println!("  Destinatii: {}{}", dest_list, dest_suffix);
+            println!("{}", "─".repeat(SEPARATOR_WIDTH).bright_red());
+            println!();
+        }
     }
 }
 

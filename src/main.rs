@@ -369,16 +369,16 @@ async fn main() -> anyhow::Result<()> {
     rate_limit_tick.tick().await;
 
     // =========================================================================
-    // 8. SIGNAL HANDLER — SIGHUP pentru Hot Reload Config (#16)
+    // 8. SIGNAL HANDLERS — SIGHUP (Hot Reload #16) si SIGTERM (Graceful Shutdown)
     // =========================================================================
     //
     // NOTA RUST — UNIX SIGNALS cu tokio:
     //
-    // `tokio::signal::unix::signal(SignalKind::hangup())` creeaza un stream
-    // async care produce un eveniment la fiecare SIGHUP primit.
+    // `tokio::signal::unix::signal(SignalKind::...)` creeaza un stream
+    // async care produce un eveniment la fiecare semnal primit.
     // `.recv().await` suspenda executia pana la urmatorul semnal.
     //
-    // SIGHUP (Signal Hangup) este conventia UNIX pentru reload config:
+    // SIGHUP (Signal Hangup) — conventia UNIX pentru reload config:
     //   kill -HUP <pid>    sau    systemctl reload ids-rs
     //
     // La primirea SIGHUP-ului:
@@ -387,8 +387,20 @@ async fn main() -> anyhow::Result<()> {
     //   3. Aplicam noile valori la detector, alerter, hostnames, rate limiter
     //   4. Starea de detectie (DashMap-urile) ramane INTACTA
     //
+    // SIGTERM (Signal Terminate) — semnalul standard de oprire trimis de:
+    //   kill <pid>    sau    systemctl stop ids-rs
+    //
+    // Fara handler explicit, OS-ul termina procesul imediat, potential
+    // intrerupand o trimitere SMTP in curs. Cu handler, loop-ul se termina
+    // la fel ca la Ctrl+C: alerta in curs de trimitere (.await activ) se
+    // finalizeaza complet inainte de iesire — nu se pierde nicio alerta.
+    //
     let mut sighup = tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::hangup(),
+    )?;
+
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate(),
     )?;
 
     // =========================================================================
@@ -423,10 +435,25 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             biased;
 
-            // Branch: Oprire gratiosa la Ctrl+C.
+            // Branch: Oprire gratiosa la Ctrl+C (SIGINT).
             _ = tokio::signal::ctrl_c() => {
                 println!();
                 display::log_info("Oprire gratiosa... La revedere!");
+                break;
+            }
+
+            // Branch: Oprire gratiosa la SIGTERM.
+            //
+            // SIGTERM este semnalul standard trimis de `kill <pid>` si
+            // `systemctl stop ids-rs`. Fara acest handler, OS-ul ar termina
+            // procesul imediat, intrerupand potential o trimitere SMTP activa.
+            //
+            // Cu `biased;`, acest branch este evaluat dupa Ctrl+C dar inainte
+            // de SIGHUP si recv_from. Alerta curenta (daca send_alert este in
+            // curs de .await) se finalizeaza complet — select! verifica
+            // semnalele doar la urmatoarea iteratie a loop-ului.
+            _ = sigterm.recv() => {
+                display::log_info("SIGTERM primit — oprire gratiosa...");
                 break;
             }
 

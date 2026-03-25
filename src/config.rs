@@ -127,6 +127,11 @@ pub struct DetectionConfig {
     /// (port_threshold = 5, time_window_secs = 30).
     #[serde(default = "default_accept_scan")]
     pub accept_scan: AcceptScanConfig,
+
+    /// Configurare pentru detectia Lateral Movement (#22).
+    /// Retrocompatibil: daca lipseste din config.toml, se aplica valorile implicite.
+    #[serde(default = "default_lateral_movement")]
+    pub lateral_movement: LateralMovementConfig,
 }
 
 fn default_max_hits_per_ip() -> usize {
@@ -177,6 +182,49 @@ fn default_accept_scan() -> AcceptScanConfig {
     AcceptScanConfig {
         port_threshold: 5,
         time_window_secs: 30,
+    }
+}
+
+/// Configurare detectie Lateral Movement — miscare laterala in retea.
+///
+/// Lateral Movement = un IP intern contacteaza N destinatii diferite pe
+/// conexiuni acceptate (orice port). Pattern tipic de propagare in retea
+/// compromisa — un host compromis incearca sa se conecteze la cat mai
+/// multe masini din retea.
+///
+/// Diferenta fata de Fast/Slow/Accept Scan:
+///   - Scan-urile numara PORTURI UNICE catre aceeasi tinta
+///   - Lateral Movement numara DESTINATII UNICE (orice port)
+///
+/// Fara filtru de port: detectia e bazata pe comportament, nu pe
+/// asumptii despre ce porturi foloseste atacatorul. Daca exista servicii
+/// legitime cu fan-out mare (backup, monitoring), adauga-le in whitelist.
+///
+/// Valori implicite: 5 destinatii in 60 secunde, dezactivat implicit
+/// pentru retrocompatibilitate (config-uri vechi nu au sectiunea).
+#[derive(Debug, Clone, Deserialize)]
+pub struct LateralMovementConfig {
+    /// Activare/dezactivare detectie. Implicit: false (retrocompatibil).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Numarul de destinatii unice care declanseaza alerta.
+    #[serde(default = "default_lateral_dest_threshold")]
+    pub unique_dest_threshold: usize,
+
+    /// Fereastra de timp in secunde in care se numara destinatiile.
+    #[serde(default = "default_lateral_time_window")]
+    pub time_window_secs: u64,
+}
+
+fn default_lateral_dest_threshold() -> usize { 5 }
+fn default_lateral_time_window() -> u64 { 60 }
+
+fn default_lateral_movement() -> LateralMovementConfig {
+    LateralMovementConfig {
+        enabled: false,
+        unique_dest_threshold: default_lateral_dest_threshold(),
+        time_window_secs: default_lateral_time_window(),
     }
 }
 
@@ -417,6 +465,22 @@ impl AppConfig {
                 "detection.accept_scan.time_window_secs = 0: fereastra de timp zero face detectia Accept Scan imposibila"
                     .to_string(),
             );
+        }
+
+        // Validare Lateral Movement (doar daca e activat).
+        if self.detection.lateral_movement.enabled {
+            if self.detection.lateral_movement.unique_dest_threshold == 0 {
+                errors.push(
+                    "detection.lateral_movement.unique_dest_threshold = 0: orice conexiune va declansa alerta"
+                        .to_string(),
+                );
+            }
+            if self.detection.lateral_movement.time_window_secs == 0 {
+                errors.push(
+                    "detection.lateral_movement.time_window_secs = 0: fereastra de timp zero face detectia imposibila"
+                        .to_string(),
+                );
+            }
         }
 
         // Consistenta logica: fereastra Slow Scan trebuie sa fie mai mare decat Fast Scan.

@@ -81,6 +81,17 @@ time_window_mins = 5
 port_threshold = 5
 time_window_secs = 30
 
+[detection.lateral_movement]
+# Detectie Lateral Movement (#22): un IP contacteaza N destinatii diferite
+# pe conexiuni acceptate (orice port). Pattern tipic de propagare in retea
+# compromisa. Detectia e bazata pe comportament, nu pe port specific.
+# Servicii legitime cu fan-out mare (backup, monitoring) se pun in whitelist.
+enabled = false
+# Numar de destinatii unice care declanseaza alerta.
+unique_dest_threshold = 5
+# Fereastra de timp in secunde in care se numara destinatiile.
+time_window_secs = 60
+
 # -----------------------------------------------------------------------------
 # Configurare alerte
 # -----------------------------------------------------------------------------

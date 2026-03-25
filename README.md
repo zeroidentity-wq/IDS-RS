@@ -55,10 +55,34 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 
 - [ ] Parser FortiGate (format Fortinet)
 - [ ] Raport zilnic email cu clasificare subretele
-- [ ] Hot reload config la SIGHUP
-- [ ] Lateral Movement detection (#22)
+- [x] Hot reload config la SIGHUP
+- [x] Lateral Movement detection (#22)
 - [ ] Distributed Scan detection (#23)
 - [ ] Beaconing C2 detection (#24)
+
+### Posibile implementari
+
+#### Detectii noi
+- [ ] Brute Force detection — accept scan repetate pe porturi critice (22, 3389, 445) de la acelasi IP (#25)
+- [ ] Port Knock detection — secvente de porturi accesate in ordine specifica (#26)
+- [ ] Exfiltration detection — volume mari de trafic outbound neobisnuit de la IP intern (#27)
+- [ ] Supresie/deduplicare alerte — cooldown per IP per tip alerta, previne flood de emailuri (#28)
+
+#### Parseri noi
+- [ ] Parser iptables/nftables — firewall Linux (#29)
+- [ ] Parser Cisco ASA (#30)
+- [ ] File watcher (tail -f echivalent) — citire din fisiere log locale, nu doar UDP (#31)
+
+#### Operational / Rezilienta
+- [ ] Persistenta stare la restart — detectorul nu pierde contextul la repornire (#32)
+- [ ] Dump statistici la SIGUSR1 — top atacatori si counteri la semnal, fara restart (#33)
+- [ ] Blacklist locala de IP-uri (IOC offline) — fiser CSV/JSON cu IP-uri rele, alerta la primul pachet (#34)
+- [ ] Threshold dinamic / baseline — prag adaptat la traficul normal al retelei (#35)
+
+#### Raportare / Vizibilitate
+- [ ] Dashboard HTML generat local — refreshat periodic cu top atacatori si statistici (#36)
+- [ ] Export CSV/JSON per sesiune — analiza forensica offline dupa incident (#37)
+- [ ] TLS pentru trimitere SIEM — traficul de alertare nu mai e plain UDP (#38)
 
 ---
 
@@ -1930,17 +1954,9 @@ si genereaza sectiunea `[network.hostnames]` in `config.toml`. Cand va fi implem
 
 ## TODO — Securitate si hardening
 
-### Medie
-
-- [ ] **Parola SMTP in plaintext** (`config.toml`) — credentialele SMTP sunt stocate in clar in fisierul de configurare. Oricine cu acces read la fisier le poate citi. *Mitigare: citire din environment variable (`SMTP_PASSWORD`) sau secrets manager.*
-
-- [ ] **SMTP fara TLS** (`alerter.rs`) — cand `smtp_tls = false`, se foloseste `builder_dangerous()` care trimite credentiale (username + password) in clar pe retea. *Mitigare: warning la startup cand TLS e dezactivat.*
-
 ### Scazuta
 
 - [ ] **Debug mode disk fill** — modul debug afiseaza fiecare pachet in stdout. In productie cu volum mare si stdout redirectat la fisier, poate umple disk-ul. *Mitigare: dezactivare automata dupa N minute sau limita de linii.*
-
-- [ ] **Verificare permisiuni config.toml** (`config.rs`) — daca fisierul este world-readable (`644`), oricine pe sistem poate citi credentialele SMTP. *Mitigare: warning la startup daca permisiunile sunt prea largi.*
 
 ---
 
@@ -1969,21 +1985,31 @@ si genereaza sectiunea `[network.hostnames]` in `config.toml`. Cand va fi implem
 
 - [ ] **Alert fallback la fisier local** — daca SMTP-ul intern sau SIEM-ul este unreachable, alertele se pierd silentios. *Mitigare: scriere alerte intr-un fisier local ca fallback.*
 
+- [ ] **#25 — Web Dashboard (harta retea)** — server HTTP embedded in IDS-RS (task tokio separat),
+  read-only, fara impact asupra detectiei. Arhitectura:
+  - `GET /` → dashboard HTML cu graf D3.js force-directed
+  - `GET /api/alerts` → JSON cu ultimele N alerte din memorie
+  - `GET /api/graph` → noduri (IP-uri) + muchii (conexiuni) pentru graf
+  - Noduri colorate: rosu = atacator, gri = tinta; dimensiune = numar alerte
+  - Muchii colorate dupa tip: rosu = Fast Scan, galben = Slow Scan, magenta = Accept Scan
+  - Hover pe nod: detalii IP (porturi scanate, timestamps, tip atac)
+  - Auto-refresh la 5 secunde
+
+  *Implementare: adauga `axum` + `serde_json` in `Cargo.toml`; sectiune*
+  *`[web_dashboard]` in `config.toml` cu `enabled`, `port`, `bind`;*
+  *`src/web.rs` cu server + endpoint-uri; buffer circular*
+  *`Arc<Mutex<VecDeque<Alert>>>` partajat intre detectie si web server.*
+
 ### Impact mediu
 
 - [ ] **#20 — Parser FortiGate (Fortinet)** — format propriu, diferit de Gaia si CEF. Adaugat ca optiune `parser = "fortigate"` in `config.toml`. Implementeaza `trait LogParser` in `src/parser/fortigate.rs`.
 
-- [ ] **#22 — Lateral Movement** — 1 IP intern → N dest_ip diferite pe porturi specifice (445, 3389, 22, 135). SignatureID 1004.
 
 - [ ] **#23 — Distributed Scan** — N surse diferite → aceeasi tinta pe aceleasi porturi. Perspectiva inversata. SignatureID 1005.
 
 - [ ] **#24 — Beaconing C2** — src→(dst, port) la intervale regulate (stddev mic). SignatureID 1006.
 
-- [ ] **#16 — SIGHUP config reload** — reincarca `config.toml` fara restart, fara pierdere de context din memorie.
 
-- [ ] **Diferentiere IP intern vs extern** — RFC1918 (`10.x`, `192.168.x`, `172.16-31.x`) vs IP-uri publice. Un atac din interior merita severitate/label diferit in SIEM si email.
-
-- [ ] **Graceful shutdown SIGTERM** — flushaza alertele pending inainte de oprire.
 
 ### Impact scazut
 
@@ -2013,6 +2039,9 @@ si genereaza sectiunea `[network.hostnames]` in `config.toml`. Cand va fi implem
 | #10 | Accept Scan — `accept_hits` separate, SigID 1003, magenta CLI |
 | #12 | Whitelist IP-uri (IP + CIDR) — excluse complet din detectie |
 | #17 | Cleanup task sleep-first (nu interval tick imediat) |
+| #16 | SIGHUP config reload — reincarca `config.toml` fara restart, fara pierdere context (ArcSwap atomic) |
+| #22 | Lateral Movement — 1 IP → N destinatii unice pe conexiuni acceptate (orice port), SignatureID 1004, CLI bright_red, severitate CEF 8 (Critical) |
+| — | Graceful shutdown SIGTERM — handler `tokio::signal::unix::signal(SignalKind::terminate())` in `select!`; alerta in curs de `.await` se finalizeaza complet inainte de iesire |
 | #21 | Hostname resolve — mapping static `[network.hostnames]`, afisare in CLI/SIEM/email |
 | — | `dest_ip` in LogEvent/Alert, `dst=` in CEF, porturi in `msg` |
 

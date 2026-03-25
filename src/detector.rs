@@ -130,6 +130,9 @@ impl WhitelistEntry {
 ///   }
 #[derive(Debug, Clone)]
 pub enum ScanType {
+    // Nota: LateralMovement adaugat ca varianta noua (#22).
+    // Match-urile existente in alerter.rs si display.rs sunt exhaustive —
+    // compilatorul va semnala toate locurile unde trebuie adaugat noul caz.
     Fast,
     Slow,
 
@@ -147,6 +150,20 @@ pub enum ScanType {
     /// pe mai multe servere in scurt timp. Firewall-ul le permite (sunt servicii
     /// legitime), dar pattern-ul sistematic denota enumerare, nu comportament normal.
     AcceptScan,
+
+    /// Miscare laterala in retea (#22) — un IP intern contacteaza N destinatii
+    /// diferite pe conexiuni acceptate (orice port).
+    ///
+    /// Diferenta fundamentala fata de celelalte tipuri:
+    ///   Fast/Slow/Accept → 1 sursa × N porturi × 1 destinatie
+    ///   LateralMovement  → 1 sursa × orice port × N destinatii
+    ///
+    /// Detectia e bazata pe comportament, nu pe port — servicii legitime cu
+    /// fan-out mare (backup, monitoring) se pun in whitelist.
+    ///
+    /// SignatureID SIEM: 1004. Severitate: 8 (Critical) — miscarea laterala
+    /// indica un host compromis care incearca sa se extinda in retea.
+    LateralMovement,
 }
 
 /// Implementarea trait-ului Display pentru ScanType.
@@ -163,6 +180,7 @@ impl std::fmt::Display for ScanType {
             ScanType::Fast => write!(f, "Fast Scan"),
             ScanType::Slow => write!(f, "Slow Scan"),
             ScanType::AcceptScan => write!(f, "Accept Scan"),
+            ScanType::LateralMovement => write!(f, "Lateral Movement"),
         }
     }
 }
@@ -179,8 +197,23 @@ pub struct Alert {
     /// IP-ul tinta al scanarii — din campul `dst` al log-ului care a
     /// declansat alerta. Option<> deoarece unele log-uri nu au dst valid.
     pub dest_ip: Option<IpAddr>,
+    /// Porturi unice detectate — populat pentru Fast/Slow/AcceptScan.
+    /// Gol pentru LateralMovement (acolo relevant este unique_dests).
     pub unique_ports: Vec<u16>,
+    /// Destinatii unice contactate — populat doar pentru LateralMovement.
+    /// Gol pentru celelalte tipuri de scan.
+    pub unique_dests: Vec<IpAddr>,
     pub timestamp: DateTime<Local>,
+}
+
+/// Inregistrarea unei conexiuni catre o destinatie (Lateral Movement #22).
+///
+/// Tine minte CATRE CE IP s-a conectat sursa si cand.
+/// Spre deosebire de PortHit (care tine minte portul accesat),
+/// DestHit tine minte destinatia accesata.
+struct DestHit {
+    dest_ip: IpAddr,
+    seen_at: Instant,
 }
 
 /// Inregistrarea unui port accesat de un IP la un moment dat.
@@ -255,6 +288,14 @@ pub struct Detector {
     /// (drop sau accept), deci este sursa de adevar pentru capacitate totala.
     last_seen: DashMap<IpAddr, Instant>,
 
+    /// Evidenta destinatiilor contactate pe porturi laterale, per IP sursa.
+    /// Alimenteaza detectia Lateral Movement (#22).
+    /// Key: IP-ul sursa | Value: lista de (dest_ip, timestamp)
+    lateral_hits: DashMap<IpAddr, Vec<DestHit>>,
+
+    /// Cooldown alerte Lateral Movement per IP sursa.
+    lateral_cooldowns: DashMap<IpAddr, Instant>,
+
     /// IP-uri si subretele excluse din detectie (parsate din config la constructie).
     /// Wrapat in ArcSwap pentru hot reload atomic la SIGHUP (#16).
     whitelist: ArcSwap<Vec<WhitelistEntry>>,
@@ -285,6 +326,8 @@ impl Detector {
             fast_cooldowns: DashMap::new(),
             slow_cooldowns: DashMap::new(),
             accept_cooldowns: DashMap::new(),
+            lateral_hits: DashMap::new(),
+            lateral_cooldowns: DashMap::new(),
             last_seen: DashMap::new(),
             whitelist: ArcSwap::from_pointee(whitelist),
             config: ArcSwap::from_pointee(config),
@@ -398,13 +441,15 @@ impl Detector {
                 .map(|e| *e.key());
 
             if let Some(old_ip) = lru_ip {
-                // Eliminam IP-ul LRU din TOATE structurile (drop, accept, cooldowns).
+                // Eliminam IP-ul LRU din TOATE structurile.
                 self.port_hits.remove(&old_ip);
                 self.accept_hits.remove(&old_ip);
+                self.lateral_hits.remove(&old_ip);
                 self.last_seen.remove(&old_ip);
                 self.fast_cooldowns.remove(&old_ip);
                 self.slow_cooldowns.remove(&old_ip);
                 self.accept_cooldowns.remove(&old_ip);
+                self.lateral_cooldowns.remove(&old_ip);
             }
         }
 
@@ -476,6 +521,7 @@ impl Detector {
                     source_ip: ip,
                     dest_ip: event.dest_ip,
                     unique_ports: ports,
+                    unique_dests: Vec::new(),
                     timestamp: Local::now(),
                 });
             }
@@ -493,6 +539,7 @@ impl Detector {
                     source_ip: ip,
                     dest_ip: event.dest_ip,
                     unique_ports: ports,
+                    unique_dests: Vec::new(),
                     timestamp: Local::now(),
                 });
             }
@@ -520,8 +567,59 @@ impl Detector {
                     source_ip: ip,
                     dest_ip: event.dest_ip,
                     unique_ports: ports,
+                    unique_dests: Vec::new(),
                     timestamp: Local::now(),
                 });
+            }
+        }
+
+        // --- 6. Verificam Lateral Movement (#22) ---
+        //
+        // Conditii necesare:
+        //   a) Lateral Movement este activat in config
+        //   b) dest_ip este prezent in eveniment (fara destinatie, nu putem detecta)
+        //   c) Actiunea este "accept" (conexiune reusita pe orice port)
+        //
+        // Fara filtru de port: detectia e bazata pe comportament (1 sursa → N
+        // destinatii unice), nu pe asumptii despre porturile atacatorului.
+        // Servicii legitime cu fan-out mare se pun in whitelist.
+        //
+        // Logica: inregistram fiecare destinatie unica contactata. Daca numarul
+        // de destinatii unice in fereastra de timp depaseste pragul, generam alerta.
+        let lm_cfg = &cfg.lateral_movement;
+        if lm_cfg.enabled {
+            if let Some(dest_ip) = event.dest_ip {
+                if event.action == "accept" {
+                    // Inregistram destinatia in lateral_hits pentru IP-ul sursa.
+                    {
+                        let mut hits = self.lateral_hits.entry(ip).or_default();
+                        hits.push(DestHit { dest_ip, seen_at: now });
+                        // Cap memorie: refolosim max_hits_per_ip ca limita.
+                        let max_hits = cfg.max_hits_per_ip;
+                        if hits.len() > max_hits {
+                            let overflow = hits.len() - max_hits;
+                            hits.drain(..overflow);
+                        }
+                    }
+
+                    // Colectam destinatiile unice in fereastra de timp.
+                    let lm_window = Duration::from_secs(lm_cfg.time_window_secs);
+                    if let Some(unique_dests) = self.unique_dests_in_window(ip, lm_window, now) {
+                        if unique_dests.len() >= lm_cfg.unique_dest_threshold
+                            && !self.in_cooldown(&self.lateral_cooldowns, ip)
+                        {
+                            self.lateral_cooldowns.insert(ip, now);
+                            alerts.push(Alert {
+                                scan_type: ScanType::LateralMovement,
+                                source_ip: ip,
+                                dest_ip: Some(dest_ip),
+                                unique_ports: Vec::new(),
+                                unique_dests,
+                                timestamp: Local::now(),
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -577,6 +675,33 @@ impl Detector {
             None
         } else {
             Some(unique_ports)
+        }
+    }
+
+    /// Returneaza destinatiile unice contactate de `ip` in fereastra `window`.
+    ///
+    /// Analog cu `unique_ports_in_window`, dar opereaza pe `lateral_hits`
+    /// si colecteaza IP-uri destinatie unice in loc de porturi unice.
+    ///
+    /// Returneaza `None` daca nu exista date pentru IP sau lista e goala.
+    /// Returneaza `Some(Vec<IpAddr>)` cu destinatiile unice din fereastra.
+    fn unique_dests_in_window(
+        &self,
+        ip: IpAddr,
+        window: Duration,
+        now: Instant,
+    ) -> Option<Vec<IpAddr>> {
+        let hits = self.lateral_hits.get(&ip)?;
+        let mut seen: std::collections::HashSet<IpAddr> = std::collections::HashSet::new();
+        for hit in hits.iter() {
+            if now.duration_since(hit.seen_at) <= window {
+                seen.insert(hit.dest_ip);
+            }
+        }
+        if seen.is_empty() {
+            None
+        } else {
+            Some(seen.into_iter().collect())
         }
     }
 
@@ -642,29 +767,47 @@ impl Detector {
             self.accept_hits.remove(ip);
         }
 
+        // --- Curatam lateral_hits (Lateral Movement #22) ---
+        let mut lateral_empty: Vec<IpAddr> = Vec::new();
+        for mut entry in self.lateral_hits.iter_mut() {
+            entry.value_mut().retain(|hit| {
+                now.saturating_duration_since(hit.seen_at) <= max_age
+            });
+            if entry.value().is_empty() {
+                lateral_empty.push(*entry.key());
+            }
+        }
+        for ip in &lateral_empty {
+            self.lateral_hits.remove(ip);
+        }
+
         // --- Sincronizam last_seen ---
         //
         // Eliminam din last_seen IP-urile care nu mai au date in NICIUN map.
-        // Un IP urmarit exclusiv pentru Accept Scan (fara drop-uri) trebuie
-        // sters din last_seen cand accept_hits il curata (si invers).
+        // Un IP urmarit exclusiv pentru Accept Scan sau Lateral Movement trebuie
+        // sters din last_seen cand map-ul respectiv il curata.
         //
         // NOTA RUST: `.retain()` pe DashMap cu closure care acceseaza ALTE DashMap-uri.
         // Aceasta este sigura deoarece:
-        //   - last_seen, port_hits, accept_hits sunt DashMap-uri SEPARATE
+        //   - last_seen, port_hits, accept_hits, lateral_hits sunt DashMap-uri SEPARATE
         //   - Fiecare are propriile sale shard-uri si lock-uri
         //   - Nu exista overlapping borrows sau deadlock potential
         //   - Garantat de Rust la compile-time prin tipurile Send + Sync ale DashMap
         self.last_seen.retain(|ip, _| {
-            self.port_hits.contains_key(ip) || self.accept_hits.contains_key(ip)
+            self.port_hits.contains_key(ip)
+                || self.accept_hits.contains_key(ip)
+                || self.lateral_hits.contains_key(ip)
         });
 
-        // --- Curatam cooldown-urile expirate (toate trei tipuri) ---
+        // --- Curatam cooldown-urile expirate (toate patru tipuri) ---
         let cooldown_dur = Duration::from_secs(self.config.load().alert_cooldown_secs);
         self.fast_cooldowns
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
         self.slow_cooldowns
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
         self.accept_cooldowns
+            .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
+        self.lateral_cooldowns
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
     }
 
@@ -681,7 +824,9 @@ impl Detector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AcceptScanConfig, DetectionConfig, FastScanConfig, SlowScanConfig};
+    use crate::config::{
+        AcceptScanConfig, DetectionConfig, FastScanConfig, LateralMovementConfig, SlowScanConfig,
+    };
 
     /// Creeaza o configuratie de test cu praguri mici pentru teste rapide.
     fn test_config() -> DetectionConfig {
@@ -703,6 +848,40 @@ mod tests {
                 port_threshold: 3,
                 time_window_secs: 10,
             },
+            // Lateral Movement dezactivat implicit in test_config.
+            // Testele specifice folosesc lateral_config().
+            lateral_movement: LateralMovementConfig {
+                enabled: false,
+                unique_dest_threshold: 3,
+                time_window_secs: 10,
+            },
+        }
+    }
+
+    /// Creeaza o configuratie cu Lateral Movement activat (prag 3 destinatii in 10s).
+    fn lateral_config() -> DetectionConfig {
+        DetectionConfig {
+            alert_cooldown_secs: 5,
+            max_hits_per_ip: 1_000,
+            max_tracked_ips: 10_000,
+            whitelist: Vec::new(),
+            fast_scan: FastScanConfig {
+                port_threshold: 100,
+                time_window_secs: 10,
+            },
+            slow_scan: SlowScanConfig {
+                port_threshold: 200,
+                time_window_mins: 1,
+            },
+            accept_scan: AcceptScanConfig {
+                port_threshold: 100,
+                time_window_secs: 10,
+            },
+            lateral_movement: LateralMovementConfig {
+                enabled: true,
+                unique_dest_threshold: 3,
+                time_window_secs: 10,
+            },
         }
     }
 
@@ -713,6 +892,18 @@ mod tests {
             dest_port: port,
             protocol: "tcp".to_string(),
             action: "drop".to_string(),
+            raw_log: String::new(),
+        }
+    }
+
+    /// Creeaza un eveniment accept cu IP destinatie explicit (pentru Lateral Movement).
+    fn make_lateral_event(src_ip: &str, dest_ip: &str, port: u16) -> LogEvent {
+        LogEvent {
+            source_ip: src_ip.parse().unwrap(),
+            dest_ip: Some(dest_ip.parse().unwrap()),
+            dest_port: port,
+            protocol: "tcp".to_string(),
+            action: "accept".to_string(),
             raw_log: String::new(),
         }
     }
@@ -973,6 +1164,11 @@ mod tests {
                 port_threshold: 1_000,
                 time_window_secs: 60,
             },
+            lateral_movement: LateralMovementConfig {
+                enabled: false,
+                unique_dest_threshold: 3,
+                time_window_secs: 10,
+            },
         }
     }
 
@@ -1112,6 +1308,138 @@ mod tests {
         for port in 1..=5 {
             let alerts = detector.process_event(&make_accept_event("10.1.0.1", port));
             assert!(alerts.is_empty(), "Accept Scan trebuie blocat de whitelist");
+        }
+    }
+
+    // =========================================================================
+    // Teste Lateral Movement (#22)
+    // =========================================================================
+
+    #[test]
+    fn test_lateral_movement_alert() {
+        // 3 destinatii diferite pe port 445 (SMB) = egal cu pragul -> alerta.
+        let detector = Detector::new(lateral_config());
+
+        let dests = ["10.0.0.10", "10.0.0.11", "10.0.0.12"];
+        let mut last_alerts = vec![];
+        for dest in &dests {
+            last_alerts = detector.process_event(&make_lateral_event("10.0.1.5", dest, 445));
+        }
+
+        assert_eq!(last_alerts.len(), 1);
+        assert!(
+            matches!(last_alerts[0].scan_type, ScanType::LateralMovement),
+            "Tipul alertei trebuie sa fie LateralMovement"
+        );
+        assert_eq!(
+            last_alerts[0].unique_dests.len(),
+            3,
+            "Trebuie sa contina exact 3 destinatii unice"
+        );
+        assert!(
+            last_alerts[0].unique_ports.is_empty(),
+            "unique_ports trebuie sa fie gol pentru LateralMovement"
+        );
+    }
+
+    #[test]
+    fn test_lateral_movement_below_threshold_no_alert() {
+        // 2 destinatii < prag 3 -> fara alerta.
+        let detector = Detector::new(lateral_config());
+
+        for dest in &["10.0.0.10", "10.0.0.11"] {
+            let alerts = detector.process_event(&make_lateral_event("10.0.1.5", dest, 445));
+            assert!(
+                alerts.is_empty(),
+                "Nu trebuie alerta sub prag ({} destinatii)", dest
+            );
+        }
+    }
+
+    #[test]
+    fn test_lateral_movement_any_port_triggers() {
+        // Orice port accept declanseaza Lateral Movement — fara filtru de port.
+        let detector = Detector::new(lateral_config());
+
+        let dests = ["10.0.0.10", "10.0.0.11", "10.0.0.12"];
+        let mut last_alerts = vec![];
+        for dest in &dests {
+            // Port 80 (HTTP) — nu e "lateral movement tipic", dar detectia e bazata
+            // pe comportament (N destinatii), nu pe port.
+            last_alerts = detector.process_event(&make_lateral_event("10.0.1.5", dest, 80));
+        }
+
+        assert_eq!(last_alerts.len(), 1);
+        assert!(
+            matches!(last_alerts[0].scan_type, ScanType::LateralMovement),
+            "Lateral Movement trebuie detectat pe orice port, nu doar pe porturi predefinite"
+        );
+    }
+
+    #[test]
+    fn test_lateral_movement_cooldown() {
+        // Dupa prima alerta, cooldown previne alerta repetata.
+        let detector = Detector::new(lateral_config());
+
+        // Prima alerta la a 3-a destinatie.
+        let dests = ["10.0.0.10", "10.0.0.11", "10.0.0.12"];
+        for dest in &dests {
+            detector.process_event(&make_lateral_event("10.0.1.5", dest, 445));
+        }
+
+        // A 4-a destinatie — cooldown activ, nu trebuie alerta.
+        let alerts = detector.process_event(&make_lateral_event("10.0.1.5", "10.0.0.13", 445));
+        let lateral: Vec<_> = alerts
+            .iter()
+            .filter(|a| matches!(a.scan_type, ScanType::LateralMovement))
+            .collect();
+        assert!(
+            lateral.is_empty(),
+            "Cooldown trebuie sa previna alerta repetata Lateral Movement"
+        );
+    }
+
+    #[test]
+    fn test_lateral_movement_disabled_no_alert() {
+        // Cand lateral_movement.enabled = false, nicio alerta nu trebuie generata.
+        let detector = Detector::new(test_config()); // enabled: false
+
+        for dest in &["10.0.0.10", "10.0.0.11", "10.0.0.12"] {
+            let alerts = detector.process_event(&make_lateral_event("10.0.1.5", dest, 445));
+            let lateral: Vec<_> = alerts
+                .iter()
+                .filter(|a| matches!(a.scan_type, ScanType::LateralMovement))
+                .collect();
+            assert!(
+                lateral.is_empty(),
+                "Lateral Movement dezactivat nu trebuie sa genereze alerte"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lateral_movement_drop_events_ignored() {
+        // Evenimentele "drop" nu declanseaza Lateral Movement (doar "accept").
+        let detector = Detector::new(lateral_config());
+
+        for dest in &["10.0.0.10", "10.0.0.11", "10.0.0.12"] {
+            // drop in loc de accept
+            let alerts = detector.process_event(&LogEvent {
+                source_ip: "10.0.1.5".parse().unwrap(),
+                dest_ip: Some(dest.parse().unwrap()),
+                dest_port: 445,
+                protocol: "tcp".to_string(),
+                action: "drop".to_string(),
+                raw_log: String::new(),
+            });
+            let lateral: Vec<_> = alerts
+                .iter()
+                .filter(|a| matches!(a.scan_type, ScanType::LateralMovement))
+                .collect();
+            assert!(
+                lateral.is_empty(),
+                "Evenimentele drop nu trebuie sa declanseze Lateral Movement"
+            );
         }
     }
 }
