@@ -30,7 +30,7 @@
 //
 // =============================================================================
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, SubnetEntry};
 use crate::detector::{Alert, ScanType};
 use crate::parser::LogEvent;
 use chrono::Local;
@@ -145,6 +145,16 @@ pub fn print_banner(config: &AppConfig) {
         );
     }
 
+    // Subnets — afisam numarul de mapping-uri CIDR→locatie daca exista.
+    let sn_count = config.network.subnets.len();
+    if sn_count > 0 {
+        let sn_line = format!("  Subnets:   {} mapping-uri CIDR->locatie configurate", sn_count);
+        println!(
+            "{}",
+            format!("║{:<width$}║", sn_line, width = inner_width).cyan()
+        );
+    }
+
     println!("{}", format!("╚{}╝", border).bold().cyan());
     println!();
 }
@@ -217,7 +227,7 @@ pub fn log_error(message: &str) {
 // ---------------------------------------------------------------------------
 
 /// Afiseaza o alerta de securitate cu formatare vizual distincta.
-pub fn log_alert(alert: &Alert, hostnames: &HashMap<IpAddr, String>) {
+pub fn log_alert(alert: &Alert, hostnames: &HashMap<IpAddr, String>, subnets: &[SubnetEntry]) {
     let ts = alert
         .timestamp
         .format("[%Y-%m-%d %H:%M:%S]")
@@ -242,7 +252,7 @@ pub fn log_alert(alert: &Alert, hostnames: &HashMap<IpAddr, String>) {
 
     let arrows = "▶▶▶";
 
-    let src_display = format_ip(&alert.source_ip, hostnames);
+    let src_display = format_ip(&alert.source_ip, hostnames, subnets);
 
     match alert.scan_type {
         ScanType::Fast => {
@@ -353,6 +363,7 @@ pub fn log_firewall_event(
     protocol: &str,
     action: &str,
     hostnames: &HashMap<IpAddr, String>,
+    subnets: &[SubnetEntry],
 ) {
     let ts = timestamp();
     // Badge dinamic: albastru pentru drop, verde pentru accept.
@@ -367,7 +378,7 @@ pub fn log_firewall_event(
         "{} {} Src={} DstPort={} Proto={} Action={}",
         ts.dimmed(),
         badge,
-        format_ip(ip, hostnames).bright_blue(),
+        format_ip(ip, hostnames, subnets).bright_blue(),
         format!("{}", port).bright_blue(),
         protocol.bright_blue(),
         action.bright_blue()
@@ -476,11 +487,12 @@ fn timestamp() -> String {
     Local::now().format("[%Y-%m-%d %H:%M:%S]").to_string()
 }
 
-/// Formateaza un IP cu hostname-ul sau (daca exista in mapping).
-/// Returneaza "IP (hostname)" daca hostname-ul este cunoscut, altfel doar "IP".
-fn format_ip(ip: &IpAddr, hostnames: &HashMap<IpAddr, String>) -> String {
-    match hostnames.get(ip) {
-        Some(name) => format!("{} ({})", ip, name),
-        None => ip.to_string(),
-    }
+/// Formateaza un IP cu hostname si/sau locatie subnet.
+/// Format: "IP (hostname) [Etaj 1]", "IP [Etaj 1]", "IP (hostname)", sau doar "IP".
+fn format_ip(ip: &IpAddr, hostnames: &HashMap<IpAddr, String>, subnets: &[SubnetEntry]) -> String {
+    let hostname = hostnames.get(ip).map(|s| format!(" ({})", s)).unwrap_or_default();
+    let location = SubnetEntry::lookup(subnets, ip)
+        .map(|l| format!(" [{}]", l))
+        .unwrap_or_default();
+    format!("{}{}{}", ip, hostname, location)
 }

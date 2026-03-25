@@ -34,7 +34,7 @@
 //
 // =============================================================================
 
-use crate::config::{AlertingConfig, DetectionConfig, EmailConfig};
+use crate::config::{AlertingConfig, DetectionConfig, EmailConfig, SubnetEntry};
 use crate::detector::{Alert, ScanType};
 use crate::display;
 use anyhow::{Context, Result};
@@ -106,8 +106,10 @@ fn build_html_body(
     severity: &str,
     src_ip: &str,
     src_hostname: &str,
+    src_location: &str,
     dst_ip: &str,
     dst_hostname: &str,
+    dst_location: &str,
     port_count: usize,
     timestamp: &str,
     ports: &str,
@@ -182,8 +184,8 @@ fn build_html_body(
   <div class="sec">
     <div class="sec-title">Detalii eveniment</div>
     <table class="tbl">
-      <tr><td>IP Sursa</td><td>__SRC_IP__ __SRC_HOST__</td></tr>
-      <tr><td>IP Destinatie</td><td>__DST_IP__ __DST_HOST__</td></tr>
+      <tr><td>IP Sursa</td><td>__SRC_IP__ __SRC_HOST__ __SRC_LOC__</td></tr>
+      <tr><td>IP Destinatie</td><td>__DST_IP__ __DST_HOST__ __DST_LOC__</td></tr>
       <tr><td>Porturi scanate</td><td>__PORT_COUNT__</td></tr>
       <tr><td>Timestamp</td><td>__TIMESTAMP__</td></tr>
     </table>
@@ -232,14 +234,27 @@ fn build_html_body(
     } else {
         format!("({})", dst_hostname)
     };
+    // Formatam locatiile subnet: "[Etaj 1]" daca exista, altfel string gol.
+    let src_loc_display = if src_location.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", src_location)
+    };
+    let dst_loc_display = if dst_location.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", dst_location)
+    };
 
     template
         .replace("__SCAN_TYPE__", scan_type)
         .replace("__SEVERITY__", severity)
         .replace("__SRC_IP__", src_ip)
         .replace("__SRC_HOST__", &src_host_display)
+        .replace("__SRC_LOC__", &src_loc_display)
         .replace("__DST_IP__", dst_ip)
         .replace("__DST_HOST__", &dst_host_display)
+        .replace("__DST_LOC__", &dst_loc_display)
         .replace("__PORT_COUNT__", &port_count.to_string())
         .replace("__TIMESTAMP__", timestamp)
         .replace("__PORTS__", ports)
@@ -295,6 +310,8 @@ pub struct Alerter {
     mailer: ArcSwap<Option<AsyncSmtpTransport<Tokio1Executor>>>,
     /// Mapping IP → hostname pentru afisare in alerte SIEM (shost=/dhost=) si email.
     hostnames: ArcSwap<HashMap<IpAddr, String>>,
+    /// Mapping subnet CIDR → locatie (etaj, zona) pentru context fizic in alerte.
+    subnets: ArcSwap<Vec<SubnetEntry>>,
 }
 
 impl Alerter {
@@ -307,6 +324,7 @@ impl Alerter {
         config: AlertingConfig,
         detection: DetectionConfig,
         hostnames: HashMap<IpAddr, String>,
+        subnets: Vec<SubnetEntry>,
     ) -> Result<Self> {
         // Construim mailer-ul O SINGURA DATA la startup, nu la fiecare alerta.
         let mailer = if config.email.enabled {
@@ -319,6 +337,7 @@ impl Alerter {
             detection: ArcSwap::from_pointee(detection),
             mailer: ArcSwap::from_pointee(mailer),
             hostnames: ArcSwap::from_pointee(hostnames),
+            subnets: ArcSwap::from_pointee(subnets),
         })
     }
 
@@ -331,6 +350,7 @@ impl Alerter {
         new_alerting: AlertingConfig,
         new_detection: DetectionConfig,
         new_hostnames: HashMap<IpAddr, String>,
+        new_subnets: Vec<SubnetEntry>,
     ) {
         // Rebuild mailer daca email e activat in noua configurare.
         let new_mailer = if new_alerting.email.enabled {
@@ -340,13 +360,10 @@ impl Alerter {
                     display::log_error(&format!(
                         "SIGHUP: rebuild SMTP esuat, pastrez mailer-ul vechi: {:#}", e
                     ));
-                    // Pastram mailer-ul vechi — nu facem swap.
-                    // Early return nu e nevoie, punem None si lasam swap-ul sa nu se faca.
-                    // De fapt, mai bine nu facem swap pe mailer deloc.
-                    // Dar e mai simplu sa returnam aici.
                     self.config.store(Arc::new(new_alerting));
                     self.detection.store(Arc::new(new_detection));
                     self.hostnames.store(Arc::new(new_hostnames));
+                    self.subnets.store(Arc::new(new_subnets));
                     return;
                 }
             }
@@ -358,6 +375,7 @@ impl Alerter {
         self.detection.store(Arc::new(new_detection));
         self.mailer.store(Arc::new(new_mailer));
         self.hostnames.store(Arc::new(new_hostnames));
+        self.subnets.store(Arc::new(new_subnets));
     }
 
     /// Trimite alerta catre toate destinatiile configurate.
@@ -523,13 +541,28 @@ impl Alerter {
             None => String::new(),
         };
 
+        // Campurile cs2/cs3 — locatie fizica (etaj/zona) din subnet mapping.
+        // cs2 = locatie IP sursa, cs3 = locatie IP destinatie.
+        let sn = self.subnets.load();
+        let src_location_field = match SubnetEntry::lookup(&sn, &alert.source_ip) {
+            Some(loc) => format!(" cs2Label=SourceLocation cs2={}", sanitize_cef(&loc)),
+            None => String::new(),
+        };
+        let dst_location_field = match alert.dest_ip {
+            Some(ref ip) => match SubnetEntry::lookup(&sn, ip) {
+                Some(loc) => format!(" cs3Label=DestLocation cs3={}", sanitize_cef(&loc)),
+                None => String::new(),
+            },
+            None => String::new(),
+        };
+
         let syslog_ts = alert.timestamp.format("%b %e %H:%M:%S");
         let rt_ms = alert.timestamp.timestamp_millis();
 
         let message = format!(
             "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
              |{sig_id}|{event_name}|{sev}\
-             |rt={rt_ms} src={src}{shost}{dst}{dhost} cnt={cnt} act=alert \
+             |rt={rt_ms} src={src}{shost}{src_loc}{dst}{dhost}{dst_loc} cnt={cnt} act=alert \
              msg={msg} cs1Label={cs1label} cs1={cs1}",
             sev = cef_severity,
             syslog_ts = syslog_ts,
@@ -538,8 +571,10 @@ impl Alerter {
             rt_ms = rt_ms,
             src = alert.source_ip,
             shost = shost_field,
+            src_loc = src_location_field,
             dst = dst_field,
             dhost = dhost_field,
+            dst_loc = dst_location_field,
             cnt = cnt,
             msg = msg_text,
             cs1label = cs1_label,
@@ -657,6 +692,14 @@ impl Alerter {
             None => "",
         };
 
+        // Locatii subnet din mapping-ul static.
+        let sn = self.subnets.load();
+        let src_location = SubnetEntry::lookup(&sn, &alert.source_ip).unwrap_or_default();
+        let dst_location = match alert.dest_ip {
+            Some(ref ip) => SubnetEntry::lookup(&sn, ip).unwrap_or_default(),
+            None => String::new(),
+        };
+
         let timestamp = alert.timestamp.format("%Y-%m-%d %H:%M:%S");
 
         let html_body = build_html_body(
@@ -664,8 +707,10 @@ impl Alerter {
             severity,
             &alert.source_ip.to_string(),
             src_hostname,
+            &src_location,
             &dest_ip_display,
             dst_hostname,
+            &dst_location,
             item_count,
             &timestamp.to_string(),
             &list_display,

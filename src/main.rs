@@ -56,7 +56,7 @@ mod parser;
 
 use alerter::Alerter;
 use arc_swap::ArcSwap;
-use config::AppConfig;
+use config::{AppConfig, SubnetEntry};
 use detector::Detector;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -259,12 +259,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let hostnames = Arc::new(ArcSwap::from_pointee(parse_hostnames(&config)));
+    let subnets = Arc::new(ArcSwap::from_pointee(SubnetEntry::parse_subnets(&config.network.subnets)));
 
     let detector = Arc::new(Detector::new(config.detection.clone()));
     let alerter = Arc::new(Alerter::new(
         config.alerting.clone(),
         config.detection.clone(),
         parse_hostnames(&config),
+        SubnetEntry::parse_subnets(&config.network.subnets),
     )?);
 
     display::log_info("Detector initializat (DashMap thread-safe)");
@@ -482,16 +484,19 @@ async fn main() -> anyhow::Result<()> {
                         // Detector: praguri, cooldown, whitelist.
                         detector.update_config(new_config.detection.clone());
 
-                        // Alerter: SIEM, email, hostnames.
+                        // Alerter: SIEM, email, hostnames, subnets.
                         let new_hostnames = parse_hostnames(&new_config);
+                        let new_subnets = SubnetEntry::parse_subnets(&new_config.network.subnets);
                         alerter.update_config(
                             new_config.alerting.clone(),
                             new_config.detection.clone(),
                             new_hostnames.clone(),
+                            new_subnets.clone(),
                         );
 
-                        // Hostnames partajate (folosite in main loop pentru display).
+                        // Hostnames si subnets partajate (folosite in main loop pentru display).
                         hostnames.store(Arc::new(new_hostnames));
+                        subnets.store(Arc::new(new_subnets));
 
                         // Rate limiter: recream daca s-a schimbat.
                         if new_config.network.udp_rate_limit != config.network.udp_rate_limit
@@ -597,6 +602,7 @@ async fn main() -> anyhow::Result<()> {
                                     &event.protocol,
                                     &event.action,
                                     &hostnames.load(),
+                                    &subnets.load(),
                                 );
 
                                 // Pastram log-ul original la nivel debug pentru audit/troubleshooting.
@@ -608,7 +614,7 @@ async fn main() -> anyhow::Result<()> {
                                 // Procesam alertele generate (daca exista).
                                 for alert in alerts {
                                     // Afisam alerta in terminal (colorat, cu hostname-uri).
-                                    display::log_alert(&alert, &hostnames.load());
+                                    display::log_alert(&alert, &hostnames.load(), &subnets.load());
 
                                     // Trimitem alerta catre SIEM si email (async).
                                     alerter.send_alert(&alert).await;

@@ -22,6 +22,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection)
 - [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket)
 - [Hostname Resolve — Mapping Static IP→Hostname](#hostname-resolve--mapping-static-iphostname)
+- [Subnet Mapping — Mapping CIDR→Locatie](#subnet-mapping--mapping-cidrlocatie)
 - [Concepte Rust acoperite](#concepte-rust-acoperite)
 
 ---
@@ -30,12 +31,12 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 
 | Categorie | Detalii |
 |-----------|---------|
-| **Detectie** | Fast Scan, Slow Scan, Accept Scan — toate funcționale |
+| **Detectie** | Fast Scan, Slow Scan, Accept Scan, Lateral Movement — toate funcționale |
 | **Parseri** | Checkpoint Gaia, CEF/ArcSight, Gaia-CEF (LEA blob in CEF Name) |
 | **Alertare** | SIEM (UDP CEF), Email (SMTP async) |
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
-| **Teste** | 53 teste unitare — toate trec |
+| **Teste** | 59 teste unitare — toate trec |
 | **Clippy** | 7 warnings pre-existente (cosmetice, niciuna funcțională) |
 
 ### Implementat
@@ -49,7 +50,10 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Validare config cu raportare cumulata (16 constrangeri)
 - [x] Whitelist IP-uri (IP + CIDR) — excluse complet din detectie
 - [x] Hostname mapping static (`[network.hostnames]`) — afisare in CLI, SIEM (shost=/dhost=) si email
-- [x] Teste unitare: 53 passed (parseri, detector, alerter, whitelist)
+- [x] Subnet mapping static (`[network.subnets]`) — CIDR→locatie (etaj, cladire, zona) in CLI, SIEM (cs2/cs3) si email
+- [x] Lateral Movement detection — comportament N destinatii unice, SigID 1004, severitate CEF 8
+- [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
+- [x] Teste unitare: 59 passed (parseri, detector, alerter, whitelist, lateral movement)
 
 ### De implementat
 
@@ -218,6 +222,7 @@ Constrangerile validate:
 | `network.udp_burst_size` (daca `udp_rate_limit` > 0) | ≥ 1 |
 | `network.udp_burst_size` (daca `udp_rate_limit` > 0) | ≥ `udp_rate_limit` (warning) |
 | `network.hostnames` cheile | fiecare cheie trebuie sa fie un IP valid |
+| `network.subnets` cheile | fiecare cheie trebuie sa fie un CIDR valid (ex: `10.10.1.0/24`) |
 
 ```toml
 [network]
@@ -230,6 +235,11 @@ parser = "gaia"                # Parser activ: "gaia", "cef" sau "gaia_cef"
 # "10.0.1.10" = "srv-dc01"    # Afisat in alerte CLI, SIEM (shost=/dhost=) si email
 # "10.0.1.20" = "srv-mail"
 # "10.0.2.50" = "ws-admin01"
+
+[network.subnets]              # Mapping static subnet CIDR → locatie fizica (optional)
+# "10.10.1.0/24" = "Etaj 1"   # Afisat in alerte CLI [Etaj 1], SIEM (cs2/cs3), email
+# "10.10.2.0/24" = "Etaj 2"   # Longest prefix match: /24 are prioritate peste /16
+# "10.10.0.0/16" = "Cladire Principala"
 
 [detection]
 alert_cooldown_secs = 300      # Cooldown intre alerte pentru acelasi IP
@@ -1952,6 +1962,85 @@ si genereaza sectiunea `[network.hostnames]` in `config.toml`. Cand va fi implem
 
 ---
 
+## Subnet Mapping — Mapping CIDR→Locatie
+
+> **CONTEXT FIZIC** — Implementat in `src/config.rs`, `src/display.rs`, `src/alerter.rs`, `src/main.rs`.
+
+### Ce problema rezolva
+
+Hostname-urile identifica **ce masina** este implicata. Subnet mapping-ul identifica **unde se afla fizic**:
+etaj, cladire, zona de retea. In reteaua noastra izolata, subnettele sunt alocate pe locatii fizice
+(ex: 10.10.1.0/24 = Etaj 1, 10.10.2.0/24 = Etaj 2).
+
+Cand o alerta spune `10.10.1.55 (ws-user42) [Etaj 1] → 10.10.3.20 (srv-files) [Etaj 3]`,
+operatorul stie imediat ca un workstation de pe Etajul 1 scaneaza un server de pe Etajul 3 —
+fara sa caute manual in schema retelei.
+
+### Solutia: Mapping static in `config.toml`
+
+```toml
+[network.subnets]
+"10.10.1.0/24" = "Etaj 1"
+"10.10.2.0/24" = "Etaj 2"
+"10.10.3.0/24" = "Etaj 3"
+"10.10.0.0/24" = "Server Room"
+"10.10.0.0/16" = "Cladire Principala"
+```
+
+**Longest prefix match**: daca un IP apartine mai multor subnete (ex: `10.10.1.55` e atat in
+`/24 Etaj 1` cat si in `/16 Cladire Principala`), se aplica match-ul cel mai specific (`/24`).
+Aceasta permite ierarhii: `/16` pentru cladire, `/24` pentru etaj.
+
+### Unde apare locatia
+
+**1. Terminal (CLI) — eveniment firewall:**
+```
+[2026-03-25 12:00:00]  DROP  Src=10.10.1.55 (ws-user42) [Etaj 1] DstPort=445 Proto=tcp Action=drop
+```
+
+**2. Terminal (CLI) — alerta:**
+```
+────────────────────────────────────────────────────────────────────
+[2026-03-25 12:00:01] ▶▶▶  ALERT  [FAST SCAN] [IP: 10.10.1.55 (ws-user42) [Etaj 1]] | 15 porturi unice detectate!
+────────────────────────────────────────────────────────────────────
+```
+
+**3. SIEM (CEF) — campurile `cs2` si `cs3`:**
+```
+<38>Mar 25 12:00:01 ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0
+  |1001|Fast Port Scan Detected|7
+  |rt=... src=10.10.1.55 shost=ws-user42 cs2Label=SourceLocation cs2=Etaj 1
+   dst=10.10.3.20 dhost=srv-files cs3Label=DestLocation cs3=Etaj 3
+   cnt=15 act=alert msg=... cs1Label=ScannedPorts cs1=21,22,...
+```
+
+**4. Email — tabelul de detalii:**
+```
+┌─────────────────┬────────────────────────────────────────┐
+│ IP Sursa        │ 10.10.1.55 (ws-user42) [Etaj 1]       │
+│ IP Destinatie   │ 10.10.3.20 (srv-files) [Etaj 3]       │
+│ Porturi scanate │ 15                                      │
+└─────────────────┴────────────────────────────────────────┘
+```
+
+**5. Banner la pornire:**
+```
+║  Subnets:   5 mapping-uri CIDR->locatie configurate                                                          ║
+```
+
+### Comportament
+
+| Situatie | Comportament |
+|----------|-------------|
+| Sectiunea lipseste complet | Feature dezactivat, afisare doar IP (+hostname daca exista) — retrocompatibil |
+| CIDR configurat gasit | Afisare `[locatie]` dupa IP/hostname in CLI, `cs2`/`cs3` in CEF, locatie in email |
+| IP necuprins in niciun subnet | Fara locatie afisata |
+| Cheie invalida (CIDR gresit) | Eroare la startup — raportata in validate() |
+| Subnete imbricate | Se aplica longest prefix match (cel mai specific /prefix) |
+| Hot reload SIGHUP | Subnet-urile sunt reincarcate din config.toml fara restart |
+
+---
+
 ## TODO — Securitate si hardening
 
 ### Scazuta
@@ -1967,6 +2056,8 @@ si genereaza sectiunea `[network.hostnames]` in `config.toml`. Cand va fi implem
 - [x] **#12 — Whitelist IP-uri** — `detection.whitelist` in `config.toml` cu IP-uri individuale si CIDR. IP-urile din whitelist sunt excluse complet din detectie (nu consuma memorie, nu genereaza alerte). Validare la pornire, afisare in banner. 5 teste unitare.
 
 - [x] **#21 — Hostname resolve** — mapping static `[network.hostnames]` in `config.toml` (IP → hostname). Hostname-urile sunt afisate in: alerte CLI (`[IP: 10.0.1.10 (srv-dc01)]`), SIEM CEF (`shost=srv-dc01 dhost=srv-mail`), email (coloana IP Sursa/Destinatie). Validare cheilor IP la pornire. Util in reteaua izolata fara DNS.
+
+- [x] **Subnet mapping** — mapping static `[network.subnets]` in `config.toml` (CIDR → locatie fizica). Afiseaza context fizic (etaj, cladire, zona) in: CLI (`[Etaj 1]`), SIEM CEF (`cs2Label=SourceLocation cs2=Etaj 1`), email (coloana IP cu locatie). Longest prefix match pentru subnete imbricate. Validare CIDR la pornire. Hot-reload SIGHUP.
 
 - [ ] **#11 — Raport zilnic prin email catre echipa IT/Security** — un task async
   programat sa ruleze o data pe zi (ex: la 08:00) care compileaza si trimite
@@ -2043,6 +2134,7 @@ si genereaza sectiunea `[network.hostnames]` in `config.toml`. Cand va fi implem
 | #22 | Lateral Movement — 1 IP → N destinatii unice pe conexiuni acceptate (orice port), SignatureID 1004, CLI bright_red, severitate CEF 8 (Critical) |
 | — | Graceful shutdown SIGTERM — handler `tokio::signal::unix::signal(SignalKind::terminate())` in `select!`; alerta in curs de `.await` se finalizeaza complet inainte de iesire |
 | #21 | Hostname resolve — mapping static `[network.hostnames]`, afisare in CLI/SIEM/email |
+| — | Subnet mapping — `[network.subnets]` CIDR→locatie, afisare in CLI `[Etaj 1]`, SIEM (cs2/cs3), email. Longest prefix match, hot-reload SIGHUP, validare CIDR |
 | — | `dest_ip` in LogEvent/Alert, `dst=` in CEF, porturi in `msg` |
 
 ### Calitate cod

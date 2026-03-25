@@ -37,6 +37,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::Path;
 
 /// Structura principala de configurare a aplicatiei.
@@ -79,6 +80,12 @@ pub struct NetworkConfig {
     /// Reteaua fiind izolata, nu avem DNS extern — hostname-urile sunt configurate manual.
     #[serde(default)]
     pub hostnames: HashMap<String, String>,
+
+    /// Mapping static subnet CIDR → locatie/zona (ex: "10.10.1.0/24" = "Etaj 1").
+    /// Folosit pentru afisare in alerte CLI, email si SIEM — ofera context fizic
+    /// (etaj, cladire, zona) pe langa IP si hostname.
+    #[serde(default)]
+    pub subnets: HashMap<String, String>,
 }
 
 fn default_udp_burst_size() -> u64 {
@@ -363,6 +370,16 @@ impl AppConfig {
             }
         }
 
+        // Validare subnets: cheile trebuie sa fie CIDR valide.
+        for (cidr_str, _label) in &self.network.subnets {
+            if SubnetEntry::parse(cidr_str).is_none() {
+                errors.push(format!(
+                    "network.subnets: cheia \"{}\" nu este un CIDR valid (ex: \"10.10.1.0/24\")",
+                    cidr_str
+                ));
+            }
+        }
+
         if self.network.udp_rate_limit > 0 && self.network.udp_burst_size == 0 {
             errors.push(
                 "network.udp_burst_size = 0 cand udp_rate_limit > 0: burst_size trebuie sa fie cel putin 1"
@@ -578,5 +595,95 @@ impl AppConfig {
                 listing
             );
         }
+    }
+}
+
+// =============================================================================
+// SubnetEntry — Mapping subnet CIDR → locatie (pentru afisare in alerte)
+// =============================================================================
+
+/// Intrare parsata din [network.subnets]: un subnet CIDR asociat cu o eticheta
+/// (etaj, cladire, zona). Folosita pentru lookup rapid IP → locatie.
+///
+/// Matching-ul se face prin bitmask: (ip & mask) == network.
+/// La lookup, se alege match-ul cu cel mai lung prefix (longest prefix match)
+/// pentru a permite subnete imbricate (ex: /16 pentru cladire, /24 pentru etaj).
+#[derive(Debug, Clone)]
+pub struct SubnetEntry {
+    label: String,
+    prefix_len: u8,
+    inner: SubnetInner,
+}
+
+#[derive(Debug, Clone)]
+enum SubnetInner {
+    V4 { network: u32, mask: u32 },
+    V6 { network: u128, mask: u128 },
+}
+
+impl SubnetEntry {
+    /// Parseaza un CIDR string (ex: "10.10.1.0/24") intr-un SubnetEntry.
+    fn parse(cidr: &str) -> Option<Self> {
+        let parts: Vec<&str> = cidr.splitn(2, '/').collect();
+        if parts.len() != 2 { return None; }
+        let ip: IpAddr = parts[0].parse().ok()?;
+        let prefix: u8 = parts[1].parse().ok()?;
+        match ip {
+            IpAddr::V4(addr) => {
+                if prefix > 32 { return None; }
+                let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+                let network = u32::from(addr) & mask;
+                Some(SubnetEntry {
+                    label: String::new(),
+                    prefix_len: prefix,
+                    inner: SubnetInner::V4 { network, mask },
+                })
+            }
+            IpAddr::V6(addr) => {
+                if prefix > 128 { return None; }
+                let mask = if prefix == 0 { 0u128 } else { !0u128 << (128 - prefix) };
+                let network = u128::from(addr) & mask;
+                Some(SubnetEntry {
+                    label: String::new(),
+                    prefix_len: prefix,
+                    inner: SubnetInner::V6 { network, mask },
+                })
+            }
+        }
+    }
+
+    /// Parseaza mapping-urile din config.toml intr-o lista de SubnetEntry cu label.
+    pub fn parse_subnets(raw: &HashMap<String, String>) -> Vec<SubnetEntry> {
+        raw.iter()
+            .filter_map(|(cidr, label)| {
+                SubnetEntry::parse(cidr).map(|mut entry| {
+                    entry.label = label.clone();
+                    entry
+                })
+            })
+            .collect()
+    }
+
+    /// Verifica daca un IP apartine acestui subnet.
+    fn matches(&self, ip: &IpAddr) -> bool {
+        match (&self.inner, ip) {
+            (SubnetInner::V4 { network, mask }, IpAddr::V4(addr)) => {
+                (u32::from(*addr) & mask) == *network
+            }
+            (SubnetInner::V6 { network, mask }, IpAddr::V6(addr)) => {
+                (u128::from(*addr) & mask) == *network
+            }
+            _ => false,
+        }
+    }
+
+    /// Cauta locatia unui IP in lista de subnete (longest prefix match).
+    /// Returneaza label-ul subnetului cel mai specific care contine IP-ul.
+    pub fn lookup(subnets: &[SubnetEntry], ip: &IpAddr) -> Option<String> {
+        subnets
+            .iter()
+            .filter(|entry| entry.matches(ip))
+            .max_by_key(|entry| entry.prefix_len)
+            .map(|entry| entry.label.clone())
     }
 }

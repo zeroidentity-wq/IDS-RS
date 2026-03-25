@@ -28,6 +28,18 @@ udp_burst_size = 20000
 # "10.0.1.20" = "srv-mail"
 # "10.0.2.50" = "ws-admin01"
 
+# Mapping static subnet CIDR → locatie fizica (optional).
+# Folosit pentru afisare in alerte CLI, email si SIEM — ofera context fizic
+# (etaj, cladire, zona) pe langa IP si hostname.
+# Suportă subnete imbricate: se aplica cel mai specific match (longest prefix).
+# Exemplu: /16 pentru cladire, /24 pentru etaj.
+[network.subnets]
+# "10.10.1.0/24" = "Etaj 1"
+# "10.10.2.0/24" = "Etaj 2"
+# "10.10.3.0/24" = "Etaj 3"
+# "10.10.0.0/24" = "Server Room"
+# "10.10.0.0/16" = "Cladire Principala"
+
 # -----------------------------------------------------------------------------
 # Praguri de detectie pentru scanari de retea
 # -----------------------------------------------------------------------------
