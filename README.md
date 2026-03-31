@@ -53,7 +53,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Subnet mapping static (`[network.subnets]`) — CIDR→locatie (etaj, cladire, zona) in CLI, SIEM (cs2/cs3) si email
 - [x] Lateral Movement detection — comportament N destinatii unice, SigID 1004, severitate CEF 8
 - [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
-- [x] Teste unitare: 59 passed (parseri, detector, alerter, whitelist, lateral movement)
+- [x] Teste unitare: 66 passed (parseri, detector, alerter, whitelist, lateral movement, distributed scan)
 
 ### De implementat
 
@@ -61,7 +61,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [ ] Raport zilnic email cu clasificare subretele
 - [x] Hot reload config la SIGHUP
 - [x] Lateral Movement detection (#22)
-- [ ] Distributed Scan detection (#23)
+- [x] Distributed Scan detection (#23)
 - [ ] Beaconing C2 detection (#24)
 
 ### Posibile implementari

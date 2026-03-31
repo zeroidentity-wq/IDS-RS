@@ -139,6 +139,11 @@ pub struct DetectionConfig {
     /// Retrocompatibil: daca lipseste din config.toml, se aplica valorile implicite.
     #[serde(default = "default_lateral_movement")]
     pub lateral_movement: LateralMovementConfig,
+
+    /// Configurare pentru detectia Distributed Scan (#23).
+    /// Retrocompatibil: daca lipseste din config.toml, se aplica valorile implicite.
+    #[serde(default = "default_distributed_scan")]
+    pub distributed_scan: DistributedScanConfig,
 }
 
 fn default_max_hits_per_ip() -> usize {
@@ -232,6 +237,45 @@ fn default_lateral_movement() -> LateralMovementConfig {
         enabled: false,
         unique_dest_threshold: default_lateral_dest_threshold(),
         time_window_secs: default_lateral_time_window(),
+    }
+}
+
+/// Configurare detectie Distributed Scan — scanare coordonata din N surse (#23).
+///
+/// Distributed Scan = N IP-uri sursa diferite scanează aceeasi tinta (dest_ip)
+/// in aceeasi fereastra de timp. Perspectiva inversata fata de Fast/Slow Scan:
+///   Fast/Slow/Accept → 1 sursa × N porturi × 1 destinatie
+///   LateralMovement  → 1 sursa × orice port × N destinatii
+///   DistributedScan  → N surse × aceeasi tinta (oricare porturi)
+///
+/// Pattern tipic de botnet sau atac coordonat: mai multi atacatori
+/// scanează simultan acelasi server/serviciu.
+///
+/// Valori implicite: 5 surse unice in 60 secunde, dezactivat implicit
+/// pentru retrocompatibilitate (config-uri vechi nu au sectiunea).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DistributedScanConfig {
+    /// Activare/dezactivare detectie. Implicit: false (retrocompatibil).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Numarul de surse unice care declanseaza alerta.
+    #[serde(default = "default_distributed_sources_threshold")]
+    pub unique_sources_threshold: usize,
+
+    /// Fereastra de timp in secunde in care se numara sursele.
+    #[serde(default = "default_distributed_time_window")]
+    pub time_window_secs: u64,
+}
+
+fn default_distributed_sources_threshold() -> usize { 5 }
+fn default_distributed_time_window() -> u64 { 60 }
+
+fn default_distributed_scan() -> DistributedScanConfig {
+    DistributedScanConfig {
+        enabled: false,
+        unique_sources_threshold: default_distributed_sources_threshold(),
+        time_window_secs: default_distributed_time_window(),
     }
 }
 
@@ -495,6 +539,22 @@ impl AppConfig {
             if self.detection.lateral_movement.time_window_secs == 0 {
                 errors.push(
                     "detection.lateral_movement.time_window_secs = 0: fereastra de timp zero face detectia imposibila"
+                        .to_string(),
+                );
+            }
+        }
+
+        // Validare Distributed Scan (doar daca e activat).
+        if self.detection.distributed_scan.enabled {
+            if self.detection.distributed_scan.unique_sources_threshold == 0 {
+                errors.push(
+                    "detection.distributed_scan.unique_sources_threshold = 0: orice conexiune va declansa alerta"
+                        .to_string(),
+                );
+            }
+            if self.detection.distributed_scan.time_window_secs == 0 {
+                errors.push(
+                    "detection.distributed_scan.time_window_secs = 0: fereastra de timp zero face detectia imposibila"
                         .to_string(),
                 );
             }

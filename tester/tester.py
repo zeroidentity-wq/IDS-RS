@@ -24,6 +24,8 @@ Generare dinamica (avansat):
   python tester.py accept-scan --format gaia --ports 10 --delay 0.1
   python tester.py lateral-movement --dests 10 --lateral-port 445 --delay 0.1
   python tester.py lateral-movement --dests 10 --lateral-port 3389 --format cef
+  python tester.py distributed-scan --sources 8 --target 10.0.0.100 --delay 0.1
+  python tester.py distributed-scan --sources 8 --target 10.0.0.100 --format cef
 """
 
 import argparse
@@ -406,6 +408,64 @@ def simulate_lateral_movement(
     print(f"[+] Lateral Movement complet: {sent_count} log-uri trimise ({fmt.upper()})")
     print(f"    IDS-RS ar trebui sa detecteze miscarea laterala daca pragul < {num_dests}")
     print(f"    Asigura-te ca [detection.lateral_movement] enabled = true in config.toml")
+
+
+def simulate_distributed_scan(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    target_ip: str,
+    num_sources: int,
+    target_port: int,
+    delay: float,
+    fmt: str,
+) -> None:
+    """
+    Simuleaza Distributed Scan (#23): trimite log-uri de la N surse diferite
+    catre aceeasi destinatie (target_ip).
+
+    Pattern simulat: mai multi atacatori (botnet/coordonat) scanează simultan
+    acelasi server. IDS-RS detecteaza din perspectiva TINTEI — N surse unice
+    catre aceeasi destinatie in fereastra de timp.
+
+    Pragul default din config.toml: >5 surse unice in 60 secunde.
+
+    Exemplu:
+      python tester.py distributed-scan --sources 8
+      python tester.py distributed-scan --sources 8 --target 10.0.0.100 --target-port 443
+    """
+    print(f"[*] Simulare DISTRIBUTED SCAN catre {target_ip}:{target_port} (format: {fmt.upper()})")
+    print(f"    Surse: {num_sources} | Tinta: {target_ip}:{target_port} | Delay: {delay}s")
+    print(f"    IDS-RS listener: {host}:{port}")
+    print()
+
+    # Generam N surse unice in subretele diferite (10.0.X.Y).
+    source_ips = []
+    for i in range(num_sources):
+        subnet = 1 + i // 254
+        last_octet = (i % 254) + 1
+        source_ips.append(f"10.0.{subnet}.{last_octet}")
+
+    sent_count = 0
+    for i, src_ip in enumerate(source_ips):
+        # Mix de drop si accept (ambele sunt detectate de Distributed Scan).
+        action = "drop" if i % 3 != 0 else "accept"
+        log_line = generate_log(fmt, src_ip, target_port, action, dest_ip=target_ip)
+        send_udp(sock, host, port, log_line)
+        sent_count += 1
+
+        print(
+            f"  [{sent_count:>3}/{num_sources}] "
+            f"{src_ip} -> {target_ip}:{target_port} | {action}"
+        )
+
+        if delay > 0 and i < len(source_ips) - 1:
+            time.sleep(delay)
+
+    print()
+    print(f"[+] Distributed Scan complet: {sent_count} log-uri trimise ({fmt.upper()})")
+    print(f"    IDS-RS ar trebui sa detecteze scanarea coordonata daca pragul < {num_sources}")
+    print(f"    Asigura-te ca [detection.distributed_scan] enabled = true in config.toml")
 
 
 def simulate_normal(
@@ -937,16 +997,18 @@ def run_interactive_menu() -> None:
     try:
         while True:
             print()
-            print("  1) Fast Scan      (declanseaza alerta)")
-            print("  2) Slow Scan      (declanseaza alerta lent)")
-            print("  3) Accept Scan    (declanseaza alerta — porturi deschise accesate)")
-            print("  4) Trafic Normal  (fara alerta)")
-            print("  5) Replay fisier  (trimite log-uri dintr-un fisier)")
-            print("  6) Random         (generare aleatorie cu IP custom)")
+            print("  1) Fast Scan            (declanseaza alerta)")
+            print("  2) Slow Scan            (declanseaza alerta lent)")
+            print("  3) Accept Scan          (porturi deschise accesate)")
+            print("  4) Lateral Movement     (1 sursa -> N destinatii)")
+            print("  5) Distributed Scan     (N surse -> 1 tinta)")
+            print("  6) Trafic Normal        (fara alerta)")
+            print("  7) Replay fisier        (trimite log-uri dintr-un fisier)")
+            print("  8) Random               (generare aleatorie cu IP custom)")
             print("  0) Iesire")
             print()
 
-            choice = _prompt_choice(["0", "1", "2", "3", "4", "5", "6"])
+            choice = _prompt_choice(["0", "1", "2", "3", "4", "5", "6", "7", "8"])
 
             if choice == "0":
                 print("\nIesire.")
@@ -1022,6 +1084,53 @@ def run_interactive_menu() -> None:
                 elif choice == "4":
                     fmt = _ask_format()
                     host, port = _prompt_host_port()
+                    num_dests = _prompt_int("Numar destinatii unice", 10)
+                    lateral_port = _prompt_int("Port conexiune (445=SMB, 3389=RDP)", 445)
+                    delay = _prompt_float("Delay intre pachete (s)", 0.1)
+                    source = _prompt("IP sursa simulat", "192.168.11.7")
+                    _print_summary([
+                        ("Scenariu", "Lateral Movement"),
+                        ("Format", fmt.upper()),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("IP sursa", source),
+                        ("Destinatii", num_dests),
+                        ("Port lateral", lateral_port),
+                        ("Delay", f"{delay}s"),
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+                    simulate_lateral_movement(
+                        sock=sock, host=host, port=port,
+                        source_ip=source, num_dests=num_dests,
+                        lateral_port=lateral_port, delay=delay, fmt=fmt,
+                    )
+
+                elif choice == "5":
+                    fmt = _ask_format()
+                    host, port = _prompt_host_port()
+                    num_sources = _prompt_int("Numar surse unice (atacatori)", 8)
+                    target = _prompt("IP tinta (destinatie)", "10.0.0.100")
+                    target_port = _prompt_int("Port tinta", 80)
+                    delay = _prompt_float("Delay intre pachete (s)", 0.1)
+                    _print_summary([
+                        ("Scenariu", "Distributed Scan"),
+                        ("Format", fmt.upper()),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("Surse", num_sources),
+                        ("Tinta", f"{target}:{target_port}"),
+                        ("Delay", f"{delay}s"),
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+                    simulate_distributed_scan(
+                        sock=sock, host=host, port=port,
+                        target_ip=target, num_sources=num_sources,
+                        target_port=target_port, delay=delay, fmt=fmt,
+                    )
+
+                elif choice == "6":
+                    fmt = _ask_format()
+                    host, port = _prompt_host_port()
                     count = _prompt_int("Numar log-uri", 10)
                     source = _prompt("IP sursa simulat", "192.168.11.7")
                     _print_summary([
@@ -1038,7 +1147,7 @@ def run_interactive_menu() -> None:
                         source_ip=source, count=count, fmt=fmt,
                     )
 
-                elif choice == "5":
+                elif choice == "7":
                     host, port = _prompt_host_port()
                     file_path = _prompt("Cale fisier")
                     delay = _prompt_float("Delay intre pachete (s)", 0.1)
@@ -1055,7 +1164,7 @@ def run_interactive_menu() -> None:
                         file_path=file_path, delay=delay, batch_size=1,
                     )
 
-                elif choice == "6":
+                elif choice == "8":
                     ips = _prompt_ip_source()
 
                     print()
@@ -1188,6 +1297,8 @@ def main() -> None:
             "  python tester.py fast-scan --format gaia --ports 20 --delay 0.1\n"
             "  python tester.py slow-scan --format gaia --ports 40\n"
             "  python tester.py accept-scan --format gaia --ports 10 --delay 0.1\n"
+            "  python tester.py lateral-movement --dests 10 --lateral-port 445\n"
+            "  python tester.py distributed-scan --sources 8 --target 10.0.0.100\n"
         ),
     )
 
@@ -1319,6 +1430,36 @@ def main() -> None:
         help="Delay intre log-uri in secunde (default: 0.1)",
     )
 
+    # --- distributed-scan (generare dinamica) ---
+    distributed_parser = subparsers.add_parser(
+        "distributed-scan",
+        help="Simuleaza Distributed Scan: N surse diferite -> aceeasi tinta",
+    )
+    add_common_scan_args(distributed_parser)
+    distributed_parser.add_argument(
+        "--sources",
+        type=int,
+        default=8,
+        help="Numar de surse unice care scanează tinta (default: 8)",
+    )
+    distributed_parser.add_argument(
+        "--target",
+        default="10.0.0.100",
+        help="IP-ul tinta (destinatie) al scanarii coordinate (default: 10.0.0.100)",
+    )
+    distributed_parser.add_argument(
+        "--target-port",
+        type=int,
+        default=80,
+        help="Portul vizat pe tinta (default: 80/HTTP)",
+    )
+    distributed_parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.1,
+        help="Delay intre log-uri in secunde (default: 0.1)",
+    )
+
     # --- replay ---
     replay_parser = subparsers.add_parser(
         "replay",
@@ -1433,6 +1574,17 @@ def main() -> None:
                 source_ip=args.source,
                 num_dests=args.dests,
                 lateral_port=args.lateral_port,
+                delay=args.delay,
+                fmt=args.format,
+            )
+        elif args.command == "distributed-scan":
+            simulate_distributed_scan(
+                sock=sock,
+                host=args.host,
+                port=args.port,
+                target_ip=args.target,
+                num_sources=args.sources,
+                target_port=args.target_port,
                 delay=args.delay,
                 fmt=args.format,
             )

@@ -164,6 +164,21 @@ pub enum ScanType {
     /// SignatureID SIEM: 1004. Severitate: 8 (Critical) — miscarea laterala
     /// indica un host compromis care incearca sa se extinda in retea.
     LateralMovement,
+
+    /// Scanare coordonata din surse multiple (#23) — N IP-uri sursa diferite
+    /// scanează aceeasi destinatie in aceeasi fereastra de timp.
+    ///
+    /// Perspectiva inversata fata de celelalte tipuri:
+    ///   Fast/Slow/Accept → 1 sursa × N porturi × 1 destinatie
+    ///   LateralMovement  → 1 sursa × orice port × N destinatii
+    ///   DistributedScan  → N surse × aceeasi tinta
+    ///
+    /// Pattern tipic de botnet sau atac coordonat: mai multi atacatori scanează
+    /// simultan acelasi server. Detectia se face din perspectiva TINTEI, nu a
+    /// atacatorului — DashMap-ul este indexat dupa dest_ip.
+    ///
+    /// SignatureID SIEM: 1005. Severitate: 7 (High) — atac coordonat.
+    DistributedScan,
 }
 
 /// Implementarea trait-ului Display pentru ScanType.
@@ -181,6 +196,7 @@ impl std::fmt::Display for ScanType {
             ScanType::Slow => write!(f, "Slow Scan"),
             ScanType::AcceptScan => write!(f, "Accept Scan"),
             ScanType::LateralMovement => write!(f, "Lateral Movement"),
+            ScanType::DistributedScan => write!(f, "Distributed Scan"),
         }
     }
 }
@@ -203,6 +219,9 @@ pub struct Alert {
     /// Destinatii unice contactate — populat doar pentru LateralMovement.
     /// Gol pentru celelalte tipuri de scan.
     pub unique_dests: Vec<IpAddr>,
+    /// Surse unice care au scanat aceeasi tinta — populat doar pentru DistributedScan.
+    /// Gol pentru celelalte tipuri de scan.
+    pub unique_sources: Vec<IpAddr>,
     pub timestamp: DateTime<Local>,
 }
 
@@ -213,6 +232,17 @@ pub struct Alert {
 /// DestHit tine minte destinatia accesata.
 struct DestHit {
     dest_ip: IpAddr,
+    seen_at: Instant,
+}
+
+/// Inregistrarea unui hit asupra unei tinte din perspectiva Distributed Scan (#23).
+///
+/// Indexat dupa dest_ip (cheia DashMap-ului). Tine minte CINE a lovit tinta si CAND.
+/// Perspectiva inversata: celelalte structuri sunt indexate dupa sursa,
+/// aceasta este indexata dupa destinatie.
+struct DistributedHit {
+    source_ip: IpAddr,
+    port: u16,
     seen_at: Instant,
 }
 
@@ -296,6 +326,15 @@ pub struct Detector {
     /// Cooldown alerte Lateral Movement per IP sursa.
     lateral_cooldowns: DashMap<IpAddr, Instant>,
 
+    /// Evidenta hit-urilor per destinatie (Distributed Scan #23).
+    /// Perspectiva inversata: cheia este dest_ip, nu source_ip.
+    /// Key: IP-ul destinatie | Value: lista de (source_ip, port, timestamp)
+    distributed_hits: DashMap<IpAddr, Vec<DistributedHit>>,
+
+    /// Cooldown alerte Distributed Scan per IP destinatie (tinta).
+    /// Indexat dupa dest_ip — cooldown-ul este al tintei, nu al atacatorului.
+    distributed_cooldowns: DashMap<IpAddr, Instant>,
+
     /// IP-uri si subretele excluse din detectie (parsate din config la constructie).
     /// Wrapat in ArcSwap pentru hot reload atomic la SIGHUP (#16).
     whitelist: ArcSwap<Vec<WhitelistEntry>>,
@@ -328,6 +367,8 @@ impl Detector {
             accept_cooldowns: DashMap::new(),
             lateral_hits: DashMap::new(),
             lateral_cooldowns: DashMap::new(),
+            distributed_hits: DashMap::new(),
+            distributed_cooldowns: DashMap::new(),
             last_seen: DashMap::new(),
             whitelist: ArcSwap::from_pointee(whitelist),
             config: ArcSwap::from_pointee(config),
@@ -522,6 +563,7 @@ impl Detector {
                     dest_ip: event.dest_ip,
                     unique_ports: ports,
                     unique_dests: Vec::new(),
+                    unique_sources: Vec::new(),
                     timestamp: Local::now(),
                 });
             }
@@ -540,6 +582,7 @@ impl Detector {
                     dest_ip: event.dest_ip,
                     unique_ports: ports,
                     unique_dests: Vec::new(),
+                    unique_sources: Vec::new(),
                     timestamp: Local::now(),
                 });
             }
@@ -568,6 +611,7 @@ impl Detector {
                     dest_ip: event.dest_ip,
                     unique_ports: ports,
                     unique_dests: Vec::new(),
+                    unique_sources: Vec::new(),
                     timestamp: Local::now(),
                 });
             }
@@ -615,9 +659,59 @@ impl Detector {
                                 dest_ip: Some(dest_ip),
                                 unique_ports: Vec::new(),
                                 unique_dests,
+                                unique_sources: Vec::new(),
                                 timestamp: Local::now(),
                             });
                         }
+                    }
+                }
+            }
+        }
+
+        // --- 7. Verificam Distributed Scan (#23) ---
+        //
+        // Perspectiva inversata: indexam dupa dest_ip, numaram surse unice.
+        // Conditii:
+        //   a) Distributed Scan este activat in config
+        //   b) dest_ip este prezent in eveniment
+        //
+        // Inregistram hit-ul indiferent de actiune (drop sau accept) —
+        // un atac coordonat poate genera ambele tipuri de trafic.
+        //
+        // Cooldown-ul este per dest_ip (tinta), nu per source_ip:
+        // daca 10 surse scanează tinta X, o singura alerta este generata
+        // pentru X, nu 10 alerte separate.
+        let ds_cfg = &cfg.distributed_scan;
+        if ds_cfg.enabled {
+            if let Some(dest_ip) = event.dest_ip {
+                // Inregistram hit-ul in distributed_hits pentru IP-ul destinatie.
+                {
+                    let mut hits = self.distributed_hits.entry(dest_ip).or_default();
+                    hits.push(DistributedHit { source_ip: ip, port: event.dest_port, seen_at: now });
+                    // Cap memorie: refolosim max_hits_per_ip ca limita.
+                    let max_hits = cfg.max_hits_per_ip;
+                    if hits.len() > max_hits {
+                        let overflow = hits.len() - max_hits;
+                        hits.drain(..overflow);
+                    }
+                }
+
+                // Colectam sursele unice si porturile in fereastra de timp.
+                let ds_window = Duration::from_secs(ds_cfg.time_window_secs);
+                if let Some((unique_srcs, targeted_ports)) = self.unique_sources_in_window(dest_ip, ds_window, now) {
+                    if unique_srcs.len() >= ds_cfg.unique_sources_threshold
+                        && !self.in_cooldown(&self.distributed_cooldowns, dest_ip)
+                    {
+                        self.distributed_cooldowns.insert(dest_ip, now);
+                        alerts.push(Alert {
+                            scan_type: ScanType::DistributedScan,
+                            source_ip: ip,
+                            dest_ip: Some(dest_ip),
+                            unique_ports: targeted_ports,
+                            unique_dests: Vec::new(),
+                            unique_sources: unique_srcs,
+                            timestamp: Local::now(),
+                        });
                     }
                 }
             }
@@ -705,6 +799,38 @@ impl Detector {
         }
     }
 
+    /// Returneaza sursele unice si porturile vizate pe o tinta in fereastra `window`.
+    ///
+    /// Analog cu `unique_dests_in_window`, dar opereaza pe `distributed_hits`
+    /// (indexat dupa dest_ip) si colecteaza IP-uri sursa unice + porturi vizate.
+    ///
+    /// Returneaza `None` daca nu exista date sau lista e goala.
+    /// Returneaza `Some((Vec<IpAddr>, Vec<u16>))` cu sursele unice si porturile.
+    fn unique_sources_in_window(
+        &self,
+        dest_ip: IpAddr,
+        window: Duration,
+        now: Instant,
+    ) -> Option<(Vec<IpAddr>, Vec<u16>)> {
+        let hits = self.distributed_hits.get(&dest_ip)?;
+        let mut sources: std::collections::HashSet<IpAddr> = std::collections::HashSet::new();
+        let mut ports: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        for hit in hits.iter() {
+            if now.saturating_duration_since(hit.seen_at) <= window {
+                sources.insert(hit.source_ip);
+                ports.insert(hit.port);
+            }
+        }
+        if sources.is_empty() {
+            None
+        } else {
+            let src_vec: Vec<IpAddr> = sources.into_iter().collect();
+            let mut port_vec: Vec<u16> = ports.into_iter().collect();
+            port_vec.sort_unstable();
+            Some((src_vec, port_vec))
+        }
+    }
+
     /// Verifica daca un IP este in perioada de cooldown pentru un tip de alerta.
     ///
     /// NOTA RUST - REFERINTE la DashMap:
@@ -781,6 +907,21 @@ impl Detector {
             self.lateral_hits.remove(ip);
         }
 
+        // --- Curatam distributed_hits (Distributed Scan #23) ---
+        // Indexat dupa dest_ip, nu source_ip — cleanup separat de celelalte.
+        let mut dist_empty: Vec<IpAddr> = Vec::new();
+        for mut entry in self.distributed_hits.iter_mut() {
+            entry.value_mut().retain(|hit| {
+                now.saturating_duration_since(hit.seen_at) <= max_age
+            });
+            if entry.value().is_empty() {
+                dist_empty.push(*entry.key());
+            }
+        }
+        for ip in &dist_empty {
+            self.distributed_hits.remove(ip);
+        }
+
         // --- Sincronizam last_seen ---
         //
         // Eliminam din last_seen IP-urile care nu mai au date in NICIUN map.
@@ -809,6 +950,8 @@ impl Detector {
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
         self.lateral_cooldowns
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
+        self.distributed_cooldowns
+            .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
     }
 
     /// Returneaza numarul total de IP-uri urmarite in memorie (drop + accept).
@@ -825,7 +968,8 @@ impl Detector {
 mod tests {
     use super::*;
     use crate::config::{
-        AcceptScanConfig, DetectionConfig, FastScanConfig, LateralMovementConfig, SlowScanConfig,
+        AcceptScanConfig, DetectionConfig, DistributedScanConfig, FastScanConfig,
+        LateralMovementConfig, SlowScanConfig,
     };
 
     /// Creeaza o configuratie de test cu praguri mici pentru teste rapide.
@@ -855,6 +999,13 @@ mod tests {
                 unique_dest_threshold: 3,
                 time_window_secs: 10,
             },
+            // Distributed Scan dezactivat implicit in test_config.
+            // Testele specifice folosesc distributed_config().
+            distributed_scan: DistributedScanConfig {
+                enabled: false,
+                unique_sources_threshold: 3,
+                time_window_secs: 10,
+            },
         }
     }
 
@@ -880,6 +1031,11 @@ mod tests {
             lateral_movement: LateralMovementConfig {
                 enabled: true,
                 unique_dest_threshold: 3,
+                time_window_secs: 10,
+            },
+            distributed_scan: DistributedScanConfig {
+                enabled: false,
+                unique_sources_threshold: 3,
                 time_window_secs: 10,
             },
         }
@@ -1169,6 +1325,11 @@ mod tests {
                 unique_dest_threshold: 3,
                 time_window_secs: 10,
             },
+            distributed_scan: DistributedScanConfig {
+                enabled: false,
+                unique_sources_threshold: 3,
+                time_window_secs: 10,
+            },
         }
     }
 
@@ -1415,6 +1576,205 @@ mod tests {
                 "Lateral Movement dezactivat nu trebuie sa genereze alerte"
             );
         }
+    }
+
+    // =========================================================================
+    // Teste Distributed Scan (#23)
+    // =========================================================================
+
+    /// Creeaza o configuratie cu Distributed Scan activat (prag 3 surse in 10s).
+    /// Fast/Slow/Accept au praguri ridicate pentru a nu se declansa in teste.
+    fn distributed_config() -> DetectionConfig {
+        DetectionConfig {
+            alert_cooldown_secs: 5,
+            max_hits_per_ip: 1_000,
+            max_tracked_ips: 10_000,
+            whitelist: Vec::new(),
+            fast_scan: FastScanConfig {
+                port_threshold: 100,
+                time_window_secs: 10,
+            },
+            slow_scan: SlowScanConfig {
+                port_threshold: 200,
+                time_window_mins: 1,
+            },
+            accept_scan: AcceptScanConfig {
+                port_threshold: 100,
+                time_window_secs: 10,
+            },
+            lateral_movement: LateralMovementConfig {
+                enabled: false,
+                unique_dest_threshold: 100,
+                time_window_secs: 10,
+            },
+            distributed_scan: DistributedScanConfig {
+                enabled: true,
+                unique_sources_threshold: 3,
+                time_window_secs: 10,
+            },
+        }
+    }
+
+    /// Creeaza un eveniment drop cu sursa si destinatie explicite (pentru Distributed Scan).
+    fn make_distributed_event(src_ip: &str, dest_ip: &str, port: u16) -> LogEvent {
+        LogEvent {
+            source_ip: src_ip.parse().unwrap(),
+            dest_ip: Some(dest_ip.parse().unwrap()),
+            dest_port: port,
+            protocol: "tcp".to_string(),
+            action: "drop".to_string(),
+            raw_log: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_distributed_scan_alert() {
+        // 3 surse diferite → aceeasi tinta (10.0.0.100) = egal cu pragul -> alerta.
+        let detector = Detector::new(distributed_config());
+
+        let sources = ["10.0.1.1", "10.0.1.2", "10.0.1.3"];
+        let target = "10.0.0.100";
+        let mut last_alerts = vec![];
+        for src in &sources {
+            last_alerts = detector.process_event(&make_distributed_event(src, target, 80));
+        }
+
+        assert_eq!(last_alerts.len(), 1);
+        assert!(
+            matches!(last_alerts[0].scan_type, ScanType::DistributedScan),
+            "Tipul alertei trebuie sa fie DistributedScan"
+        );
+        assert_eq!(
+            last_alerts[0].unique_sources.len(),
+            3,
+            "Trebuie sa contina exact 3 surse unice"
+        );
+        assert_eq!(
+            last_alerts[0].dest_ip,
+            Some(target.parse().unwrap()),
+            "dest_ip trebuie sa fie tinta scanarii"
+        );
+    }
+
+    #[test]
+    fn test_distributed_scan_below_threshold_no_alert() {
+        // 2 surse < prag 3 -> fara alerta.
+        let detector = Detector::new(distributed_config());
+
+        for src in &["10.0.1.1", "10.0.1.2"] {
+            let alerts = detector.process_event(&make_distributed_event(src, "10.0.0.100", 80));
+            assert!(
+                alerts.iter().all(|a| !matches!(a.scan_type, ScanType::DistributedScan)),
+                "Nu trebuie alerta sub prag ({} surse)", src
+            );
+        }
+    }
+
+    #[test]
+    fn test_distributed_scan_different_targets_independent() {
+        // Surse diferite catre tinte DIFERITE nu se cumuleaza.
+        let detector = Detector::new(distributed_config());
+
+        // 2 surse → tinta A
+        detector.process_event(&make_distributed_event("10.0.1.1", "10.0.0.100", 80));
+        detector.process_event(&make_distributed_event("10.0.1.2", "10.0.0.100", 80));
+
+        // 1 sursa → tinta B (diferita)
+        let alerts = detector.process_event(&make_distributed_event("10.0.1.3", "10.0.0.200", 80));
+        // Tinta A are 2 surse (sub prag), tinta B are 1 sursa (sub prag).
+        let dist: Vec<_> = alerts.iter()
+            .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
+            .collect();
+        assert!(
+            dist.is_empty(),
+            "Tinte diferite nu se cumuleaza — fara alerta"
+        );
+    }
+
+    #[test]
+    fn test_distributed_scan_cooldown() {
+        // Dupa prima alerta, cooldown previne alerta repetata.
+        let detector = Detector::new(distributed_config());
+
+        // Prima alerta la a 3-a sursa.
+        for src in &["10.0.1.1", "10.0.1.2", "10.0.1.3"] {
+            detector.process_event(&make_distributed_event(src, "10.0.0.100", 80));
+        }
+
+        // A 4-a sursa — cooldown activ, nu trebuie alerta.
+        let alerts = detector.process_event(&make_distributed_event("10.0.1.4", "10.0.0.100", 80));
+        let dist: Vec<_> = alerts.iter()
+            .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
+            .collect();
+        assert!(
+            dist.is_empty(),
+            "Cooldown trebuie sa previna alerta repetata Distributed Scan"
+        );
+    }
+
+    #[test]
+    fn test_distributed_scan_disabled_no_alert() {
+        // Cand distributed_scan.enabled = false, nicio alerta nu trebuie generata.
+        let detector = Detector::new(test_config()); // enabled: false
+
+        for src in &["10.0.1.1", "10.0.1.2", "10.0.1.3"] {
+            let alerts = detector.process_event(&make_distributed_event(src, "10.0.0.100", 80));
+            let dist: Vec<_> = alerts.iter()
+                .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
+                .collect();
+            assert!(
+                dist.is_empty(),
+                "Distributed Scan dezactivat nu trebuie sa genereze alerte"
+            );
+        }
+    }
+
+    #[test]
+    fn test_distributed_scan_both_actions() {
+        // Distributed Scan detecteaza atat drop cat si accept.
+        let detector = Detector::new(distributed_config());
+
+        // Sursa 1: drop
+        detector.process_event(&make_distributed_event("10.0.1.1", "10.0.0.100", 80));
+        // Sursa 2: accept
+        detector.process_event(&LogEvent {
+            source_ip: "10.0.1.2".parse().unwrap(),
+            dest_ip: Some("10.0.0.100".parse().unwrap()),
+            dest_port: 80,
+            protocol: "tcp".to_string(),
+            action: "accept".to_string(),
+            raw_log: String::new(),
+        });
+        // Sursa 3: drop → ar trebui sa declanseze alerta
+        let alerts = detector.process_event(&make_distributed_event("10.0.1.3", "10.0.0.100", 80));
+
+        let dist: Vec<_> = alerts.iter()
+            .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
+            .collect();
+        assert_eq!(
+            dist.len(), 1,
+            "Distributed Scan trebuie sa detecteze mix de drop si accept"
+        );
+    }
+
+    #[test]
+    fn test_distributed_scan_ports_collected() {
+        // Verificam ca porturile vizate sunt colectate corect in alerta.
+        let detector = Detector::new(distributed_config());
+
+        detector.process_event(&make_distributed_event("10.0.1.1", "10.0.0.100", 22));
+        detector.process_event(&make_distributed_event("10.0.1.2", "10.0.0.100", 80));
+        let alerts = detector.process_event(&make_distributed_event("10.0.1.3", "10.0.0.100", 443));
+
+        let dist: Vec<_> = alerts.iter()
+            .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
+            .collect();
+        assert_eq!(dist.len(), 1);
+        // Porturile vizate: 22, 80, 443.
+        assert_eq!(dist[0].unique_ports.len(), 3);
+        assert!(dist[0].unique_ports.contains(&22));
+        assert!(dist[0].unique_ports.contains(&80));
+        assert!(dist[0].unique_ports.contains(&443));
     }
 
     #[test]

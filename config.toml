@@ -104,6 +104,19 @@ unique_dest_threshold = 5
 # Fereastra de timp in secunde in care se numara destinatiile.
 time_window_secs = 60
 
+[detection.distributed_scan]
+# Detectie Distributed Scan (#23): N surse diferite scanează aceeasi tinta
+# in aceeasi fereastra de timp. Perspectiva inversata — detectia se face
+# din perspectiva TINTEI, nu a atacatorului.
+# Pattern tipic de botnet sau atac coordonat: mai multi atacatori scanează
+# simultan acelasi server/serviciu.
+# Detecteaza atat evenimente drop cat si accept.
+enabled = false
+# Numar de surse unice care declanseaza alerta.
+unique_sources_threshold = 5
+# Fereastra de timp in secunde in care se numara sursele.
+time_window_secs = 60
+
 # -----------------------------------------------------------------------------
 # Configurare alerte
 # -----------------------------------------------------------------------------

@@ -478,6 +478,17 @@ impl Alerter {
                 ),
                 8u8,
             ),
+            ScanType::DistributedScan => (
+                "1005",
+                "Distributed Port Scan Detected",
+                format!(
+                    "Distributed Scan detectat: {} surse unice → tinta {} in {} secunde",
+                    alert.unique_sources.len(),
+                    alert.dest_ip.map(|ip| ip.to_string()).unwrap_or_else(|| "N/A".to_string()),
+                    det.distributed_scan.time_window_secs,
+                ),
+                7u8,
+            ),
         };
 
         // Pentru Lateral Movement, campul cs1 contine destinatiile unice (IP-uri),
@@ -491,6 +502,15 @@ impl Alerter {
                     .collect::<Vec<_>>()
                     .join(",");
                 ("ContactedHosts", dest_list, alert.unique_dests.len())
+            }
+            ScanType::DistributedScan => {
+                let src_list = alert
+                    .unique_sources
+                    .iter()
+                    .map(|ip| ip.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                ("AttackingSources", src_list, alert.unique_sources.len())
             }
             _ => {
                 let port_list = alert
@@ -619,9 +639,31 @@ impl Alerter {
         let alert_cfg = self.config.load();
         let cfg = &alert_cfg.email;
 
-        // Pentru Lateral Movement subject-ul si lista arata diferit:
-        // afisam destinatii unice in loc de porturi.
+        // Pentru Lateral Movement si Distributed Scan, subject-ul si lista arata diferit.
         let (subject, item_count, list_display) = match alert.scan_type {
+            ScanType::DistributedScan => {
+                let count = alert.unique_sources.len();
+                let list = alert
+                    .unique_sources
+                    .iter()
+                    .take(30)
+                    .map(|ip| ip.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let list = if count > 30 {
+                    format!("{} + {} more", list, count - 30)
+                } else {
+                    list
+                };
+                let target = alert.dest_ip
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "N/A".to_string());
+                let subj = format!(
+                    "\u{1F534} [{}][SCANARE COORDONATA] IDS-RS {} surse → {}",
+                    alert.scan_type, count, target
+                );
+                (subj, count, list)
+            }
             ScanType::LateralMovement => {
                 let count = alert.unique_dests.len();
                 let list = alert
@@ -674,6 +716,7 @@ impl Alerter {
             ScanType::Slow => "MEDIE",
             ScanType::AcceptScan => "MEDIE-MICA",
             ScanType::LateralMovement => "CRITICA",
+            ScanType::DistributedScan => "RIDICATA",
         };
 
         let dest_ip_display = match alert.dest_ip {

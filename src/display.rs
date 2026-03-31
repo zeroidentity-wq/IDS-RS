@@ -210,20 +210,20 @@ pub fn log_error(message: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Functiile de alerta - cel mai inalt nivel de vizibilitate
-//
-// Alertele sunt cele mai importante mesaje - trebuie sa fie
-// imediat vizibile in stream-ul de log. Folosim:
-//   - ROSU cu fundal pentru Fast Scan (urgenta ridicata)
-//   - GALBEN cu fundal pentru Slow Scan (urgenta medie)
-//   - MAGENTA cu fundal pentru Accept Scan (urgenta medie-mica)
-//   - Separatoare colorate si simboluri ▶▶▶ pentru vizibilitate maxima
-//   - Lista de porturi (trunchiate la 25 pentru lizibilitate)
-//
-// NOTA RUST - PATTERN MATCHING cu `match`:
-// Match pe enum este exhaustiv - daca adaugi o noua varianta
-// la ScanType, compilatorul te obliga sa o tratezi AICI.
-// Nu poti "uita" un caz - eroare la compilare, nu la runtime.
+/// Functiile de alerta - cel mai inalt nivel de vizibilitate
+///
+/// Alertele sunt cele mai importante mesaje - trebuie sa fie
+/// imediat vizibile in stream-ul de log. Folosim:
+///   - ROSU cu fundal pentru Fast Scan (urgenta ridicata)
+///   - GALBEN cu fundal pentru Slow Scan (urgenta medie)
+///   - MAGENTA cu fundal pentru Accept Scan (urgenta medie-mica)
+///   - Separatoare colorate si simboluri ▶▶▶ pentru vizibilitate maxima
+///   - Lista de porturi (trunchiate la 25 pentru lizibilitate)
+///
+/// NOTA RUST - PATTERN MATCHING cu `match`:
+/// Match pe enum este exhaustiv - daca adaugi o noua varianta
+/// la ScanType, compilatorul te obliga sa o tratezi AICI.
+/// Nu poti "uita" un caz - eroare la compilare, nu la runtime.
 // ---------------------------------------------------------------------------
 
 /// Afiseaza o alerta de securitate cu formatare vizual distincta.
@@ -331,6 +331,41 @@ pub fn log_alert(alert: &Alert, hostnames: &HashMap<IpAddr, String>, subnets: &[
             );
             println!("  Destinatii: {}{}", dest_list, dest_suffix);
             println!("{}", "─".repeat(SEPARATOR_WIDTH).bright_red());
+            println!();
+        }
+        // Distributed Scan: cyan — vizual distinct, indica atac coordonat din surse multiple.
+        // Afisam sursele unice si porturile vizate pe tinta.
+        ScanType::DistributedScan => {
+            let src_list: String = alert
+                .unique_sources
+                .iter()
+                .take(25)
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let src_suffix = if alert.unique_sources.len() > 25 {
+                format!(" ... (+{} more)", alert.unique_sources.len() - 25)
+            } else {
+                String::new()
+            };
+            let target_display = match alert.dest_ip {
+                Some(ip) => format_ip(&ip, hostnames, subnets),
+                None => "N/A".to_string(),
+            };
+            println!();
+            println!("{}", "─".repeat(SEPARATOR_WIDTH).cyan());
+            println!(
+                "{} {} {} [DISTRIBUTED SCAN] {} surse → {} | Porturi: {}",
+                ts.bold().white(),
+                arrows.cyan().bold(),
+                " ALERT ".on_cyan().black().bold(),
+                alert.unique_sources.len().to_string().cyan().bold(),
+                format!("[Target: {}]", target_display).cyan().bold(),
+                alert.unique_ports.len().to_string().cyan().bold()
+            );
+            println!("  Surse:   {}{}", src_list, src_suffix);
+            println!("  Porturi: {}{}", port_list, suffix);
+            println!("{}", "─".repeat(SEPARATOR_WIDTH).cyan());
             println!();
         }
     }
