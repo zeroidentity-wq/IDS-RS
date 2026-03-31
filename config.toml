@@ -130,11 +130,11 @@ port = 514
 [alerting.email]
 # Trimite alerte prin email catre echipa IT/Security.
 enabled = true
-smtp_server = "smtp.example.com"
-smtp_port = 25
+smtp_server = "127.0.0.1"
+smtp_port = 1025
 smtp_tls = false
-from = "ids-rs@example.com"
-to = ["it-security@example.com"]
+from = "ids-rs@test.local"
+to = ["security@test.local"]
 username = ""
 password = ""
 # Footer personalizabil pentru email-urile de alerta.
