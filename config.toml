@@ -159,3 +159,17 @@ interval_secs = 60
 # Varsta maxima (secunde) a inregistrarilor din memorie. Dupa acest interval,
 # datele de port-hit pentru un IP sunt sterse, eliberand memoria.
 max_entry_age_secs = 600
+
+# -----------------------------------------------------------------------------
+# Web Dashboard (#25) — server HTTP embedded, read-only
+# -----------------------------------------------------------------------------
+
+[web_dashboard]
+# Activare dashboard web cu graf D3.js al retelei. Implicit: false.
+enabled = true
+# Portul HTTP pe care asculta dashboard-ul.
+port = 8080
+# Adresa de bind. "127.0.0.1" = doar local (securitate). "0.0.0.0" = toate interfetele.
+bind = "127.0.0.1"
+# Numarul maxim de alerte pastrate in buffer-ul circular.
+max_alerts = 1000

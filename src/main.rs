@@ -53,14 +53,15 @@ mod config;
 mod detector;
 mod display;
 mod parser;
+mod web;
 
 use alerter::Alerter;
 use arc_swap::ArcSwap;
 use config::{AppConfig, SubnetEntry};
 use detector::Detector;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
@@ -270,6 +271,31 @@ async fn main() -> anyhow::Result<()> {
     )?);
 
     display::log_info("Detector initializat (DashMap thread-safe)");
+
+    // =========================================================================
+    // 4b. ALERT BUFFER + WEB DASHBOARD (#25)
+    // =========================================================================
+    //
+    // Buffer circular de alerte partajat intre main loop (producator) si
+    // web server (consumator read-only). Arc<Mutex<VecDeque>> — lock-ul
+    // este tinut doar cateva microsecunde per push/read.
+    //
+    // Buffer-ul este creat INTOTDEAUNA (chiar daca dashboard-ul e dezactivat)
+    // pentru a permite activarea via SIGHUP fara pierdere de alerte.
+    //
+    let alert_buffer: web::AlertBuffer = Arc::new(Mutex::new(VecDeque::new()));
+
+    if config.web_dashboard.enabled {
+        let web_alerts = Arc::clone(&alert_buffer);
+        match web::start_web_server(&config.web_dashboard, web_alerts).await {
+            Ok(_handle) => {}
+            Err(e) => {
+                display::log_warning(&format!(
+                    "Web dashboard nu a pornit: {:#}", e
+                ));
+            }
+        }
+    }
 
     // =========================================================================
     // 5. TASK CLEANUP PERIODIC (Background Async Task)
@@ -498,6 +524,21 @@ async fn main() -> anyhow::Result<()> {
                         hostnames.store(Arc::new(new_hostnames));
                         subnets.store(Arc::new(new_subnets));
 
+                        // Web dashboard: bind/port necesita restart.
+                        if new_config.web_dashboard.enabled
+                            && (new_config.web_dashboard.bind != config.web_dashboard.bind
+                                || new_config.web_dashboard.port != config.web_dashboard.port)
+                        {
+                            display::log_warning(
+                                "SIGHUP: web_dashboard.bind/port modificate — necesita restart, ignorat"
+                            );
+                        }
+                        if new_config.web_dashboard.enabled && !config.web_dashboard.enabled {
+                            display::log_warning(
+                                "SIGHUP: web_dashboard activat — necesita restart pentru pornire server"
+                            );
+                        }
+
                         // Rate limiter: recream daca s-a schimbat.
                         if new_config.network.udp_rate_limit != config.network.udp_rate_limit
                             || new_config.network.udp_burst_size != config.network.udp_burst_size
@@ -615,6 +656,18 @@ async fn main() -> anyhow::Result<()> {
                                 for alert in alerts {
                                     // Afisam alerta in terminal (colorat, cu hostname-uri).
                                     display::log_alert(&alert, &hostnames.load(), &subnets.load());
+
+                                    // Adaugam alerta in buffer-ul web dashboard (#25).
+                                    // Lock tinut doar cateva microsecunde — eliberat inainte de .await.
+                                    {
+                                        let mut buf = alert_buffer.lock()
+                                            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                                        buf.push_back(alert.clone());
+                                        let max = config.web_dashboard.max_alerts;
+                                        while buf.len() > max {
+                                            buf.pop_front();
+                                        }
+                                    }
 
                                     // Trimitem alerta catre SIEM si email (async).
                                     alerter.send_alert(&alert).await;

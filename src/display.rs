@@ -103,6 +103,12 @@ pub fn print_banner(config: &AppConfig) {
         "OFF".to_string()
     };
 
+    let web_label = if config.web_dashboard.enabled {
+        format!("http://{}:{}", config.web_dashboard.bind, config.web_dashboard.port)
+    } else {
+        "OFF".to_string()
+    };
+
     let siem_line = format!(
         "  SIEM:   {:<14} Email:  {}",
         siem_label, email_label
@@ -110,6 +116,12 @@ pub fn print_banner(config: &AppConfig) {
     println!(
         "{}",
         format!("║{:<width$}║", siem_line, width = inner_width).cyan()
+    );
+
+    let web_line = format!("  Web:    {}", web_label);
+    println!(
+        "{}",
+        format!("║{:<width$}║", web_line, width = inner_width).cyan()
     );
 
     // Praguri de detectie.

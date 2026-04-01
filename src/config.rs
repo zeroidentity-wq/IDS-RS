@@ -55,6 +55,11 @@ pub struct AppConfig {
     pub detection: DetectionConfig,
     pub alerting: AlertingConfig,
     pub cleanup: CleanupConfig,
+
+    /// Configurare Web Dashboard (#25). Retrocompatibil: daca lipseste din
+    /// config.toml, dashboard-ul este dezactivat (enabled = false).
+    #[serde(default = "default_web_dashboard")]
+    pub web_dashboard: WebDashboardConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -334,6 +339,47 @@ pub struct CleanupConfig {
     pub max_entry_age_secs: u64,
 }
 
+/// Configurare Web Dashboard (#25) — server HTTP embedded, read-only.
+///
+/// Serveste o pagina HTML cu graf D3.js force-directed al retelei si
+/// endpoint-uri JSON pentru alerte si graf. Task tokio separat, fara
+/// impact asupra detectiei.
+///
+/// Valori implicite: dezactivat, port 8080, bind 127.0.0.1 (doar local),
+/// 1000 alerte in buffer-ul circular.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebDashboardConfig {
+    /// Activare/dezactivare dashboard web. Implicit: false (retrocompatibil).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Portul HTTP pe care asculta dashboard-ul. Implicit: 8080.
+    #[serde(default = "default_web_port")]
+    pub port: u16,
+
+    /// Adresa de bind. "127.0.0.1" = doar local (securitate).
+    /// "0.0.0.0" = toate interfetele (accesibil din retea).
+    #[serde(default = "default_web_bind")]
+    pub bind: String,
+
+    /// Numarul maxim de alerte pastrate in buffer-ul circular. Implicit: 1000.
+    #[serde(default = "default_web_max_alerts")]
+    pub max_alerts: usize,
+}
+
+fn default_web_port() -> u16 { 8080 }
+fn default_web_bind() -> String { "127.0.0.1".to_string() }
+fn default_web_max_alerts() -> usize { 1000 }
+
+fn default_web_dashboard() -> WebDashboardConfig {
+    WebDashboardConfig {
+        enabled: false,
+        port: default_web_port(),
+        bind: default_web_bind(),
+        max_alerts: default_web_max_alerts(),
+    }
+}
+
 impl AppConfig {
     /// Incarca si parseaza fisierul de configurare TOML.
     ///
@@ -601,6 +647,26 @@ impl AppConfig {
                 self.detection.slow_scan.time_window_mins,
                 slow_secs
             ));
+        }
+
+        // --- Web Dashboard ---
+
+        if self.web_dashboard.enabled {
+            if self.web_dashboard.port == 0 {
+                errors.push(
+                    "web_dashboard.port = 0 este invalid".to_string(),
+                );
+            }
+            if self.web_dashboard.bind.is_empty() {
+                errors.push(
+                    "web_dashboard.bind nu poate fi gol cand dashboard-ul este activat".to_string(),
+                );
+            }
+            if self.web_dashboard.max_alerts == 0 {
+                errors.push(
+                    "web_dashboard.max_alerts = 0: nicio alerta nu va fi stocata".to_string(),
+                );
+            }
         }
 
         // --- Alerting: SIEM ---

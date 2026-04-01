@@ -128,7 +128,7 @@ impl WhitelistEntry {
 ///       Move { x: i32, y: i32 },    // cu struct inline
 ///       Write(String),              // cu un singur camp
 ///   }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum ScanType {
     // Nota: LateralMovement adaugat ca varianta noua (#22).
     // Match-urile existente in alerter.rs si display.rs sunt exhaustive —
@@ -206,7 +206,7 @@ impl std::fmt::Display for ScanType {
 /// NOTA RUST: Aceasta structura este OWNED - cand este creata, toate
 /// datele sunt copiate/mutate in ea. Poate fi transmisa liber intre
 /// functii si thread-uri fara grija ca datele originale se schimba.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Alert {
     pub scan_type: ScanType,
     pub source_ip: IpAddr,

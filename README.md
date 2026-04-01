@@ -52,6 +52,8 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Hostname mapping static (`[network.hostnames]`) — afisare in CLI, SIEM (shost=/dhost=) si email
 - [x] Subnet mapping static (`[network.subnets]`) — CIDR→locatie (etaj, cladire, zona) in CLI, SIEM (cs2/cs3) si email
 - [x] Lateral Movement detection — comportament N destinatii unice, SigID 1004, severitate CEF 8
+- [x] Distributed Scan detection — N surse unice catre aceeasi tinta, SigID 1005, severitate CEF 7
+- [x] Web Dashboard (#25) — server HTTP embedded cu graf D3.js force-directed, API JSON, auto-refresh 5s
 - [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
 - [x] Teste unitare: 66 passed (parseri, detector, alerter, whitelist, lateral movement, distributed scan)
 
@@ -67,7 +69,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 ### Posibile implementari
 
 #### Detectii noi
-- [ ] Brute Force detection — accept scan repetate pe porturi critice (22, 3389, 445) de la acelasi IP (#25)
+- [ ] Brute Force detection — accept scan repetate pe porturi critice (22, 3389, 445) de la acelasi IP (#39)
 - [ ] Port Knock detection — secvente de porturi accesate in ordine specifica (#26)
 - [ ] Exfiltration detection — volume mari de trafic outbound neobisnuit de la IP intern (#27)
 - [ ] Supresie/deduplicare alerte — cooldown per IP per tip alerta, previne flood de emailuri (#28)
@@ -84,7 +86,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [ ] Threshold dinamic / baseline — prag adaptat la traficul normal al retelei (#35)
 
 #### Raportare / Vizibilitate
-- [ ] Dashboard HTML generat local — refreshat periodic cu top atacatori si statistici (#36)
+- [x] Web Dashboard embedded cu graf D3.js force-directed (#25/#36)
 - [ ] Export CSV/JSON per sesiune — analiza forensica offline dupa incident (#37)
 - [ ] TLS pentru trimitere SIEM — traficul de alertare nu mai e plain UDP (#38)
 
@@ -2076,7 +2078,7 @@ Aceasta permite ierarhii: `/16` pentru cladire, `/24` pentru etaj.
 
 - [ ] **Alert fallback la fisier local** — daca SMTP-ul intern sau SIEM-ul este unreachable, alertele se pierd silentios. *Mitigare: scriere alerte intr-un fisier local ca fallback.*
 
-- [ ] **#25 — Web Dashboard (harta retea)** — server HTTP embedded in IDS-RS (task tokio separat),
+- [x] **#25 — Web Dashboard (harta retea)** — server HTTP embedded in IDS-RS (task tokio separat),
   read-only, fara impact asupra detectiei. Arhitectura:
   - `GET /` → dashboard HTML cu graf D3.js force-directed
   - `GET /api/alerts` → JSON cu ultimele N alerte din memorie

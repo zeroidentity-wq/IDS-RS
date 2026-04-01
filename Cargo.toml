@@ -47,7 +47,8 @@ dashmap = "6"
 lettre = { version = "0.11", features = ["tokio1-native-tls"] }
 
 # Lucru cu date si ore - Local::now(), formatare timestamps.
-chrono = "0.4"
+# "serde" = permite serializarea DateTime in JSON (necesar pt web dashboard).
+chrono = { version = "0.4", features = ["serde"] }
 
 # Expresii regulate compilate - folosite pentru parsing log-uri Gaia.
 regex = "1"
@@ -59,3 +60,12 @@ anyhow = "1"
 # Atomic swap pentru Arc - permite inlocuirea atomica a config-ului partajat
 # intre task-uri async fara lock. Folosit pentru hot reload config la SIGHUP.
 arc-swap = "1"
+
+# Web framework async bazat pe tokio - server HTTP pentru dashboard-ul web (#25).
+# Lightweight, tokio-native, zero-copy routing. Folosit pentru servirea paginii
+# HTML cu graf D3.js si endpoint-urile JSON (/api/alerts, /api/graph).
+axum = "0.8"
+
+# Serializare JSON - folosit de endpoint-urile API ale dashboard-ului web.
+# Dependenta tranzitiva existenta (via lettre/toml), declarata explicit pentru uz direct.
+serde_json = "1"
