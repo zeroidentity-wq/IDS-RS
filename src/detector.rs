@@ -39,13 +39,13 @@
 //
 // =============================================================================
 
-use crate::config::DetectionConfig;
+use crate::config::{DetectionConfig, DynamicThresholdConfig};
 use crate::parser::LogEvent;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Local};
 use dashmap::DashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // =============================================================================
@@ -284,6 +284,90 @@ struct PortHit {
 ///   - C++:  Nu exista echivalent standard - trebuie implementat manual
 ///   - Rust: DashMap cu garantii COMPILE-TIME de thread safety
 ///
+// =============================================================================
+// EWMA Baseline — Praguri dinamice (#35)
+// =============================================================================
+//
+// EWMA (Exponentially Weighted Moving Average) urmareste media si varianta
+// numarului maxim de porturi unice per IP per fereastra de timp.
+//
+// La fiecare ciclu de cleanup (~60s), esantionam starea curenta:
+//   - Pentru fiecare IP urmarit, numaram porturile unice in fereastra Fast/Slow/Accept.
+//   - Luam maximul per scan type (cel mai "zgomotos" IP legitim din retea).
+//   - Actualizam EWMA cu acest maxim.
+//
+// Formula EWMA:
+//   mean    = mean + alpha * (value - mean)
+//   variance = (1 - alpha) * (variance + alpha * delta^2)
+//
+// Pragul efectiv: mean + multiplier * stddev, clamped in [static*min_ratio, static*max_ratio].
+// Cost memorie: 24 bytes per scan type (3 x f64).
+
+/// Starea EWMA pentru un singur tip de scan.
+struct BaselineEwma {
+    mean: f64,
+    variance: f64,
+    samples: u64,
+}
+
+impl BaselineEwma {
+    fn new() -> Self {
+        Self { mean: 0.0, variance: 0.0, samples: 0 }
+    }
+
+    /// Actualizeaza EWMA cu o observatie noua.
+    fn update(&mut self, value: f64, alpha: f64) {
+        self.samples += 1;
+        if self.samples == 1 {
+            self.mean = value;
+            self.variance = 0.0;
+            return;
+        }
+        let delta = value - self.mean;
+        self.mean += alpha * delta;
+        self.variance = (1.0 - alpha) * (self.variance + alpha * delta * delta);
+    }
+
+    fn stddev(&self) -> f64 {
+        self.variance.sqrt()
+    }
+}
+
+/// Stare baseline pentru toate tipurile de scan cu praguri dinamice.
+struct BaselineState {
+    fast_scan: BaselineEwma,
+    slow_scan: BaselineEwma,
+    accept_scan: BaselineEwma,
+}
+
+impl BaselineState {
+    fn new() -> Self {
+        Self {
+            fast_scan: BaselineEwma::new(),
+            slow_scan: BaselineEwma::new(),
+            accept_scan: BaselineEwma::new(),
+        }
+    }
+}
+
+/// Calculeaza pragul efectiv pentru un tip de scan, tinand cont de baseline dinamic.
+///
+/// Daca pragurile dinamice sunt dezactivate sau nu s-au colectat destule esantioane,
+/// returneaza pragul static din config.
+fn effective_threshold_value(
+    static_threshold: usize,
+    baseline: &BaselineEwma,
+    dt: &DynamicThresholdConfig,
+) -> usize {
+    if !dt.enabled || baseline.samples < dt.min_samples {
+        return static_threshold;
+    }
+    let dynamic = baseline.mean + dt.sensitivity_multiplier * baseline.stddev();
+    let floor = (static_threshold as f64 * dt.min_threshold_ratio).ceil() as usize;
+    let ceiling = (static_threshold as f64 * dt.max_threshold_ratio).floor() as usize;
+    (dynamic.ceil() as usize).clamp(floor.max(1), ceiling.max(1))
+}
+
 pub struct Detector {
     /// Evidenta porturilor BLOCATE (drop) accesate per IP sursa.
     /// Alimenteaza detectia Fast Scan si Slow Scan.
@@ -344,6 +428,11 @@ pub struct Detector {
     /// `ArcSwap::load()` returneaza un `Guard` (pointer atomic, lock-free) —
     /// cost: un load atomic per acces, neglijabil la scala UDP processing.
     config: ArcSwap<DetectionConfig>,
+
+    /// Starea baseline pentru praguri dinamice (#35).
+    /// Protejat de Mutex — accesat doar in cleanup (~60s) pentru write
+    /// si in process_event pentru read (lock < 1μs, doar copie 3 floats).
+    baseline: Mutex<BaselineState>,
 }
 
 impl Detector {
@@ -372,6 +461,7 @@ impl Detector {
             last_seen: DashMap::new(),
             whitelist: ArcSwap::from_pointee(whitelist),
             config: ArcSwap::from_pointee(config),
+            baseline: Mutex::new(BaselineState::new()),
         }
     }
 
@@ -436,6 +526,19 @@ impl Detector {
         if self.is_whitelisted(&ip) {
             return Vec::new();
         }
+
+        // --- 0b. Praguri efective (statice sau dinamice #35) ---
+        // Lock pe baseline < 1μs — doar citire a 3 floats per scan type.
+        let (fast_threshold, slow_threshold, accept_threshold) = {
+            let bl = self.baseline.lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dt = &cfg.dynamic_threshold;
+            (
+                effective_threshold_value(cfg.fast_scan.port_threshold, &bl.fast_scan, dt),
+                effective_threshold_value(cfg.slow_scan.port_threshold, &bl.slow_scan, dt),
+                effective_threshold_value(cfg.accept_scan.port_threshold, &bl.accept_scan, dt),
+            )
+        };
 
         // --- 1. Limitare globala IP-uri (anti-IP-spoofing flood) ---
         //
@@ -553,7 +656,7 @@ impl Detector {
         // ceea ce ne permite sa o refolosim pentru Accept Scan (pasul 5) cu `accept_hits`.
         let fast_window = Duration::from_secs(cfg.fast_scan.time_window_secs);
         if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, fast_window, now) {
-            if ports.len() >= cfg.fast_scan.port_threshold
+            if ports.len() >= fast_threshold
                 && !self.in_cooldown(&self.fast_cooldowns, ip)
             {
                 self.fast_cooldowns.insert(ip, now);
@@ -572,7 +675,7 @@ impl Detector {
         // --- 4. Verificam Slow Scan (pe port_hits — drop-uri) ---
         let slow_window = Duration::from_secs(cfg.slow_scan.time_window_mins * 60);
         if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, slow_window, now) {
-            if ports.len() >= cfg.slow_scan.port_threshold
+            if ports.len() >= slow_threshold
                 && !self.in_cooldown(&self.slow_cooldowns, ip)
             {
                 self.slow_cooldowns.insert(ip, now);
@@ -601,7 +704,7 @@ impl Detector {
         // accept-uri) — si amandoua vor fi trimise la SIEM si email, independent.
         let accept_window = Duration::from_secs(cfg.accept_scan.time_window_secs);
         if let Some(ports) = self.unique_ports_in_window(&self.accept_hits, ip, accept_window, now) {
-            if ports.len() >= cfg.accept_scan.port_threshold
+            if ports.len() >= accept_threshold
                 && !self.in_cooldown(&self.accept_cooldowns, ip)
             {
                 self.accept_cooldowns.insert(ip, now);
@@ -859,6 +962,51 @@ impl Detector {
     pub fn cleanup(&self, max_age: Duration) {
         let now = Instant::now();
 
+        // --- Baseline sampling (#35) — INAINTE de curatare ---
+        //
+        // Esantionam numarul maxim de porturi unice per IP per fereastra de timp.
+        // Acest "maxim" reprezinta cel mai zgomotos IP legitim din retea.
+        // Trebuie facut inainte de prune-ul datelor vechi, altfel pierdem datele
+        // necesare pentru calculul baseline-ului.
+        {
+            let cfg = self.config.load();
+            if cfg.dynamic_threshold.enabled {
+                let alpha = cfg.dynamic_threshold.ewma_alpha;
+                let fast_w = Duration::from_secs(cfg.fast_scan.time_window_secs);
+                let slow_w = Duration::from_secs(cfg.slow_scan.time_window_mins * 60);
+                let accept_w = Duration::from_secs(cfg.accept_scan.time_window_secs);
+
+                let mut fast_max: usize = 0;
+                let mut slow_max: usize = 0;
+                let mut accept_max: usize = 0;
+
+                // Iteram port_hits: esantionam fast_max si slow_max.
+                for entry in self.port_hits.iter() {
+                    let ip = *entry.key();
+                    if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, fast_w, now) {
+                        fast_max = fast_max.max(ports.len());
+                    }
+                    if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, slow_w, now) {
+                        slow_max = slow_max.max(ports.len());
+                    }
+                }
+
+                // Iteram accept_hits: esantionam accept_max.
+                for entry in self.accept_hits.iter() {
+                    let ip = *entry.key();
+                    if let Some(ports) = self.unique_ports_in_window(&self.accept_hits, ip, accept_w, now) {
+                        accept_max = accept_max.max(ports.len());
+                    }
+                }
+
+                let mut bl = self.baseline.lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                bl.fast_scan.update(fast_max as f64, alpha);
+                bl.slow_scan.update(slow_max as f64, alpha);
+                bl.accept_scan.update(accept_max as f64, alpha);
+            }
+        }
+
         // --- Curatam port_hits (drop-uri) ---
         //
         // NOTA RUST: Nu putem sterge din DashMap in timpul iteratiei (ar invalida
@@ -968,8 +1116,8 @@ impl Detector {
 mod tests {
     use super::*;
     use crate::config::{
-        AcceptScanConfig, DetectionConfig, DistributedScanConfig, FastScanConfig,
-        LateralMovementConfig, SlowScanConfig,
+        AcceptScanConfig, DetectionConfig, DistributedScanConfig, DynamicThresholdConfig,
+        FastScanConfig, LateralMovementConfig, SlowScanConfig,
     };
 
     /// Creeaza o configuratie de test cu praguri mici pentru teste rapide.
@@ -1006,6 +1154,14 @@ mod tests {
                 unique_sources_threshold: 3,
                 time_window_secs: 10,
             },
+            dynamic_threshold: DynamicThresholdConfig {
+                enabled: false,
+                ewma_alpha: 0.1,
+                sensitivity_multiplier: 3.0,
+                min_samples: 10,
+                min_threshold_ratio: 0.5,
+                max_threshold_ratio: 3.0,
+            },
         }
     }
 
@@ -1037,6 +1193,14 @@ mod tests {
                 enabled: false,
                 unique_sources_threshold: 3,
                 time_window_secs: 10,
+            },
+            dynamic_threshold: DynamicThresholdConfig {
+                enabled: false,
+                ewma_alpha: 0.1,
+                sensitivity_multiplier: 3.0,
+                min_samples: 10,
+                min_threshold_ratio: 0.5,
+                max_threshold_ratio: 3.0,
             },
         }
     }
@@ -1330,6 +1494,14 @@ mod tests {
                 unique_sources_threshold: 3,
                 time_window_secs: 10,
             },
+            dynamic_threshold: DynamicThresholdConfig {
+                enabled: false,
+                ewma_alpha: 0.1,
+                sensitivity_multiplier: 3.0,
+                min_samples: 10,
+                min_threshold_ratio: 0.5,
+                max_threshold_ratio: 3.0,
+            },
         }
     }
 
@@ -1611,6 +1783,14 @@ mod tests {
                 enabled: true,
                 unique_sources_threshold: 3,
                 time_window_secs: 10,
+            },
+            dynamic_threshold: DynamicThresholdConfig {
+                enabled: false,
+                ewma_alpha: 0.1,
+                sensitivity_multiplier: 3.0,
+                min_samples: 10,
+                min_threshold_ratio: 0.5,
+                max_threshold_ratio: 3.0,
             },
         }
     }

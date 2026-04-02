@@ -124,6 +124,23 @@ pub fn print_banner(config: &AppConfig) {
         format!("║{:<width$}║", web_line, width = inner_width).cyan()
     );
 
+    // Dynamic threshold status.
+    let dt_label = if config.detection.dynamic_threshold.enabled {
+        format!(
+            "ON (alpha={}, σ={}x, min_samples={})",
+            config.detection.dynamic_threshold.ewma_alpha,
+            config.detection.dynamic_threshold.sensitivity_multiplier,
+            config.detection.dynamic_threshold.min_samples
+        )
+    } else {
+        "OFF (praguri statice)".to_string()
+    };
+    let dt_line = format!("  Adapt:  {}", dt_label);
+    println!(
+        "{}",
+        format!("║{:<width$}║", dt_line, width = inner_width).cyan()
+    );
+
     // Praguri de detectie.
     let thresh_line = format!(
         "  Fast:  >={} ports/{}s       Slow: >={} ports/{}min",

@@ -118,6 +118,14 @@ struct GraphEdge {
     target: String,
     scan_type: String,
     count: usize,
+    ports: Vec<u16>,
+}
+
+/// Acumulator intern pentru construirea muchiilor din graf.
+#[derive(Default)]
+struct EdgeAccum {
+    count: usize,
+    ports: HashSet<u16>,
 }
 
 /// Structura raspunsului /api/graph.
@@ -150,8 +158,8 @@ async fn get_graph(State(state): State<AppState>) -> Json<GraphResponse> {
 
     let mut attackers: HashMap<IpAddr, NodeAccum> = HashMap::new();
     let mut targets: HashMap<IpAddr, NodeAccum> = HashMap::new();
-    // Deduplicam muchiile: (src, dst, scan_type) → count
-    let mut edge_map: HashMap<(String, String, String), usize> = HashMap::new();
+    // Deduplicam muchiile: (src, dst, scan_type) → count + porturi
+    let mut edge_map: HashMap<(String, String, String), EdgeAccum> = HashMap::new();
 
     for alert in buffer.iter() {
         let ts = alert.timestamp.to_rfc3339();
@@ -171,7 +179,11 @@ async fn get_graph(State(state): State<AppState>) -> Json<GraphResponse> {
             t.last_seen = ts.clone();
 
             let key = (alert.source_ip.to_string(), dest.to_string(), stype.clone());
-            *edge_map.entry(key).or_insert(0) += 1;
+            let accum = edge_map.entry(key).or_default();
+            accum.count += 1;
+            for &p in &alert.unique_ports {
+                accum.ports.insert(p);
+            }
         }
 
         // LateralMovement: fiecare unique_dest e o tinta separata
@@ -183,7 +195,7 @@ async fn get_graph(State(state): State<AppState>) -> Json<GraphResponse> {
                     t.last_seen = ts.clone();
 
                     let key = (alert.source_ip.to_string(), dest.to_string(), stype.clone());
-                    *edge_map.entry(key).or_insert(0) += 1;
+                    edge_map.entry(key).or_default().count += 1;
                 }
             }
             ScanType::DistributedScan => {
@@ -196,7 +208,11 @@ async fn get_graph(State(state): State<AppState>) -> Json<GraphResponse> {
 
                     if let Some(dest) = alert.dest_ip {
                         let key = (src.to_string(), dest.to_string(), stype.clone());
-                        *edge_map.entry(key).or_insert(0) += 1;
+                        let accum = edge_map.entry(key).or_default();
+                        accum.count += 1;
+                        for &p in &alert.unique_ports {
+                            accum.ports.insert(p);
+                        }
                     }
                 }
             }
@@ -229,14 +245,19 @@ async fn get_graph(State(state): State<AppState>) -> Json<GraphResponse> {
         }
     }
 
-    // Construim muchiile
+    // Construim muchiile (cu porturile sortate)
     let edges: Vec<GraphEdge> = edge_map
         .into_iter()
-        .map(|((source, target, scan_type), count)| GraphEdge {
-            source,
-            target,
-            scan_type,
-            count,
+        .map(|((source, target, scan_type), accum)| {
+            let mut ports: Vec<u16> = accum.ports.into_iter().collect();
+            ports.sort_unstable();
+            GraphEdge {
+                source,
+                target,
+                scan_type,
+                count: accum.count,
+                ports,
+            }
         })
         .collect();
 
@@ -492,6 +513,10 @@ body {
   <div class="graph-area" id="graph-area">
     <svg id="graph-svg"></svg>
     <div class="tooltip" id="tooltip"></div>
+    <button id="btn-fit" style="position:absolute;top:12px;right:12px;background:var(--surface);
+      border:1px solid var(--border);border-radius:6px;padding:6px 14px;color:var(--accent);
+      cursor:pointer;font-family:inherit;font-size:11px;z-index:10;"
+      title="Centreaza graful in viewport">&#8982; Fit</button>
     <div class="legend">
       <div class="legend-item"><span class="legend-dot" style="background:#f85149"></span> Atacator</div>
       <div class="legend-item"><span class="legend-dot" style="background:#8b949e"></span> Tinta</div>
@@ -537,7 +562,7 @@ function scanColor(type) {
 
 // ==== D3 Graph State ====
 let simulation = null;
-let svg, linkGroup, nodeGroup, labelGroup;
+let svg, linkGroup, nodeGroup, labelGroup, zoom;
 let currentNodes = [];
 let currentLinks = [];
 let width, height;
@@ -558,7 +583,7 @@ function initGraph() {
   labelGroup = svg.append("g").attr("class", "labels");
 
   // Zoom + pan
-  const zoom = d3.zoom()
+  zoom = d3.zoom()
     .scaleExtent([0.2, 5])
     .on("zoom", (event) => {
       linkGroup.attr("transform", event.transform);
@@ -568,11 +593,36 @@ function initGraph() {
   svg.call(zoom);
 
   simulation = d3.forceSimulation()
-    .force("link", d3.forceLink().id(d => d.id).distance(120))
-    .force("charge", d3.forceManyBody().strength(-300))
-    .force("center", d3.forceCenter(width / 2, height / 2))
-    .force("collide", d3.forceCollide().radius(d => nodeRadius(d) + 10))
+    .force("link", d3.forceLink().id(d => d.id).distance(80))
+    .force("charge", d3.forceManyBody().strength(-150).distanceMax(400))
+    .force("center", d3.forceCenter(width / 2, height / 2).strength(0.1))
+    .force("collide", d3.forceCollide().radius(d => nodeRadius(d) + 5))
+    .force("x", d3.forceX(width / 2).strength(0.05))
+    .force("y", d3.forceY(height / 2).strength(0.05))
     .on("tick", ticked);
+
+  // Zoom-to-fit: calculeaza bounding box si aplica transform
+  window.zoomToFit = function() {
+    if (currentNodes.length === 0) return;
+    const pad = 60;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    currentNodes.forEach(n => {
+      const r = nodeRadius(n);
+      if (n.x - r < x0) x0 = n.x - r;
+      if (n.y - r < y0) y0 = n.y - r;
+      if (n.x + r > x1) x1 = n.x + r;
+      if (n.y + r > y1) y1 = n.y + r;
+    });
+    const bw = x1 - x0, bh = y1 - y0;
+    if (bw <= 0 || bh <= 0) return;
+    const scale = Math.min((width - 2*pad) / bw, (height - 2*pad) / bh, 2.5);
+    const tx = (width - bw * scale) / 2 - x0 * scale;
+    const ty = (height - bh * scale) / 2 - y0 * scale;
+    svg.transition().duration(500).call(
+      zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale)
+    );
+  };
+  document.getElementById("btn-fit").addEventListener("click", window.zoomToFit);
 }
 
 function nodeRadius(d) {
@@ -616,18 +666,31 @@ function updateGraph(data) {
     target: e.target,
     scan_type: e.scan_type,
     count: e.count,
+    ports: e.ports || [],
   }));
 
   currentNodes = nodes;
   currentLinks = links;
 
+  // Forte adaptive bazate pe dimensiunea grafului
+  const n = nodes.length;
+  const chargeStr = n > 100 ? -80 : n > 50 ? -120 : -150;
+  const linkDist = n > 100 ? 50 : n > 50 ? 65 : 80;
+  simulation.force("charge").strength(chargeStr).distanceMax(400);
+  simulation.force("link").distance(linkDist);
+
   // Links
   const link = linkGroup.selectAll("line").data(links, d => d.source + "-" + d.target + "-" + d.scan_type);
   link.exit().remove();
   link.enter().append("line")
-    .attr("stroke-width", d => Math.min(4, 1 + d.count * 0.5))
+    .attr("stroke-width", d => Math.min(5, 1.5 + d.count * 0.5))
     .attr("stroke", d => scanColor(d.scan_type))
     .attr("stroke-opacity", 0.6)
+    .style("pointer-events", "stroke")
+    .style("cursor", "pointer")
+    .on("mouseover", showEdgeTooltip)
+    .on("mousemove", moveTooltip)
+    .on("mouseout", hideTooltip)
     .merge(link);
 
   // Nodes
@@ -647,8 +710,11 @@ function updateGraph(data) {
     .attr("r", nodeRadius)
     .attr("fill", nodeColor);
 
-  // Labels
-  const label = labelGroup.selectAll("text").data(nodes, d => d.id);
+  // Labels: ascundem label-urile pe grafuri mari pentru a reduce zgomotul vizual.
+  // Atacatorii si nodurile cu activitate semnificativa raman vizibile.
+  const showAll = nodes.length < 40;
+  const labelData = showAll ? nodes : nodes.filter(d => d.alert_count >= 3 || d.role === "attacker");
+  const label = labelGroup.selectAll("text").data(labelData, d => d.id);
   label.exit().remove();
   label.enter().append("text")
     .attr("text-anchor", "middle")
@@ -681,6 +747,24 @@ function drag(simulation) {
 // ==== Tooltip ====
 const tooltip = document.getElementById("tooltip");
 
+function showEdgeTooltip(event, d) {
+  const srcId = typeof d.source === 'object' ? d.source.id : d.source;
+  const tgtId = typeof d.target === 'object' ? d.target.id : d.target;
+  let portsHtml = '';
+  if (d.ports && d.ports.length > 0) {
+    const shown = d.ports.slice(0, 20).join(', ');
+    const extra = d.ports.length > 20 ? ` +${d.ports.length - 20}` : '';
+    portsHtml = `<div class="detail" style="color:var(--accent)">${d.ports.length} porturi: ${shown}${extra}</div>`;
+  }
+  tooltip.innerHTML = `
+    <div class="ip">${srcId} &rarr; ${tgtId}</div>
+    <div class="role">${d.scan_type}</div>
+    <div class="detail">Alerte: ${d.count}</div>
+    ${portsHtml}
+  `;
+  tooltip.style.opacity = 1;
+}
+
 function showTooltip(event, d) {
   const badges = d.scan_types.map(t =>
     `<span class="scan-badge" style="background:${scanColor(t)}">${t}</span>`
@@ -712,14 +796,18 @@ function updateTable(alerts) {
     const color = scanColor(a.scan_type);
     const dest = a.dest_ip || "N/A";
     let detail = "";
-    if (a.unique_ports && a.unique_ports.length > 0) {
+    if (a.scan_type === "Lateral Movement" && a.unique_dests && a.unique_dests.length > 0) {
+      const ips = a.unique_dests.slice(0, 8).join(", ");
+      const extra = a.unique_dests.length > 8 ? ` +${a.unique_dests.length - 8}` : "";
+      detail = `\u2192 ${a.unique_dests.length} tinte: ${ips}${extra}`;
+    } else if (a.scan_type === "Distributed Scan" && a.unique_sources && a.unique_sources.length > 0) {
+      const ips = a.unique_sources.slice(0, 8).join(", ");
+      const extra = a.unique_sources.length > 8 ? ` +${a.unique_sources.length - 8}` : "";
+      detail = `\u2190 ${a.unique_sources.length} atacatori: ${ips}${extra}`;
+    } else if (a.unique_ports && a.unique_ports.length > 0) {
       const ports = a.unique_ports.slice(0, 10).join(", ");
       const extra = a.unique_ports.length > 10 ? ` +${a.unique_ports.length - 10}` : "";
       detail = `${a.unique_ports.length} porturi: ${ports}${extra}`;
-    } else if (a.unique_dests && a.unique_dests.length > 0) {
-      detail = `${a.unique_dests.length} destinatii`;
-    } else if (a.unique_sources && a.unique_sources.length > 0) {
-      detail = `${a.unique_sources.length} surse`;
     }
     return `<tr>
       <td style="color:#8b949e">${formatTime(a.timestamp)}</td>
@@ -790,7 +878,9 @@ window.addEventListener("resize", () => {
   width = area.clientWidth;
   height = area.clientHeight;
   d3.select("#graph-svg").attr("viewBox", [0, 0, width, height]);
-  simulation.force("center", d3.forceCenter(width / 2, height / 2));
+  simulation.force("center", d3.forceCenter(width / 2, height / 2).strength(0.1));
+  simulation.force("x", d3.forceX(width / 2).strength(0.05));
+  simulation.force("y", d3.forceY(height / 2).strength(0.05));
   simulation.alpha(0.1).restart();
 });
 </script>

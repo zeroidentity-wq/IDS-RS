@@ -149,6 +149,11 @@ pub struct DetectionConfig {
     /// Retrocompatibil: daca lipseste din config.toml, se aplica valorile implicite.
     #[serde(default = "default_distributed_scan")]
     pub distributed_scan: DistributedScanConfig,
+
+    /// Configurare praguri dinamice / adaptive (#35).
+    /// Retrocompatibil: daca lipseste din config.toml, pragurile raman statice.
+    #[serde(default = "default_dynamic_threshold")]
+    pub dynamic_threshold: DynamicThresholdConfig,
 }
 
 fn default_max_hits_per_ip() -> usize {
@@ -281,6 +286,66 @@ fn default_distributed_scan() -> DistributedScanConfig {
         enabled: false,
         unique_sources_threshold: default_distributed_sources_threshold(),
         time_window_secs: default_distributed_time_window(),
+    }
+}
+
+/// Configurare praguri dinamice / adaptive (#35).
+///
+/// Foloseste EWMA (Exponentially Weighted Moving Average) pentru a calcula
+/// un baseline al traficului normal si adapta automat pragurile de detectie.
+///
+/// Formula: prag_efectiv = max(static * min_ratio, min(static * max_ratio,
+///          baseline_mean + sensitivity_multiplier * baseline_stddev))
+///
+/// Pragurile statice din config servesc ca limite de siguranta (floor/ceiling).
+/// Se aplica doar la Fast Scan, Slow Scan si Accept Scan.
+/// Lateral Movement si Distributed Scan raman cu praguri statice.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DynamicThresholdConfig {
+    /// Activare/dezactivare praguri dinamice. Implicit: false (retrocompatibil).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Factor de smoothing EWMA (0.0 - 1.0). Mai mare = adaptare mai rapida.
+    /// 0.1 = conservator (baseline stabil), 0.3 = moderat, 0.5 = rapid.
+    #[serde(default = "default_ewma_alpha")]
+    pub ewma_alpha: f64,
+
+    /// Cate deviatii standard peste medie seteaza pragul.
+    /// 3.0 = conservator (doar outlier-i clari), 2.0 = mai sensibil.
+    #[serde(default = "default_sensitivity_multiplier")]
+    pub sensitivity_multiplier: f64,
+
+    /// Esantioane minime de invatare inainte de activare (cicluri cleanup).
+    /// Sub acest numar, se folosesc pragurile statice.
+    #[serde(default = "default_min_samples")]
+    pub min_samples: u64,
+
+    /// Pragul dinamic nu scade sub aceasta fractiune din pragul static.
+    /// Previne scaderea la aproape zero in perioade linistite.
+    #[serde(default = "default_min_threshold_ratio")]
+    pub min_threshold_ratio: f64,
+
+    /// Pragul dinamic nu depaseste acest multiplu al pragului static.
+    /// Previne cresterea nelimitata in perioade zgomotoase.
+    #[serde(default = "default_max_threshold_ratio")]
+    pub max_threshold_ratio: f64,
+}
+
+fn default_ewma_alpha() -> f64 { 0.1 }
+fn default_sensitivity_multiplier() -> f64 { 3.0 }
+fn default_min_samples() -> u64 { 10 }
+fn default_min_threshold_ratio() -> f64 { 0.5 }
+fn default_max_threshold_ratio() -> f64 { 3.0 }
+
+fn default_dynamic_threshold() -> DynamicThresholdConfig {
+    DynamicThresholdConfig {
+        enabled: false,
+        ewma_alpha: default_ewma_alpha(),
+        sensitivity_multiplier: default_sensitivity_multiplier(),
+        min_samples: default_min_samples(),
+        min_threshold_ratio: default_min_threshold_ratio(),
+        max_threshold_ratio: default_max_threshold_ratio(),
     }
 }
 
@@ -603,6 +668,28 @@ impl AppConfig {
                     "detection.distributed_scan.time_window_secs = 0: fereastra de timp zero face detectia imposibila"
                         .to_string(),
                 );
+            }
+        }
+
+        // Validare Dynamic Threshold (doar daca e activat).
+        if self.detection.dynamic_threshold.enabled {
+            let dt = &self.detection.dynamic_threshold;
+            if dt.ewma_alpha <= 0.0 || dt.ewma_alpha > 1.0 {
+                errors.push(format!(
+                    "detection.dynamic_threshold.ewma_alpha = {} este invalid: trebuie sa fie in (0.0, 1.0]",
+                    dt.ewma_alpha
+                ));
+            }
+            if dt.sensitivity_multiplier <= 0.0 {
+                errors.push(
+                    "detection.dynamic_threshold.sensitivity_multiplier trebuie sa fie > 0.0".to_string()
+                );
+            }
+            if dt.min_threshold_ratio <= 0.0 || dt.min_threshold_ratio >= dt.max_threshold_ratio {
+                errors.push(format!(
+                    "detection.dynamic_threshold: min_threshold_ratio ({}) trebuie sa fie > 0 si < max_threshold_ratio ({})",
+                    dt.min_threshold_ratio, dt.max_threshold_ratio
+                ));
             }
         }
 

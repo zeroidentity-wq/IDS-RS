@@ -114,6 +114,8 @@ fn build_html_body(
     timestamp: &str,
     ports: &str,
     footer: &str,
+    count_label: &str,
+    list_label: &str,
 ) -> String {
     // HTML-escape pentru campuri care pot contine caractere speciale (footer ASCII art).
     let footer_safe = footer
@@ -186,13 +188,13 @@ fn build_html_body(
     <table class="tbl">
       <tr><td>IP Sursa</td><td>__SRC_IP__ __SRC_HOST__ __SRC_LOC__</td></tr>
       <tr><td>IP Destinatie</td><td>__DST_IP__ __DST_HOST__ __DST_LOC__</td></tr>
-      <tr><td>Porturi scanate</td><td>__PORT_COUNT__</td></tr>
+      <tr><td>__COUNT_LABEL__</td><td>__PORT_COUNT__</td></tr>
       <tr><td>Timestamp</td><td>__TIMESTAMP__</td></tr>
     </table>
   </div>
 
   <div class="sec">
-    <div class="sec-title">Porturi detectate</div>
+    <div class="sec-title">__LIST_LABEL__</div>
     <div class="ports-box">__PORTS__</div>
   </div>
 
@@ -258,6 +260,8 @@ fn build_html_body(
         .replace("__PORT_COUNT__", &port_count.to_string())
         .replace("__TIMESTAMP__", timestamp)
         .replace("__PORTS__", ports)
+        .replace("__COUNT_LABEL__", count_label)
+        .replace("__LIST_LABEL__", list_label)
         .replace("__FOOTER__", &footer_safe)
 }
 
@@ -745,6 +749,14 @@ impl Alerter {
 
         let timestamp = alert.timestamp.format("%Y-%m-%d %H:%M:%S");
 
+        // Etichete dinamice in email: adapteaza "Porturi scanate" / "Porturi detectate"
+        // la tipul de alerta. Lateral Movement arata destinatii, Distributed arata surse.
+        let (count_label, list_label) = match alert.scan_type {
+            ScanType::LateralMovement => ("Destinatii contactate", "Destinatii detectate"),
+            ScanType::DistributedScan => ("Surse atacatoare", "Surse detectate"),
+            _ => ("Porturi scanate", "Porturi detectate"),
+        };
+
         let html_body = build_html_body(
             &alert.scan_type.to_string(),
             severity,
@@ -758,6 +770,8 @@ impl Alerter {
             &timestamp.to_string(),
             &list_display,
             &cfg.email_footer,
+            count_label,
+            list_label,
         );
 
         // Trimitem un email catre fiecare destinatar.

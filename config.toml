@@ -117,6 +117,26 @@ unique_sources_threshold = 5
 # Fereastra de timp in secunde in care se numara sursele.
 time_window_secs = 60
 
+[detection.dynamic_threshold]
+# Praguri dinamice bazate pe baseline-ul traficului observat (#35).
+# Cand este activat, pragurile statice (port_threshold) servesc ca
+# limite de siguranta (min/max), iar pragul efectiv se adapteaza
+# automat la pattern-ul de trafic din retea.
+# Se aplica la Fast Scan, Slow Scan si Accept Scan.
+# Lateral Movement si Distributed Scan raman cu praguri statice.
+enabled = false
+# Factor de smoothing EWMA (0.0 - 1.0). Mai mare = adaptare mai rapida.
+# 0.1 = conservator (baseline stabil), 0.3 = moderat.
+ewma_alpha = 0.1
+# Deviatii standard peste medie. 3.0 = doar outlier-i clari.
+sensitivity_multiplier = 3.0
+# Esantioane minime de invatare (cicluri cleanup) inainte de activare.
+min_samples = 10
+# Pragul dinamic nu scade sub X% din pragul static (protectie false negative).
+min_threshold_ratio = 0.5
+# Pragul dinamic nu depaseste Nx pragul static (protectie false positive).
+max_threshold_ratio = 3.0
+
 # -----------------------------------------------------------------------------
 # Configurare alerte
 # -----------------------------------------------------------------------------
