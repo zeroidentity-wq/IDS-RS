@@ -70,6 +70,35 @@ whitelist = [
     # "10.0.2.0/24",     # subnet management
 ]
 
+# --- Exceptii detectie (reducerea fals-pozitivelor) ---
+# IP-uri si porturi excluse din anumite tipuri de detectie.
+# Diferit de whitelist (care exclude complet din ORICE detectie):
+#   whitelist        → IP-ul nu genereaza NICIO alerta (nici Fast, nici Slow, nimic)
+#   exceptions       → IP-ul/portul este ignorat doar pentru un tip specific de detectie
+[detection.exceptions]
+# IP-uri autorizate sa faca scanning (ex: Nessus, vulnerability scanners interni).
+# Aceste IP-uri NU declanseaza Lateral Movement (fan-out mare e normal pentru ele).
+authorized_scanners = [
+    # "10.0.1.100",    # Nessus scanner
+    # "10.0.1.101",    # OpenVAS scanner
+]
+# Porturi ignorate la contorizarea Lateral Movement.
+# Servicii interne cu fan-out mare (SMB, WinRM, RPC) genereaza fals-pozitive.
+ignore_lateral_ports = [
+    # 135,     # MS-RPC
+    # 445,     # SMB
+    # 5985,    # WinRM HTTP
+    # 5986,    # WinRM HTTPS
+]
+# Porturi ignorate la contorizarea Distributed Scan (din perspectiva tintei).
+# Servere populare (DNS, NTP, HTTP) primesc trafic legitim de la multi clienti.
+ignore_distributed_target_ports = [
+    # 53,      # DNS
+    # 123,     # NTP
+    # 80,      # HTTP
+    # 443,     # HTTPS
+]
+
 [detection.fast_scan]
 # Numar de porturi unice care declanseaza alerta de Fast Scan.
 # Alerta se emite cand un IP acceseaza >= port_threshold porturi unice

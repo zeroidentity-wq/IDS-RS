@@ -21,7 +21,7 @@
 use crate::config::WebDashboardConfig;
 use crate::detector::{Alert, ScanType};
 use crate::display;
-use axum::{extract::State, response::Html, routing::get, Json, Router};
+use axum::{extract::{Query, State}, response::Html, routing::get, Json, Router};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -55,6 +55,7 @@ pub async fn start_web_server(
         .route("/static/d3.min.js", get(get_d3_js))
         .route("/api/alerts", get(get_alerts))
         .route("/api/graph", get(get_graph))
+        .route("/api/ip/{ip}", get(get_ip_dossier))
         .with_state(state);
 
     let bind_addr = format!("{}:{}", config.bind, config.port);
@@ -94,10 +95,46 @@ async fn get_d3_js() -> ([(axum::http::header::HeaderName, &'static str); 1], &'
     ([(axum::http::header::CONTENT_TYPE, "application/javascript")], D3_JS)
 }
 
+/// Parametri de query pentru filtrarea alertelor si grafului.
+/// GET /api/alerts?ip=10.10.1.50 → returneaza doar alertele in care IP-ul apare
+/// ca sursa, destinatie, unique_dest sau unique_source.
+#[derive(serde::Deserialize, Default)]
+struct AlertQuery {
+    ip: Option<String>,
+}
+
+/// Verifica daca o alerta implica un IP dat (sursa, destinatie, lateral dest, distributed source).
+fn alert_matches_ip(alert: &Alert, ip: IpAddr) -> bool {
+    if alert.source_ip == ip {
+        return true;
+    }
+    if alert.dest_ip == Some(ip) {
+        return true;
+    }
+    if alert.unique_dests.contains(&ip) {
+        return true;
+    }
+    if alert.unique_sources.contains(&ip) {
+        return true;
+    }
+    false
+}
+
 /// GET /api/alerts — Returneaza ultimele alerte din buffer (newest first).
-async fn get_alerts(State(state): State<AppState>) -> Json<serde_json::Value> {
+/// Optional: ?ip=X filtreaza doar alertele care implica IP-ul X.
+async fn get_alerts(
+    State(state): State<AppState>,
+    Query(params): Query<AlertQuery>,
+) -> Json<serde_json::Value> {
     let buffer = state.alerts.lock().unwrap_or_else(|e| e.into_inner());
-    let alerts: Vec<&Alert> = buffer.iter().rev().collect();
+
+    let filter_ip: Option<IpAddr> = params.ip.as_deref()
+        .and_then(|s| s.parse::<IpAddr>().ok());
+
+    let alerts: Vec<&Alert> = match filter_ip {
+        Some(ip) => buffer.iter().rev().filter(|a| alert_matches_ip(a, ip)).collect(),
+        None => buffer.iter().rev().collect(),
+    };
     Json(serde_json::json!(alerts))
 }
 
@@ -153,15 +190,26 @@ struct NodeAccum {
 }
 
 /// GET /api/graph — Transforma alertele in structura graf (noduri + muchii).
-async fn get_graph(State(state): State<AppState>) -> Json<GraphResponse> {
+/// Optional: ?ip=X returneaza "egocentric network" — doar IP-ul X si conexiunile lui directe.
+async fn get_graph(
+    State(state): State<AppState>,
+    Query(params): Query<AlertQuery>,
+) -> Json<GraphResponse> {
     let buffer = state.alerts.lock().unwrap_or_else(|e| e.into_inner());
+    let filter_ip: Option<IpAddr> = params.ip.as_deref()
+        .and_then(|s| s.parse::<IpAddr>().ok());
 
     let mut attackers: HashMap<IpAddr, NodeAccum> = HashMap::new();
     let mut targets: HashMap<IpAddr, NodeAccum> = HashMap::new();
     // Deduplicam muchiile: (src, dst, scan_type) → count + porturi
     let mut edge_map: HashMap<(String, String, String), EdgeAccum> = HashMap::new();
 
-    for alert in buffer.iter() {
+    for alert in buffer.iter().filter(|a| {
+        match filter_ip {
+            Some(ip) => alert_matches_ip(a, ip),
+            None => true,
+        }
+    }) {
         let ts = alert.timestamp.to_rfc3339();
         let stype = alert.scan_type.to_string();
 
@@ -274,6 +322,128 @@ async fn get_graph(State(state): State<AppState>) -> Json<GraphResponse> {
     })
 }
 
+/// Raspuns IP Dossier — istoric complet al unui IP din alerte.
+#[derive(serde::Serialize)]
+struct IpDossier {
+    ip: String,
+    roles: Vec<&'static str>,
+    total_alerts: usize,
+    as_attacker: usize,
+    as_target: usize,
+    scan_types: Vec<String>,
+    ports_accessed: Vec<u16>,
+    connected_ips: Vec<String>,
+    timeline: Vec<DossierEvent>,
+}
+
+#[derive(serde::Serialize)]
+struct DossierEvent {
+    timestamp: String,
+    scan_type: String,
+    role: &'static str,
+    peer_ip: String,
+    ports: Vec<u16>,
+}
+
+/// GET /api/ip/{ip} — Returneaza dosarul complet al unui IP (rol, porturi, timeline, peers).
+async fn get_ip_dossier(
+    State(state): State<AppState>,
+    axum::extract::Path(ip_str): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let ip: IpAddr = match ip_str.parse() {
+        Ok(ip) => ip,
+        Err(_) => return Json(serde_json::json!({"error": "IP invalid"})),
+    };
+
+    let buffer = state.alerts.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut as_attacker: usize = 0;
+    let mut as_target: usize = 0;
+    let mut scan_types: HashSet<String> = HashSet::new();
+    let mut ports: HashSet<u16> = HashSet::new();
+    let mut peers: HashSet<IpAddr> = HashSet::new();
+    let mut timeline: Vec<DossierEvent> = Vec::new();
+
+    for alert in buffer.iter() {
+        let is_src = alert.source_ip == ip;
+        let is_dst = alert.dest_ip == Some(ip)
+            || alert.unique_dests.contains(&ip)
+            || alert.unique_sources.contains(&ip);
+
+        if !is_src && !is_dst {
+            continue;
+        }
+
+        let stype = alert.scan_type.to_string();
+        scan_types.insert(stype.clone());
+
+        if is_src {
+            as_attacker += 1;
+            if let Some(d) = alert.dest_ip {
+                peers.insert(d);
+            }
+            for d in &alert.unique_dests {
+                peers.insert(*d);
+            }
+            for &p in &alert.unique_ports {
+                ports.insert(p);
+            }
+            let peer = alert.dest_ip.map(|d| d.to_string()).unwrap_or_default();
+            timeline.push(DossierEvent {
+                timestamp: alert.timestamp.to_rfc3339(),
+                scan_type: stype.clone(),
+                role: "attacker",
+                peer_ip: peer,
+                ports: alert.unique_ports.clone(),
+            });
+        }
+
+        if is_dst {
+            as_target += 1;
+            peers.insert(alert.source_ip);
+            for s in &alert.unique_sources {
+                peers.insert(*s);
+            }
+            let peer = alert.source_ip.to_string();
+            timeline.push(DossierEvent {
+                timestamp: alert.timestamp.to_rfc3339(),
+                scan_type: stype,
+                role: "target",
+                peer_ip: peer,
+                ports: alert.unique_ports.clone(),
+            });
+        }
+    }
+
+    let mut roles = Vec::new();
+    if as_attacker > 0 { roles.push("attacker"); }
+    if as_target > 0 { roles.push("target"); }
+
+    let mut ports_vec: Vec<u16> = ports.into_iter().collect();
+    ports_vec.sort_unstable();
+    let mut peers_vec: Vec<String> = peers.into_iter().map(|p| p.to_string()).collect();
+    peers_vec.sort();
+    let mut scan_types_vec: Vec<String> = scan_types.into_iter().collect();
+    scan_types_vec.sort();
+
+    // Timeline: newest first.
+    timeline.reverse();
+
+    let dossier = IpDossier {
+        ip: ip.to_string(),
+        roles,
+        total_alerts: as_attacker + as_target,
+        as_attacker,
+        as_target,
+        scan_types: scan_types_vec,
+        ports_accessed: ports_vec,
+        connected_ips: peers_vec,
+        timeline,
+    };
+
+    Json(serde_json::json!(dossier))
+}
+
 // =============================================================================
 // Dashboard HTML (inline — functioneaza in retele air-gapped)
 // =============================================================================
@@ -320,6 +490,8 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .header h1 {
   font-size: 16px;
@@ -329,6 +501,7 @@ body {
 .stats {
   display: flex;
   gap: 24px;
+  align-items: center;
 }
 .stat {
   text-align: center;
@@ -347,11 +520,58 @@ body {
 .stat-val.cyan { color: var(--cyan); }
 .stat-val.accent { color: var(--accent); }
 
+/* Omnisearch */
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.search-box input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  width: 200px;
+  outline: none;
+}
+.search-box input:focus { border-color: var(--accent); }
+.search-box input::placeholder { color: var(--text-dim); }
+.search-box button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+}
+.search-box button:hover { border-color: var(--accent); }
+.search-active-tag {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent);
+  color: var(--bg);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.search-active-tag .close-tag {
+  cursor: pointer;
+  margin-left: 4px;
+  font-weight: 700;
+}
+
 /* Layout */
 .container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 52px);
+  height: calc(100vh - 56px);
 }
 .graph-area {
   flex: 1;
@@ -420,6 +640,18 @@ body {
   white-space: nowrap;
 }
 .table-area tr:hover { background: rgba(88,166,255,0.05); }
+.table-area tr.cluster-header { cursor: pointer; }
+.table-area tr.cluster-header td:first-child::before {
+  content: "\25B6 ";
+  font-size: 9px;
+  color: var(--text-dim);
+}
+.table-area tr.cluster-header.expanded td:first-child::before {
+  content: "\25BC ";
+}
+.table-area tr.cluster-child { display: none; }
+.table-area tr.cluster-child.visible { display: table-row; }
+.table-area tr.cluster-child td { padding-left: 28px; color: var(--text-dim); }
 .type-badge {
   display: inline-block;
   padding: 2px 8px;
@@ -428,6 +660,12 @@ body {
   font-weight: 600;
   color: #fff;
 }
+.ip-link {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+.ip-link:hover { text-decoration: underline; }
 
 /* Legend */
 .legend {
@@ -452,6 +690,12 @@ body {
   height: 10px;
   border-radius: 50%;
   display: inline-block;
+}
+
+/* Pinned node indicator */
+.node-pinned {
+  stroke: var(--accent) !important;
+  stroke-width: 3px !important;
 }
 
 /* Status indicator */
@@ -484,12 +728,95 @@ body {
 }
 .empty-state .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.3; }
 .empty-state .msg { font-size: 14px; }
+
+/* IP Dossier Modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 100;
+  justify-content: center;
+  align-items: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 600px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 24px;
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.modal-header h2 {
+  font-size: 18px;
+  color: var(--accent);
+}
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 20px;
+  cursor: pointer;
+}
+.modal-close:hover { color: var(--text); }
+.dossier-section {
+  margin-bottom: 14px;
+}
+.dossier-section h3 {
+  font-size: 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.dossier-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.dossier-kv {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
+}
+.dossier-kv .k { color: var(--text-dim); }
+.dossier-kv .v { color: var(--text); }
+.dossier-timeline {
+  font-size: 12px;
+  width: 100%;
+  border-collapse: collapse;
+}
+.dossier-timeline th {
+  text-align: left;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.dossier-timeline td {
+  padding: 3px 8px;
+  border-bottom: 1px solid rgba(48,54,61,0.5);
+}
 </style>
 </head>
 <body>
 
 <div class="header">
   <h1>IDS-RS — Network Dashboard</h1>
+  <div class="search-box">
+    <input type="text" id="omnisearch" placeholder="Cauta IP... (Enter)" autocomplete="off">
+    <button id="btn-search" title="Filtreaza graf si alerte dupa IP">&#128270;</button>
+    <span class="search-active-tag" id="search-tag">
+      <span id="search-tag-ip"></span>
+      <span class="close-tag" id="search-tag-close">&times;</span>
+    </span>
+  </div>
   <div class="stats">
     <div class="stat">
       <div class="stat-val accent" id="stat-alerts">0</div>
@@ -513,10 +840,12 @@ body {
   <div class="graph-area" id="graph-area">
     <svg id="graph-svg"></svg>
     <div class="tooltip" id="tooltip"></div>
-    <button id="btn-fit" style="position:absolute;top:12px;right:12px;background:var(--surface);
-      border:1px solid var(--border);border-radius:6px;padding:6px 14px;color:var(--accent);
-      cursor:pointer;font-family:inherit;font-size:11px;z-index:10;"
-      title="Centreaza graful in viewport">&#8982; Fit</button>
+    <div style="position:absolute;top:12px;right:12px;display:flex;gap:6px;z-index:10;">
+      <button id="btn-fit" style="background:var(--surface);
+        border:1px solid var(--border);border-radius:6px;padding:6px 14px;color:var(--accent);
+        cursor:pointer;font-family:inherit;font-size:11px;"
+        title="Centreaza graful in viewport">&#8982; Fit</button>
+    </div>
     <div class="legend">
       <div class="legend-item"><span class="legend-dot" style="background:#f85149"></span> Atacator</div>
       <div class="legend-item"><span class="legend-dot" style="background:#8b949e"></span> Tinta</div>
@@ -525,6 +854,7 @@ body {
       <div class="legend-item"><span class="legend-dot" style="background:#bc8cff;width:20px;height:3px;border-radius:1px"></span> Accept</div>
       <div class="legend-item"><span class="legend-dot" style="background:#d18616;width:20px;height:3px;border-radius:1px"></span> Lateral</div>
       <div class="legend-item"><span class="legend-dot" style="background:#39d353;width:20px;height:3px;border-radius:1px"></span> Distributed</div>
+      <div class="legend-item" style="margin-left:8px;color:var(--text-dim)">Drag=Pin | DblClick=Unpin</div>
     </div>
   </div>
   <div class="table-area">
@@ -543,11 +873,19 @@ body {
   </div>
 </div>
 
+<!-- IP Dossier Modal -->
+<div class="modal-overlay" id="dossier-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="dossier-title">IP Dossier</h2>
+      <button class="modal-close" id="dossier-close">&times;</button>
+    </div>
+    <div id="dossier-body"></div>
+  </div>
+</div>
+
 <script src="/static/d3.min.js"></script>
 <script>
-// Fallback: daca CDN nu e disponibil (retea izolata), graful nu se afiseaza
-// dar tabelul de alerte functioneaza.
-
 const SCAN_COLORS = {
   "Fast Scan":        "#f85149",
   "Slow Scan":        "#d29922",
@@ -560,12 +898,15 @@ function scanColor(type) {
   return SCAN_COLORS[type] || "#8b949e";
 }
 
-// ==== D3 Graph State ====
+// ==== State ====
 let simulation = null;
 let svg, linkGroup, nodeGroup, labelGroup, zoom;
 let currentNodes = [];
 let currentLinks = [];
 let width, height;
+let activeSearchIp = null;  // IP filtrat in omnisearch (null = fara filtru)
+
+// ==== D3 Graph ====
 
 function initGraph() {
   if (typeof d3 === "undefined") return;
@@ -577,12 +918,10 @@ function initGraph() {
   svg = d3.select("#graph-svg")
     .attr("viewBox", [0, 0, width, height]);
 
-  // Grupuri ordonate: linkuri sub noduri, etichete deasupra
   linkGroup  = svg.append("g").attr("class", "links");
   nodeGroup  = svg.append("g").attr("class", "nodes");
   labelGroup = svg.append("g").attr("class", "labels");
 
-  // Zoom + pan
   zoom = d3.zoom()
     .scaleExtent([0.2, 5])
     .on("zoom", (event) => {
@@ -592,16 +931,20 @@ function initGraph() {
     });
   svg.call(zoom);
 
+  // Sarcina 1: Forte echilibrate — collision previne suprapunerea,
+  // charge repinge moderat, alpha decay mare = oprire rapida.
   simulation = d3.forceSimulation()
     .force("link", d3.forceLink().id(d => d.id).distance(80))
     .force("charge", d3.forceManyBody().strength(-150).distanceMax(400))
-    .force("center", d3.forceCenter(width / 2, height / 2).strength(0.1))
-    .force("collide", d3.forceCollide().radius(d => nodeRadius(d) + 5))
-    .force("x", d3.forceX(width / 2).strength(0.05))
-    .force("y", d3.forceY(height / 2).strength(0.05))
+    .force("center", d3.forceCenter(width / 2, height / 2).strength(0.05))
+    .force("collide", d3.forceCollide().radius(d => nodeRadius(d) + 8).strength(0.8))
+    .force("x", d3.forceX(width / 2).strength(0.04))
+    .force("y", d3.forceY(height / 2).strength(0.04))
+    .alphaDecay(0.03)       // Mai rapid decat default (0.0228) — se opreste mai repede
+    .alphaMin(0.005)        // Pragul sub care simularea se opreste
+    .velocityDecay(0.4)     // Frictiune mai mare — nodurile se opresc mai repede
     .on("tick", ticked);
 
-  // Zoom-to-fit: calculeaza bounding box si aplica transform
   window.zoomToFit = function() {
     if (currentNodes.length === 0) return;
     const pad = 60;
@@ -652,13 +995,16 @@ function ticked() {
 function updateGraph(data) {
   if (!simulation) return;
 
-  // Preservam pozitiile existente
-  const oldPositions = {};
-  currentNodes.forEach(n => { oldPositions[n.id] = { x: n.x, y: n.y, vx: n.vx, vy: n.vy }; });
+  // Preservam pozitiile + pinned state
+  const oldMap = {};
+  currentNodes.forEach(n => {
+    oldMap[n.id] = { x: n.x, y: n.y, vx: n.vx, vy: n.vy, fx: n.fx, fy: n.fy };
+  });
 
   const nodes = data.nodes.map(n => {
-    const old = oldPositions[n.id];
-    return old ? { ...n, ...old } : { ...n, x: width/2 + Math.random()*100-50, y: height/2 + Math.random()*100-50 };
+    const old = oldMap[n.id];
+    if (old) return { ...n, ...old };
+    return { ...n, x: width/2 + Math.random()*100-50, y: height/2 + Math.random()*100-50 };
   });
 
   const links = data.edges.map(e => ({
@@ -672,7 +1018,7 @@ function updateGraph(data) {
   currentNodes = nodes;
   currentLinks = links;
 
-  // Forte adaptive bazate pe dimensiunea grafului
+  // Forte adaptive
   const n = nodes.length;
   const chargeStr = n > 100 ? -80 : n > 50 ? -120 : -150;
   const linkDist = n > 100 ? 50 : n > 50 ? 65 : 80;
@@ -680,7 +1026,11 @@ function updateGraph(data) {
   simulation.force("link").distance(linkDist);
 
   // Links
-  const link = linkGroup.selectAll("line").data(links, d => d.source + "-" + d.target + "-" + d.scan_type);
+  const link = linkGroup.selectAll("line").data(links, d => {
+    const s = typeof d.source === 'object' ? d.source.id : d.source;
+    const t = typeof d.target === 'object' ? d.target.id : d.target;
+    return s + "-" + t + "-" + d.scan_type;
+  });
   link.exit().remove();
   link.enter().append("line")
     .attr("stroke-width", d => Math.min(5, 1.5 + d.count * 0.5))
@@ -693,7 +1043,7 @@ function updateGraph(data) {
     .on("mouseout", hideTooltip)
     .merge(link);
 
-  // Nodes
+  // Nodes — Sarcina 1: drag pins, dblclick unpins, click opens dossier
   const node = nodeGroup.selectAll("circle").data(nodes, d => d.id);
   node.exit().remove();
   const entered = node.enter().append("circle")
@@ -705,13 +1055,30 @@ function updateGraph(data) {
     .call(drag(simulation))
     .on("mouseover", showTooltip)
     .on("mousemove", moveTooltip)
-    .on("mouseout", hideTooltip);
+    .on("mouseout", hideTooltip)
+    .on("click", (event, d) => { openDossier(d.id); })
+    .on("dblclick", (event, d) => {
+      // Sarcina 1: dublu-click elibereaza nodul (unpin)
+      d.fx = null;
+      d.fy = null;
+      d3.select(event.currentTarget).classed("node-pinned", false);
+      simulation.alpha(0.1).restart();
+    })
+    .on("contextmenu", (event, d) => {
+      // Click-dreapta: unpin (alternativa la dblclick)
+      event.preventDefault();
+      d.fx = null;
+      d.fy = null;
+      d3.select(event.currentTarget).classed("node-pinned", false);
+      simulation.alpha(0.1).restart();
+    });
+
   entered.merge(node)
     .attr("r", nodeRadius)
-    .attr("fill", nodeColor);
+    .attr("fill", nodeColor)
+    .classed("node-pinned", d => d.fx != null);
 
-  // Labels: ascundem label-urile pe grafuri mari pentru a reduce zgomotul vizual.
-  // Atacatorii si nodurile cu activitate semnificativa raman vizibile.
+  // Labels
   const showAll = nodes.length < 40;
   const labelData = showAll ? nodes : nodes.filter(d => d.alert_count >= 3 || d.role === "attacker");
   const label = labelGroup.selectAll("text").data(labelData, d => d.id);
@@ -726,21 +1093,30 @@ function updateGraph(data) {
 
   simulation.nodes(nodes);
   simulation.force("link").links(links);
-  simulation.alpha(0.3).restart();
+
+  // Sarcina 1: alpha mic la update (nu re-agita graful puternic),
+  // doar daca au aparut noduri noi.
+  const hasNewNodes = nodes.some(n => !oldMap[n.id]);
+  simulation.alpha(hasNewNodes ? 0.3 : 0.05).restart();
 }
 
+// Sarcina 1: Drag PINEAZA nodul (fx/fy raman setate dupa drag end).
+// Dublu-click sau click-dreapta elibereaza nodul.
 function drag(simulation) {
   return d3.drag()
     .on("start", (event, d) => {
-      if (!event.active) simulation.alphaTarget(0.3).restart();
-      d.fx = d.x; d.fy = d.y;
+      if (!event.active) simulation.alphaTarget(0.1).restart();
+      d.fx = d.x;
+      d.fy = d.y;
     })
     .on("drag", (event, d) => {
-      d.fx = event.x; d.fy = event.y;
+      d.fx = event.x;
+      d.fy = event.y;
     })
     .on("end", (event, d) => {
       if (!event.active) simulation.alphaTarget(0);
-      d.fx = null; d.fy = null;
+      // NODE PINNING: NU resetam fx/fy — nodul ramane fixat!
+      d3.select(event.sourceEvent.target).classed("node-pinned", true);
     });
 }
 
@@ -775,6 +1151,7 @@ function showTooltip(event, d) {
     <div class="detail">Alerte: ${d.alert_count}</div>
     <div class="detail">${badges}</div>
     <div class="detail" style="color:#8b949e;font-size:11px">Ultima: ${formatTime(d.last_seen)}</div>
+    <div class="detail" style="color:#8b949e;font-size:10px">Click = Dossier | DblClick = Unpin</div>
   `;
   tooltip.style.opacity = 1;
 }
@@ -788,37 +1165,160 @@ function hideTooltip() {
   tooltip.style.opacity = 0;
 }
 
-// ==== Alert Table ====
+// ==== IP Dossier Modal (Sarcina 2) ====
+
+async function openDossier(ip) {
+  const modal = document.getElementById("dossier-modal");
+  const title = document.getElementById("dossier-title");
+  const body  = document.getElementById("dossier-body");
+  title.textContent = "IP Dossier: " + ip;
+  body.innerHTML = '<div style="color:var(--text-dim)">Se incarca...</div>';
+  modal.classList.add("open");
+
+  try {
+    const res = await fetch("/api/ip/" + encodeURIComponent(ip));
+    const d = await res.json();
+    if (d.error) { body.innerHTML = `<div style="color:var(--red)">${d.error}</div>`; return; }
+
+    const rolesBadges = d.roles.map(r =>
+      `<span class="type-badge" style="background:${r === 'attacker' ? 'var(--red)' : 'var(--text-dim)'}">${r === 'attacker' ? 'ATACATOR' : 'TINTA'}</span>`
+    ).join(' ');
+
+    const scanBadges = d.scan_types.map(t =>
+      `<span class="type-badge" style="background:${scanColor(t)}">${t}</span>`
+    ).join(' ');
+
+    const portsStr = d.ports_accessed.length > 0
+      ? d.ports_accessed.slice(0, 30).join(', ') + (d.ports_accessed.length > 30 ? ` +${d.ports_accessed.length - 30}` : '')
+      : 'N/A';
+
+    const peersHtml = d.connected_ips.slice(0, 20).map(p =>
+      `<span class="ip-link" onclick="openDossier('${p}')">${p}</span>`
+    ).join(', ') + (d.connected_ips.length > 20 ? ` +${d.connected_ips.length - 20}` : '');
+
+    const timelineRows = d.timeline.slice(0, 50).map(e => `
+      <tr>
+        <td style="color:var(--text-dim)">${formatTime(e.timestamp)}</td>
+        <td><span class="type-badge" style="background:${scanColor(e.scan_type)};font-size:10px;padding:1px 6px">${e.scan_type}</span></td>
+        <td>${e.role === 'attacker' ? 'ATK' : 'TGT'}</td>
+        <td><span class="ip-link" onclick="openDossier('${e.peer_ip}')">${e.peer_ip}</span></td>
+        <td style="color:var(--text-dim)">${e.ports.slice(0,10).join(', ')}</td>
+      </tr>
+    `).join('');
+
+    body.innerHTML = `
+      <div class="dossier-section">
+        <div class="dossier-kv">
+          <span class="k">IP</span><span class="v" style="color:var(--accent);font-weight:700">${d.ip}</span>
+          <span class="k">Rol</span><span class="v">${rolesBadges}</span>
+          <span class="k">Total alerte</span><span class="v">${d.total_alerts} (${d.as_attacker} atk / ${d.as_target} tgt)</span>
+          <span class="k">Tipuri scan</span><span class="v">${scanBadges}</span>
+          <span class="k">Porturi accesate</span><span class="v">${portsStr}</span>
+          <span class="k">IP-uri conectate</span><span class="v">${peersHtml || 'N/A'}</span>
+        </div>
+      </div>
+      <div class="dossier-section">
+        <h3>Timeline alerte (${d.timeline.length})</h3>
+        <table class="dossier-timeline">
+          <thead><tr><th>Ora</th><th>Tip</th><th>Rol</th><th>Peer</th><th>Porturi</th></tr></thead>
+          <tbody>${timelineRows || '<tr><td colspan="5" style="color:var(--text-dim)">Nicio alerta</td></tr>'}</tbody>
+        </table>
+      </div>
+    `;
+  } catch (e) {
+    body.innerHTML = `<div style="color:var(--red)">Eroare: ${e.message}</div>`;
+  }
+}
+
+document.getElementById("dossier-close").addEventListener("click", () => {
+  document.getElementById("dossier-modal").classList.remove("open");
+});
+document.getElementById("dossier-modal").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) e.currentTarget.classList.remove("open");
+});
+
+// ==== Alert Table cu Clustering (Sarcina 2) ====
+
 function updateTable(alerts) {
   const tbody = document.getElementById("alert-tbody");
-  // Afisam max 100 alerte
-  const rows = alerts.slice(0, 100).map(a => {
+
+  // Clustering: grupam alertele consecutive cu acelasi (scan_type + source_ip).
+  const clusters = [];
+  let currentCluster = null;
+  for (const a of alerts.slice(0, 200)) {
+    const key = a.scan_type + "|" + a.source_ip;
+    if (currentCluster && currentCluster.key === key) {
+      currentCluster.items.push(a);
+    } else {
+      currentCluster = { key, items: [a] };
+      clusters.push(currentCluster);
+    }
+  }
+
+  let html = '';
+  for (const cluster of clusters) {
+    const a = cluster.items[0];
     const color = scanColor(a.scan_type);
     const dest = a.dest_ip || "N/A";
-    let detail = "";
-    if (a.scan_type === "Lateral Movement" && a.unique_dests && a.unique_dests.length > 0) {
-      const ips = a.unique_dests.slice(0, 8).join(", ");
-      const extra = a.unique_dests.length > 8 ? ` +${a.unique_dests.length - 8}` : "";
-      detail = `\u2192 ${a.unique_dests.length} tinte: ${ips}${extra}`;
-    } else if (a.scan_type === "Distributed Scan" && a.unique_sources && a.unique_sources.length > 0) {
-      const ips = a.unique_sources.slice(0, 8).join(", ");
-      const extra = a.unique_sources.length > 8 ? ` +${a.unique_sources.length - 8}` : "";
-      detail = `\u2190 ${a.unique_sources.length} atacatori: ${ips}${extra}`;
-    } else if (a.unique_ports && a.unique_ports.length > 0) {
-      const ports = a.unique_ports.slice(0, 10).join(", ");
-      const extra = a.unique_ports.length > 10 ? ` +${a.unique_ports.length - 10}` : "";
-      detail = `${a.unique_ports.length} porturi: ${ports}${extra}`;
+    const detail = alertDetail(a);
+
+    if (cluster.items.length === 1) {
+      // Rand simplu (fara cluster)
+      html += `<tr>
+        <td style="color:#8b949e">${formatTime(a.timestamp)}</td>
+        <td><span class="type-badge" style="background:${color}">${a.scan_type}</span></td>
+        <td><span class="ip-link" onclick="openDossier('${a.source_ip}')">${a.source_ip}</span></td>
+        <td><span class="ip-link" onclick="openDossier('${dest}')">${dest}</span></td>
+        <td style="color:#8b949e">${detail}</td>
+      </tr>`;
+    } else {
+      // Cluster header (expandable)
+      const cid = 'c' + Math.random().toString(36).slice(2, 8);
+      html += `<tr class="cluster-header" onclick="toggleCluster('${cid}', this)">
+        <td style="color:#8b949e">${formatTime(a.timestamp)}</td>
+        <td><span class="type-badge" style="background:${color}">${a.scan_type}</span></td>
+        <td><span class="ip-link" onclick="event.stopPropagation();openDossier('${a.source_ip}')">${a.source_ip}</span></td>
+        <td colspan="2" style="color:var(--yellow)">&#215;${cluster.items.length} alerte grupate (click pentru expand)</td>
+      </tr>`;
+      for (const child of cluster.items) {
+        const cd = child.dest_ip || "N/A";
+        html += `<tr class="cluster-child ${cid}">
+          <td style="color:#8b949e">${formatTime(child.timestamp)}</td>
+          <td><span class="type-badge" style="background:${color};font-size:10px">${child.scan_type}</span></td>
+          <td><span class="ip-link" onclick="openDossier('${child.source_ip}')">${child.source_ip}</span></td>
+          <td><span class="ip-link" onclick="openDossier('${cd}')">${cd}</span></td>
+          <td style="color:#8b949e">${alertDetail(child)}</td>
+        </tr>`;
+      }
     }
-    return `<tr>
-      <td style="color:#8b949e">${formatTime(a.timestamp)}</td>
-      <td><span class="type-badge" style="background:${color}">${a.scan_type}</span></td>
-      <td>${a.source_ip}</td>
-      <td>${dest}</td>
-      <td style="color:#8b949e">${detail}</td>
-    </tr>`;
-  }).join("");
-  tbody.innerHTML = rows;
+  }
+  tbody.innerHTML = html;
 }
+
+function alertDetail(a) {
+  if (a.scan_type === "Lateral Movement" && a.unique_dests && a.unique_dests.length > 0) {
+    const ips = a.unique_dests.slice(0, 8).join(", ");
+    const extra = a.unique_dests.length > 8 ? ` +${a.unique_dests.length - 8}` : "";
+    return `\u2192 ${a.unique_dests.length} tinte: ${ips}${extra}`;
+  }
+  if (a.scan_type === "Distributed Scan" && a.unique_sources && a.unique_sources.length > 0) {
+    const ips = a.unique_sources.slice(0, 8).join(", ");
+    const extra = a.unique_sources.length > 8 ? ` +${a.unique_sources.length - 8}` : "";
+    return `\u2190 ${a.unique_sources.length} atacatori: ${ips}${extra}`;
+  }
+  if (a.unique_ports && a.unique_ports.length > 0) {
+    const ports = a.unique_ports.slice(0, 10).join(", ");
+    const extra = a.unique_ports.length > 10 ? ` +${a.unique_ports.length - 10}` : "";
+    return `${a.unique_ports.length} porturi: ${ports}${extra}`;
+  }
+  return "";
+}
+
+window.toggleCluster = function(cid, header) {
+  const rows = document.querySelectorAll('.' + cid);
+  const expanded = header.classList.toggle("expanded");
+  rows.forEach(r => r.classList.toggle("visible", expanded));
+};
 
 function formatTime(ts) {
   if (!ts) return "-";
@@ -829,17 +1329,44 @@ function formatTime(ts) {
   } catch { return ts; }
 }
 
+// ==== Omnisearch (Sarcina 2) ====
+
+function doSearch() {
+  const input = document.getElementById("omnisearch");
+  const val = input.value.trim();
+  if (!val) { clearSearch(); return; }
+  activeSearchIp = val;
+  input.value = '';
+  document.getElementById("search-tag").style.display = "flex";
+  document.getElementById("search-tag-ip").textContent = val;
+  refresh();
+}
+
+function clearSearch() {
+  activeSearchIp = null;
+  document.getElementById("search-tag").style.display = "none";
+  document.getElementById("omnisearch").value = '';
+  refresh();
+}
+
+document.getElementById("btn-search").addEventListener("click", doSearch);
+document.getElementById("omnisearch").addEventListener("keydown", e => {
+  if (e.key === "Enter") doSearch();
+  if (e.key === "Escape") clearSearch();
+});
+document.getElementById("search-tag-close").addEventListener("click", clearSearch);
+
 // ==== Refresh Loop ====
 async function refresh() {
   try {
+    const ipParam = activeSearchIp ? "?ip=" + encodeURIComponent(activeSearchIp) : "";
     const [graphRes, alertsRes] = await Promise.all([
-      fetch("/api/graph"),
-      fetch("/api/alerts"),
+      fetch("/api/graph" + ipParam),
+      fetch("/api/alerts" + ipParam),
     ]);
     const graph = await graphRes.json();
     const alerts = await alertsRes.json();
 
-    // Stats
     document.getElementById("stat-alerts").textContent    = graph.stats.total_alerts;
     document.getElementById("stat-attackers").textContent  = graph.stats.unique_attackers;
     document.getElementById("stat-targets").textContent    = graph.stats.unique_targets;
@@ -848,7 +1375,6 @@ async function refresh() {
     updateGraph(graph);
     updateTable(alerts);
 
-    // Show empty state if no data
     const area = document.getElementById("graph-area");
     if (graph.nodes.length === 0 && !document.querySelector(".empty-state")) {
       const empty = document.createElement("div");
@@ -871,16 +1397,15 @@ document.addEventListener("DOMContentLoaded", () => {
   setInterval(refresh, 5000);
 });
 
-// Handle resize
 window.addEventListener("resize", () => {
   if (!simulation) return;
   const area = document.getElementById("graph-area");
   width = area.clientWidth;
   height = area.clientHeight;
   d3.select("#graph-svg").attr("viewBox", [0, 0, width, height]);
-  simulation.force("center", d3.forceCenter(width / 2, height / 2).strength(0.1));
-  simulation.force("x", d3.forceX(width / 2).strength(0.05));
-  simulation.force("y", d3.forceY(height / 2).strength(0.05));
+  simulation.force("center", d3.forceCenter(width / 2, height / 2).strength(0.05));
+  simulation.force("x", d3.forceX(width / 2).strength(0.04));
+  simulation.force("y", d3.forceY(height / 2).strength(0.04));
   simulation.alpha(0.1).restart();
 });
 </script>

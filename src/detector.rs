@@ -39,11 +39,12 @@
 //
 // =============================================================================
 
-use crate::config::{DetectionConfig, DynamicThresholdConfig};
+use crate::config::{DetectionConfig, DetectionExceptions, DynamicThresholdConfig};
 use crate::parser::LogEvent;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Local};
 use dashmap::DashMap;
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -368,6 +369,26 @@ fn effective_threshold_value(
     (dynamic.ceil() as usize).clamp(floor.max(1), ceiling.max(1))
 }
 
+/// Exceptii de detectie parsate (IP-uri ca IpAddr, porturi ca HashSet pentru O(1) lookup).
+/// Parsate o singura data la constructie / hot reload, nu la fiecare eveniment.
+struct ParsedExceptions {
+    authorized_scanners: HashSet<IpAddr>,
+    ignore_lateral_ports: HashSet<u16>,
+    ignore_distributed_target_ports: HashSet<u16>,
+}
+
+impl ParsedExceptions {
+    fn from_config(exc: &DetectionExceptions) -> Self {
+        Self {
+            authorized_scanners: exc.authorized_scanners.iter()
+                .filter_map(|s| s.parse::<IpAddr>().ok())
+                .collect(),
+            ignore_lateral_ports: exc.ignore_lateral_ports.iter().copied().collect(),
+            ignore_distributed_target_ports: exc.ignore_distributed_target_ports.iter().copied().collect(),
+        }
+    }
+}
+
 pub struct Detector {
     /// Evidenta porturilor BLOCATE (drop) accesate per IP sursa.
     /// Alimenteaza detectia Fast Scan si Slow Scan.
@@ -429,6 +450,10 @@ pub struct Detector {
     /// cost: un load atomic per acces, neglijabil la scala UDP processing.
     config: ArcSwap<DetectionConfig>,
 
+    /// Exceptii de detectie parsate (authorized_scanners, ignore_lateral_ports, etc.).
+    /// Wrapat in ArcSwap pentru hot reload atomic la SIGHUP.
+    exceptions: ArcSwap<ParsedExceptions>,
+
     /// Starea baseline pentru praguri dinamice (#35).
     /// Protejat de Mutex — accesat doar in cleanup (~60s) pentru write
     /// si in process_event pentru read (lock < 1μs, doar copie 3 floats).
@@ -448,6 +473,8 @@ impl Detector {
             .filter_map(|entry| WhitelistEntry::parse(entry))
             .collect();
 
+        let exceptions = ParsedExceptions::from_config(&config.exceptions);
+
         Self {
             port_hits: DashMap::new(),
             accept_hits: DashMap::new(),
@@ -461,6 +488,7 @@ impl Detector {
             last_seen: DashMap::new(),
             whitelist: ArcSwap::from_pointee(whitelist),
             config: ArcSwap::from_pointee(config),
+            exceptions: ArcSwap::from_pointee(exceptions),
             baseline: Mutex::new(BaselineState::new()),
         }
     }
@@ -483,9 +511,13 @@ impl Detector {
             .filter_map(|entry| WhitelistEntry::parse(entry))
             .collect();
 
+        // Re-parsam exceptiile din noua configurare.
+        let new_exceptions = ParsedExceptions::from_config(&new_config.exceptions);
+
         // Swap atomic: noua configurare devine activa imediat.
         self.config.store(Arc::new(new_config));
         self.whitelist.store(Arc::new(new_whitelist));
+        self.exceptions.store(Arc::new(new_exceptions));
     }
 
     /// Verifica daca un IP este in whitelist (exclus din detectie).
@@ -734,9 +766,15 @@ impl Detector {
         // Logica: inregistram fiecare destinatie unica contactata. Daca numarul
         // de destinatii unice in fereastra de timp depaseste pragul, generam alerta.
         let lm_cfg = &cfg.lateral_movement;
+        let exc = self.exceptions.load();
         if lm_cfg.enabled {
             if let Some(dest_ip) = event.dest_ip {
-                if event.action == "accept" {
+                // Exceptii: authorized_scanners nu declanseaza Lateral Movement.
+                // Porturi din ignore_lateral_ports nu se contorizeaza.
+                if event.action == "accept"
+                    && !exc.authorized_scanners.contains(&ip)
+                    && !exc.ignore_lateral_ports.contains(&event.dest_port)
+                {
                     // Inregistram destinatia in lateral_hits pentru IP-ul sursa.
                     {
                         let mut hits = self.lateral_hits.entry(ip).or_default();
@@ -787,6 +825,11 @@ impl Detector {
         let ds_cfg = &cfg.distributed_scan;
         if ds_cfg.enabled {
             if let Some(dest_ip) = event.dest_ip {
+                // Exceptie: portul destinatie e in ignore_distributed_target_ports
+                // (ex: DNS 53, NTP 123) → nu contorizam acest hit.
+                if exc.ignore_distributed_target_ports.contains(&event.dest_port) {
+                    // Skip — acest port este un serviciu popular, nu o tinta de scan.
+                } else
                 // Inregistram hit-ul in distributed_hits pentru IP-ul destinatie.
                 {
                     let mut hits = self.distributed_hits.entry(dest_ip).or_default();
@@ -1127,6 +1170,7 @@ mod tests {
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
             whitelist: Vec::new(),
+            exceptions: Default::default(),
             fast_scan: FastScanConfig {
                 port_threshold: 3,
                 time_window_secs: 10,
@@ -1172,6 +1216,7 @@ mod tests {
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
             whitelist: Vec::new(),
+            exceptions: Default::default(),
             fast_scan: FastScanConfig {
                 port_threshold: 100,
                 time_window_secs: 10,
@@ -1472,6 +1517,7 @@ mod tests {
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
             whitelist: Vec::new(),
+            exceptions: Default::default(),
             fast_scan: FastScanConfig {
                 port_threshold: 1_000, // prag mare — nu se declanseaza in teste slow
                 time_window_secs: 10,
@@ -1762,6 +1808,7 @@ mod tests {
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
             whitelist: Vec::new(),
+            exceptions: Default::default(),
             fast_scan: FastScanConfig {
                 port_threshold: 100,
                 time_window_secs: 10,

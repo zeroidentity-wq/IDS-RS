@@ -131,6 +131,11 @@ pub struct DetectionConfig {
     #[serde(default)]
     pub whitelist: Vec<String>,
 
+    /// Exceptii detectie: IP-uri si porturi excluse din anumite tipuri de detectie.
+    /// Diferit de whitelist (care exclude complet din ORICE detectie).
+    #[serde(default)]
+    pub exceptions: DetectionExceptions,
+
     pub fast_scan: FastScanConfig,
     pub slow_scan: SlowScanConfig,
 
@@ -162,6 +167,31 @@ fn default_max_hits_per_ip() -> usize {
 
 fn default_max_tracked_ips() -> usize {
     100_000
+}
+
+/// Exceptii detectie — reducerea fals-pozitivelor pentru scenarii specifice.
+///
+/// Diferenta fata de whitelist:
+///   whitelist    → IP-ul nu genereaza NICIO alerta (exclus complet)
+///   exceptions   → IP-ul/portul e ignorat doar pentru un tip specific de detectie
+///
+/// Cazuri de utilizare:
+///   - Scannere autorizate (Nessus, OpenVAS) → nu declanseaza Lateral Movement
+///   - Porturi interne cu fan-out (SMB 445, WinRM 5985) → nu conteaza la Lateral
+///   - Servere populare (DNS 53, NTP 123) → nu declanseaza Distributed Scan
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DetectionExceptions {
+    /// IP-uri autorizate sa faca scanning. NU declanseaza Lateral Movement.
+    #[serde(default)]
+    pub authorized_scanners: Vec<String>,
+
+    /// Porturi ignorate la contorizarea Lateral Movement.
+    #[serde(default)]
+    pub ignore_lateral_ports: Vec<u16>,
+
+    /// Porturi ignorate la contorizarea Distributed Scan (din perspectiva tintei).
+    #[serde(default)]
+    pub ignore_distributed_target_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -581,6 +611,15 @@ impl AppConfig {
                         "detection.whitelist: IP invalid: \"{}\"", entry
                     ));
                 }
+            }
+        }
+
+        // Validare detection.exceptions: authorized_scanners trebuie sa fie IP-uri valide.
+        for entry in &self.detection.exceptions.authorized_scanners {
+            if entry.parse::<std::net::IpAddr>().is_err() {
+                errors.push(format!(
+                    "detection.exceptions.authorized_scanners: IP invalid: \"{}\"", entry
+                ));
             }
         }
 
