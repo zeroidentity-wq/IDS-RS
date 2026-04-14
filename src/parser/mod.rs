@@ -124,6 +124,9 @@ pub fn create_parser(parser_type: &str) -> anyhow::Result<Box<dyn LogParser>> {
         "gaia" => Ok(Box::new(gaia::GaiaParser::new()?)),
         "cef" => Ok(Box::new(cef::CefParser::new())),
         "gaia_cef" => Ok(Box::new(gaia_cef::GaiaCefParser::new())),
-        _ => anyhow::bail!("Parser necunoscut: '{}'. Optiuni valide: gaia, cef, gaia_cef", parser_type),
+        _ => anyhow::bail!(
+            "Parser necunoscut: '{}'. Optiuni valide: gaia, cef, gaia_cef",
+            parser_type
+        ),
     }
 }

@@ -93,7 +93,10 @@ pub fn print_banner(config: &AppConfig) {
 
     // Status SIEM si Email cu indicatoare colorate.
     let siem_label = if config.alerting.siem.enabled {
-        format!("{}:{}", config.alerting.siem.host, config.alerting.siem.port)
+        format!(
+            "{}:{}",
+            config.alerting.siem.host, config.alerting.siem.port
+        )
     } else {
         "OFF".to_string()
     };
@@ -104,15 +107,15 @@ pub fn print_banner(config: &AppConfig) {
     };
 
     let web_label = if config.web_dashboard.enabled {
-        format!("http://{}:{}", config.web_dashboard.bind, config.web_dashboard.port)
+        format!(
+            "http://{}:{}",
+            config.web_dashboard.bind, config.web_dashboard.port
+        )
     } else {
         "OFF".to_string()
     };
 
-    let siem_line = format!(
-        "  SIEM:   {:<14} Email:  {}",
-        siem_label, email_label
-    );
+    let siem_line = format!("  SIEM:   {:<14} Email:  {}", siem_label, email_label);
     println!(
         "{}",
         format!("║{:<width$}║", siem_line, width = inner_width).cyan()
@@ -157,7 +160,10 @@ pub fn print_banner(config: &AppConfig) {
     // Whitelist — afisam numarul de intrari daca exista.
     let wl_count = config.detection.whitelist.len();
     if wl_count > 0 {
-        let wl_line = format!("  Whitelist: {} intrari (IP/CIDR excluse din detectie)", wl_count);
+        let wl_line = format!(
+            "  Whitelist: {} intrari (IP/CIDR excluse din detectie)",
+            wl_count
+        );
         println!(
             "{}",
             format!("║{:<width$}║", wl_line, width = inner_width).cyan()
@@ -167,7 +173,10 @@ pub fn print_banner(config: &AppConfig) {
     // Hostnames — afisam numarul de mapping-uri IP→hostname daca exista.
     let hn_count = config.network.hostnames.len();
     if hn_count > 0 {
-        let hn_line = format!("  Hostnames: {} mapping-uri IP->hostname configurate", hn_count);
+        let hn_line = format!(
+            "  Hostnames: {} mapping-uri IP->hostname configurate",
+            hn_count
+        );
         println!(
             "{}",
             format!("║{:<width$}║", hn_line, width = inner_width).cyan()
@@ -177,7 +186,10 @@ pub fn print_banner(config: &AppConfig) {
     // Subnets — afisam numarul de mapping-uri CIDR→locatie daca exista.
     let sn_count = config.network.subnets.len();
     if sn_count > 0 {
-        let sn_line = format!("  Subnets:   {} mapping-uri CIDR->locatie configurate", sn_count);
+        let sn_line = format!(
+            "  Subnets:   {} mapping-uri CIDR->locatie configurate",
+            sn_count
+        );
         println!(
             "{}",
             format!("║{:<width$}║", sn_line, width = inner_width).cyan()
@@ -257,10 +269,7 @@ pub fn log_error(message: &str) {
 
 /// Afiseaza o alerta de securitate cu formatare vizual distincta.
 pub fn log_alert(alert: &Alert, hostnames: &HashMap<IpAddr, String>, subnets: &[SubnetEntry]) {
-    let ts = alert
-        .timestamp
-        .format("[%Y-%m-%d %H:%M:%S]")
-        .to_string();
+    let ts = alert.timestamp.format("[%Y-%m-%d %H:%M:%S]").to_string();
 
     // Formatam lista de porturi cu trunchiere.
     // `.take(25)` limiteaza la primele 25 porturi (iteratorul e lazy).
@@ -554,7 +563,10 @@ fn timestamp() -> String {
 /// Formateaza un IP cu hostname si/sau locatie subnet.
 /// Format: "IP (hostname) [Etaj 1]", "IP [Etaj 1]", "IP (hostname)", sau doar "IP".
 fn format_ip(ip: &IpAddr, hostnames: &HashMap<IpAddr, String>, subnets: &[SubnetEntry]) -> String {
-    let hostname = hostnames.get(ip).map(|s| format!(" ({})", s)).unwrap_or_default();
+    let hostname = hostnames
+        .get(ip)
+        .map(|s| format!(" ({})", s))
+        .unwrap_or_default();
     let location = SubnetEntry::lookup(subnets, ip)
         .map(|l| format!(" [{}]", l))
         .unwrap_or_default();

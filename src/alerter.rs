@@ -40,9 +40,8 @@ use crate::display;
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use lettre::{
-    message::header::ContentType,
-    transport::smtp::authentication::Credentials,
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    message::header::ContentType, transport::smtp::authentication::Credentials, AsyncSmtpTransport,
+    AsyncTransport, Message, Tokio1Executor,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -284,10 +283,9 @@ fn build_mailer(cfg: &EmailConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>>
         }
         builder.build()
     } else {
-        let mut builder =
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_server)
-                .port(cfg.smtp_port)
-                .timeout(smtp_timeout);
+        let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.smtp_server)
+            .port(cfg.smtp_port)
+            .timeout(smtp_timeout);
         if !cfg.username.is_empty() {
             let creds = Credentials::new(cfg.username.clone(), cfg.password.clone());
             builder = builder.credentials(creds);
@@ -362,7 +360,8 @@ impl Alerter {
                 Ok(m) => Some(m),
                 Err(e) => {
                     display::log_error(&format!(
-                        "SIGHUP: rebuild SMTP esuat, pastrez mailer-ul vechi: {:#}", e
+                        "SIGHUP: rebuild SMTP esuat, pastrez mailer-ul vechi: {:#}",
+                        e
                     ));
                     self.config.store(Arc::new(new_alerting));
                     self.detection.store(Arc::new(new_detection));
@@ -488,7 +487,10 @@ impl Alerter {
                 format!(
                     "Distributed Scan detectat: {} surse unice → tinta {} in {} secunde",
                     alert.unique_sources.len(),
-                    alert.dest_ip.map(|ip| ip.to_string()).unwrap_or_else(|| "N/A".to_string()),
+                    alert
+                        .dest_ip
+                        .map(|ip| ip.to_string())
+                        .unwrap_or_else(|| "N/A".to_string()),
                     det.distributed_scan.time_window_secs,
                 ),
                 7u8,
@@ -538,7 +540,12 @@ impl Alerter {
         };
 
         // Mesajul campului msg: descriere + lista valori (porturi sau IP-uri).
-        let msg_text = format!("{} | {}: {}", sanitize_cef(&scan_label), cs1_label.to_lowercase(), cs1_msg);
+        let msg_text = format!(
+            "{} | {}: {}",
+            sanitize_cef(&scan_label),
+            cs1_label.to_lowercase(),
+            cs1_msg
+        );
 
         // Sanitizare anti-injection pentru event_name (camp header CEF, separator '|').
         let event_name_safe = sanitize_cef(event_name);
@@ -659,7 +666,8 @@ impl Alerter {
                 } else {
                     list
                 };
-                let target = alert.dest_ip
+                let target = alert
+                    .dest_ip
                     .map(|ip| ip.to_string())
                     .unwrap_or_else(|| "N/A".to_string());
                 let subj = format!(
@@ -730,10 +738,7 @@ impl Alerter {
 
         // Hostname-uri din mapping-ul static.
         let hn = self.hostnames.load();
-        let src_hostname = hn
-            .get(&alert.source_ip)
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let src_hostname = hn.get(&alert.source_ip).map(|s| s.as_str()).unwrap_or("");
         let dst_hostname = match alert.dest_ip {
             Some(ref ip) => hn.get(ip).map(|s| s.as_str()).unwrap_or(""),
             None => "",
@@ -850,7 +855,10 @@ mod tests {
     #[test]
     fn test_sanitize_string_curat() {
         // Textul normal nu trebuie modificat
-        assert_eq!(sanitize_cef("Fast Scan detectat: 20 porturi"), "Fast Scan detectat: 20 porturi");
+        assert_eq!(
+            sanitize_cef("Fast Scan detectat: 20 porturi"),
+            "Fast Scan detectat: 20 porturi"
+        );
     }
 
     #[test]

@@ -91,9 +91,9 @@ use tokio::net::UdpSocket;
 struct TokenBucket {
     tokens: f64,
     max_tokens: f64,
-    refill_rate: f64,      // tokeni adaugati per secunda
+    refill_rate: f64, // tokeni adaugati per secunda
     last_refill: Instant,
-    dropped_count: u64,    // contor pachete dropate (pentru afisare periodica)
+    dropped_count: u64, // contor pachete dropate (pentru afisare periodica)
 }
 
 impl TokenBucket {
@@ -253,14 +253,14 @@ async fn main() -> anyhow::Result<()> {
             .network
             .hostnames
             .iter()
-            .filter_map(|(ip_str, name)| {
-                ip_str.parse::<IpAddr>().ok().map(|ip| (ip, name.clone()))
-            })
+            .filter_map(|(ip_str, name)| ip_str.parse::<IpAddr>().ok().map(|ip| (ip, name.clone())))
             .collect()
     }
 
     let hostnames = Arc::new(ArcSwap::from_pointee(parse_hostnames(&config)));
-    let subnets = Arc::new(ArcSwap::from_pointee(SubnetEntry::parse_subnets(&config.network.subnets)));
+    let subnets = Arc::new(ArcSwap::from_pointee(SubnetEntry::parse_subnets(
+        &config.network.subnets,
+    )));
 
     let detector = Arc::new(Detector::new(config.detection.clone()));
     let alerter = Arc::new(Alerter::new(
@@ -290,9 +290,7 @@ async fn main() -> anyhow::Result<()> {
         match web::start_web_server(&config.web_dashboard, web_alerts).await {
             Ok(_handle) => {}
             Err(e) => {
-                display::log_warning(&format!(
-                    "Web dashboard nu a pornit: {:#}", e
-                ));
+                display::log_warning(&format!("Web dashboard nu a pornit: {:#}", e));
             }
         }
     }
@@ -423,13 +421,9 @@ async fn main() -> anyhow::Result<()> {
     // la fel ca la Ctrl+C: alerta in curs de trimitere (.await activ) se
     // finalizeaza complet inainte de iesire — nu se pierde nicio alerta.
     //
-    let mut sighup = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::hangup(),
-    )?;
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
 
-    let mut sigterm = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     // =========================================================================
     // 9. MAIN LOOP - Receptie si Procesare Log-uri

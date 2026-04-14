@@ -269,8 +269,12 @@ pub struct LateralMovementConfig {
     pub time_window_secs: u64,
 }
 
-fn default_lateral_dest_threshold() -> usize { 5 }
-fn default_lateral_time_window() -> u64 { 60 }
+fn default_lateral_dest_threshold() -> usize {
+    5
+}
+fn default_lateral_time_window() -> u64 {
+    60
+}
 
 fn default_lateral_movement() -> LateralMovementConfig {
     LateralMovementConfig {
@@ -308,8 +312,12 @@ pub struct DistributedScanConfig {
     pub time_window_secs: u64,
 }
 
-fn default_distributed_sources_threshold() -> usize { 5 }
-fn default_distributed_time_window() -> u64 { 60 }
+fn default_distributed_sources_threshold() -> usize {
+    5
+}
+fn default_distributed_time_window() -> u64 {
+    60
+}
 
 fn default_distributed_scan() -> DistributedScanConfig {
     DistributedScanConfig {
@@ -362,11 +370,21 @@ pub struct DynamicThresholdConfig {
     pub max_threshold_ratio: f64,
 }
 
-fn default_ewma_alpha() -> f64 { 0.1 }
-fn default_sensitivity_multiplier() -> f64 { 3.0 }
-fn default_min_samples() -> u64 { 10 }
-fn default_min_threshold_ratio() -> f64 { 0.5 }
-fn default_max_threshold_ratio() -> f64 { 3.0 }
+fn default_ewma_alpha() -> f64 {
+    0.1
+}
+fn default_sensitivity_multiplier() -> f64 {
+    3.0
+}
+fn default_min_samples() -> u64 {
+    10
+}
+fn default_min_threshold_ratio() -> f64 {
+    0.5
+}
+fn default_max_threshold_ratio() -> f64 {
+    3.0
+}
 
 fn default_dynamic_threshold() -> DynamicThresholdConfig {
     DynamicThresholdConfig {
@@ -462,9 +480,15 @@ pub struct WebDashboardConfig {
     pub max_alerts: usize,
 }
 
-fn default_web_port() -> u16 { 8080 }
-fn default_web_bind() -> String { "127.0.0.1".to_string() }
-fn default_web_max_alerts() -> usize { 1000 }
+fn default_web_port() -> u16 {
+    8080
+}
+fn default_web_bind() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_web_max_alerts() -> usize {
+    1000
+}
 
 fn default_web_dashboard() -> WebDashboardConfig {
     WebDashboardConfig {
@@ -508,8 +532,8 @@ impl AppConfig {
         // `toml::from_str` deserializeaza continutul TOML in structura noastra.
         // Aceasta functioneaza datorita #[derive(Deserialize)] de pe AppConfig.
         // serde mapeaza automat cheile TOML pe campurile structurii.
-        let config: AppConfig = toml::from_str(&content)
-            .context("Eroare la parsarea fisierului TOML")?;
+        let config: AppConfig =
+            toml::from_str(&content).context("Eroare la parsarea fisierului TOML")?;
 
         // Validare semantica post-deserializare.
         // serde verifica doar tipurile; validate() verifica logica si valorile.
@@ -550,7 +574,8 @@ impl AppConfig {
         for (ip_str, _hostname) in &self.network.hostnames {
             if ip_str.parse::<std::net::IpAddr>().is_err() {
                 errors.push(format!(
-                    "network.hostnames: cheia \"{}\" nu este un IP valid", ip_str
+                    "network.hostnames: cheia \"{}\" nu este un IP valid",
+                    ip_str
                 ));
             }
         }
@@ -591,25 +616,32 @@ impl AppConfig {
                 let parts: Vec<&str> = entry.splitn(2, '/').collect();
                 if parts.len() != 2 {
                     errors.push(format!(
-                        "detection.whitelist: intrare CIDR invalida: \"{}\"", entry
+                        "detection.whitelist: intrare CIDR invalida: \"{}\"",
+                        entry
                     ));
                     continue;
                 }
                 let ip_valid = parts[0].parse::<std::net::IpAddr>().is_ok();
-                let prefix_valid = parts[1].parse::<u8>().map(|p| {
-                    if parts[0].contains(':') { p <= 128 } else { p <= 32 }
-                }).unwrap_or(false);
+                let prefix_valid = parts[1]
+                    .parse::<u8>()
+                    .map(|p| {
+                        if parts[0].contains(':') {
+                            p <= 128
+                        } else {
+                            p <= 32
+                        }
+                    })
+                    .unwrap_or(false);
                 if !ip_valid || !prefix_valid {
                     errors.push(format!(
-                        "detection.whitelist: intrare CIDR invalida: \"{}\"", entry
+                        "detection.whitelist: intrare CIDR invalida: \"{}\"",
+                        entry
                     ));
                 }
             } else {
                 // IP individual
                 if entry.parse::<std::net::IpAddr>().is_err() {
-                    errors.push(format!(
-                        "detection.whitelist: IP invalid: \"{}\"", entry
-                    ));
+                    errors.push(format!("detection.whitelist: IP invalid: \"{}\"", entry));
                 }
             }
         }
@@ -618,7 +650,8 @@ impl AppConfig {
         for entry in &self.detection.exceptions.authorized_scanners {
             if entry.parse::<std::net::IpAddr>().is_err() {
                 errors.push(format!(
-                    "detection.exceptions.authorized_scanners: IP invalid: \"{}\"", entry
+                    "detection.exceptions.authorized_scanners: IP invalid: \"{}\"",
+                    entry
                 ));
             }
         }
@@ -721,7 +754,8 @@ impl AppConfig {
             }
             if dt.sensitivity_multiplier <= 0.0 {
                 errors.push(
-                    "detection.dynamic_threshold.sensitivity_multiplier trebuie sa fie > 0.0".to_string()
+                    "detection.dynamic_threshold.sensitivity_multiplier trebuie sa fie > 0.0"
+                        .to_string(),
                 );
             }
             if dt.min_threshold_ratio <= 0.0 || dt.min_threshold_ratio >= dt.max_threshold_ratio {
@@ -779,9 +813,7 @@ impl AppConfig {
 
         if self.web_dashboard.enabled {
             if self.web_dashboard.port == 0 {
-                errors.push(
-                    "web_dashboard.port = 0 este invalid".to_string(),
-                );
+                errors.push("web_dashboard.port = 0 este invalid".to_string());
             }
             if self.web_dashboard.bind.is_empty() {
                 errors.push(
@@ -802,7 +834,8 @@ impl AppConfig {
                 errors.push("alerting.siem.port = 0 este invalid".to_string());
             }
             if self.alerting.siem.host.is_empty() {
-                errors.push("alerting.siem.host nu poate fi gol cand SIEM este activat".to_string());
+                errors
+                    .push("alerting.siem.host nu poate fi gol cand SIEM este activat".to_string());
             }
         }
 
@@ -877,13 +910,21 @@ impl SubnetEntry {
     /// Parseaza un CIDR string (ex: "10.10.1.0/24") intr-un SubnetEntry.
     fn parse(cidr: &str) -> Option<Self> {
         let parts: Vec<&str> = cidr.splitn(2, '/').collect();
-        if parts.len() != 2 { return None; }
+        if parts.len() != 2 {
+            return None;
+        }
         let ip: IpAddr = parts[0].parse().ok()?;
         let prefix: u8 = parts[1].parse().ok()?;
         match ip {
             IpAddr::V4(addr) => {
-                if prefix > 32 { return None; }
-                let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+                if prefix > 32 {
+                    return None;
+                }
+                let mask = if prefix == 0 {
+                    0u32
+                } else {
+                    !0u32 << (32 - prefix)
+                };
                 let network = u32::from(addr) & mask;
                 Some(SubnetEntry {
                     label: String::new(),
@@ -892,8 +933,14 @@ impl SubnetEntry {
                 })
             }
             IpAddr::V6(addr) => {
-                if prefix > 128 { return None; }
-                let mask = if prefix == 0 { 0u128 } else { !0u128 << (128 - prefix) };
+                if prefix > 128 {
+                    return None;
+                }
+                let mask = if prefix == 0 {
+                    0u128
+                } else {
+                    !0u128 << (128 - prefix)
+                };
                 let network = u128::from(addr) & mask;
                 Some(SubnetEntry {
                     label: String::new(),

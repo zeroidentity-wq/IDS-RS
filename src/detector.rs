@@ -77,12 +77,20 @@ impl WhitelistEntry {
             let prefix: u8 = parts[1].parse().ok()?;
             match ip {
                 IpAddr::V4(addr) => {
-                    let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+                    let mask = if prefix == 0 {
+                        0u32
+                    } else {
+                        !0u32 << (32 - prefix)
+                    };
                     let network = u32::from(addr) & mask;
                     Some(WhitelistEntry::CidrV4(network, mask))
                 }
                 IpAddr::V6(addr) => {
-                    let mask = if prefix == 0 { 0u128 } else { !0u128 << (128 - prefix) };
+                    let mask = if prefix == 0 {
+                        0u128
+                    } else {
+                        !0u128 << (128 - prefix)
+                    };
                     let network = u128::from(addr) & mask;
                     Some(WhitelistEntry::CidrV6(network, mask))
                 }
@@ -313,7 +321,11 @@ struct BaselineEwma {
 
 impl BaselineEwma {
     fn new() -> Self {
-        Self { mean: 0.0, variance: 0.0, samples: 0 }
+        Self {
+            mean: 0.0,
+            variance: 0.0,
+            samples: 0,
+        }
     }
 
     /// Actualizeaza EWMA cu o observatie noua.
@@ -380,11 +392,17 @@ struct ParsedExceptions {
 impl ParsedExceptions {
     fn from_config(exc: &DetectionExceptions) -> Self {
         Self {
-            authorized_scanners: exc.authorized_scanners.iter()
+            authorized_scanners: exc
+                .authorized_scanners
+                .iter()
                 .filter_map(|s| s.parse::<IpAddr>().ok())
                 .collect(),
             ignore_lateral_ports: exc.ignore_lateral_ports.iter().copied().collect(),
-            ignore_distributed_target_ports: exc.ignore_distributed_target_ports.iter().copied().collect(),
+            ignore_distributed_target_ports: exc
+                .ignore_distributed_target_ports
+                .iter()
+                .copied()
+                .collect(),
         }
     }
 }
@@ -562,8 +580,7 @@ impl Detector {
         // --- 0b. Praguri efective (statice sau dinamice #35) ---
         // Lock pe baseline < 1μs — doar citire a 3 floats per scan type.
         let (fast_threshold, slow_threshold, accept_threshold) = {
-            let bl = self.baseline.lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let bl = self.baseline.lock().unwrap_or_else(|e| e.into_inner());
             let dt = &cfg.dynamic_threshold;
             (
                 effective_threshold_value(cfg.fast_scan.port_threshold, &bl.fast_scan, dt),
@@ -688,9 +705,7 @@ impl Detector {
         // ceea ce ne permite sa o refolosim pentru Accept Scan (pasul 5) cu `accept_hits`.
         let fast_window = Duration::from_secs(cfg.fast_scan.time_window_secs);
         if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, fast_window, now) {
-            if ports.len() >= fast_threshold
-                && !self.in_cooldown(&self.fast_cooldowns, ip)
-            {
+            if ports.len() >= fast_threshold && !self.in_cooldown(&self.fast_cooldowns, ip) {
                 self.fast_cooldowns.insert(ip, now);
                 alerts.push(Alert {
                     scan_type: ScanType::Fast,
@@ -707,9 +722,7 @@ impl Detector {
         // --- 4. Verificam Slow Scan (pe port_hits — drop-uri) ---
         let slow_window = Duration::from_secs(cfg.slow_scan.time_window_mins * 60);
         if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, slow_window, now) {
-            if ports.len() >= slow_threshold
-                && !self.in_cooldown(&self.slow_cooldowns, ip)
-            {
+            if ports.len() >= slow_threshold && !self.in_cooldown(&self.slow_cooldowns, ip) {
                 self.slow_cooldowns.insert(ip, now);
                 alerts.push(Alert {
                     scan_type: ScanType::Slow,
@@ -735,10 +748,9 @@ impl Detector {
         // simultan o alerta Fast Scan (din drop-uri) SI o alerta Accept Scan (din
         // accept-uri) — si amandoua vor fi trimise la SIEM si email, independent.
         let accept_window = Duration::from_secs(cfg.accept_scan.time_window_secs);
-        if let Some(ports) = self.unique_ports_in_window(&self.accept_hits, ip, accept_window, now) {
-            if ports.len() >= accept_threshold
-                && !self.in_cooldown(&self.accept_cooldowns, ip)
-            {
+        if let Some(ports) = self.unique_ports_in_window(&self.accept_hits, ip, accept_window, now)
+        {
+            if ports.len() >= accept_threshold && !self.in_cooldown(&self.accept_cooldowns, ip) {
                 self.accept_cooldowns.insert(ip, now);
                 alerts.push(Alert {
                     scan_type: ScanType::AcceptScan,
@@ -778,7 +790,10 @@ impl Detector {
                     // Inregistram destinatia in lateral_hits pentru IP-ul sursa.
                     {
                         let mut hits = self.lateral_hits.entry(ip).or_default();
-                        hits.push(DestHit { dest_ip, seen_at: now });
+                        hits.push(DestHit {
+                            dest_ip,
+                            seen_at: now,
+                        });
                         // Cap memorie: refolosim max_hits_per_ip ca limita.
                         let max_hits = cfg.max_hits_per_ip;
                         if hits.len() > max_hits {
@@ -827,13 +842,20 @@ impl Detector {
             if let Some(dest_ip) = event.dest_ip {
                 // Exceptie: portul destinatie e in ignore_distributed_target_ports
                 // (ex: DNS 53, NTP 123) → nu contorizam acest hit.
-                if exc.ignore_distributed_target_ports.contains(&event.dest_port) {
+                if exc
+                    .ignore_distributed_target_ports
+                    .contains(&event.dest_port)
+                {
                     // Skip — acest port este un serviciu popular, nu o tinta de scan.
                 } else
                 // Inregistram hit-ul in distributed_hits pentru IP-ul destinatie.
                 {
                     let mut hits = self.distributed_hits.entry(dest_ip).or_default();
-                    hits.push(DistributedHit { source_ip: ip, port: event.dest_port, seen_at: now });
+                    hits.push(DistributedHit {
+                        source_ip: ip,
+                        port: event.dest_port,
+                        seen_at: now,
+                    });
                     // Cap memorie: refolosim max_hits_per_ip ca limita.
                     let max_hits = cfg.max_hits_per_ip;
                     if hits.len() > max_hits {
@@ -844,7 +866,9 @@ impl Detector {
 
                 // Colectam sursele unice si porturile in fereastra de timp.
                 let ds_window = Duration::from_secs(ds_cfg.time_window_secs);
-                if let Some((unique_srcs, targeted_ports)) = self.unique_sources_in_window(dest_ip, ds_window, now) {
+                if let Some((unique_srcs, targeted_ports)) =
+                    self.unique_sources_in_window(dest_ip, ds_window, now)
+                {
                     if unique_srcs.len() >= ds_cfg.unique_sources_threshold
                         && !self.in_cooldown(&self.distributed_cooldowns, dest_ip)
                     {
@@ -1026,10 +1050,14 @@ impl Detector {
                 // Iteram port_hits: esantionam fast_max si slow_max.
                 for entry in self.port_hits.iter() {
                     let ip = *entry.key();
-                    if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, fast_w, now) {
+                    if let Some(ports) =
+                        self.unique_ports_in_window(&self.port_hits, ip, fast_w, now)
+                    {
                         fast_max = fast_max.max(ports.len());
                     }
-                    if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, slow_w, now) {
+                    if let Some(ports) =
+                        self.unique_ports_in_window(&self.port_hits, ip, slow_w, now)
+                    {
                         slow_max = slow_max.max(ports.len());
                     }
                 }
@@ -1037,13 +1065,14 @@ impl Detector {
                 // Iteram accept_hits: esantionam accept_max.
                 for entry in self.accept_hits.iter() {
                     let ip = *entry.key();
-                    if let Some(ports) = self.unique_ports_in_window(&self.accept_hits, ip, accept_w, now) {
+                    if let Some(ports) =
+                        self.unique_ports_in_window(&self.accept_hits, ip, accept_w, now)
+                    {
                         accept_max = accept_max.max(ports.len());
                     }
                 }
 
-                let mut bl = self.baseline.lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut bl = self.baseline.lock().unwrap_or_else(|e| e.into_inner());
                 bl.fast_scan.update(fast_max as f64, alpha);
                 bl.slow_scan.update(slow_max as f64, alpha);
                 bl.accept_scan.update(accept_max as f64, alpha);
@@ -1056,9 +1085,9 @@ impl Detector {
         // iteratorul). De aceea colectam cheile goale si le stergem separat.
         let mut drop_empty: Vec<IpAddr> = Vec::new();
         for mut entry in self.port_hits.iter_mut() {
-            entry.value_mut().retain(|hit| {
-                now.saturating_duration_since(hit.seen_at) <= max_age
-            });
+            entry
+                .value_mut()
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
             if entry.value().is_empty() {
                 drop_empty.push(*entry.key());
             }
@@ -1073,9 +1102,9 @@ impl Detector {
         // Datele vechi de accept sunt la fel de costisitoare in memorie ca cele de drop.
         let mut accept_empty: Vec<IpAddr> = Vec::new();
         for mut entry in self.accept_hits.iter_mut() {
-            entry.value_mut().retain(|hit| {
-                now.saturating_duration_since(hit.seen_at) <= max_age
-            });
+            entry
+                .value_mut()
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
             if entry.value().is_empty() {
                 accept_empty.push(*entry.key());
             }
@@ -1087,9 +1116,9 @@ impl Detector {
         // --- Curatam lateral_hits (Lateral Movement #22) ---
         let mut lateral_empty: Vec<IpAddr> = Vec::new();
         for mut entry in self.lateral_hits.iter_mut() {
-            entry.value_mut().retain(|hit| {
-                now.saturating_duration_since(hit.seen_at) <= max_age
-            });
+            entry
+                .value_mut()
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
             if entry.value().is_empty() {
                 lateral_empty.push(*entry.key());
             }
@@ -1102,9 +1131,9 @@ impl Detector {
         // Indexat dupa dest_ip, nu source_ip — cleanup separat de celelalte.
         let mut dist_empty: Vec<IpAddr> = Vec::new();
         for mut entry in self.distributed_hits.iter_mut() {
-            entry.value_mut().retain(|hit| {
-                now.saturating_duration_since(hit.seen_at) <= max_age
-            });
+            entry
+                .value_mut()
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
             if entry.value().is_empty() {
                 dist_empty.push(*entry.key());
             }
@@ -1309,7 +1338,10 @@ mod tests {
 
         // Al 6-lea port - NU ar trebui sa genereze alerta (cooldown activ).
         let alerts = detector.process_event(&make_event("10.0.0.1", 100));
-        assert!(alerts.is_empty(), "Cooldown-ul ar fi trebuit sa previna alerta");
+        assert!(
+            alerts.is_empty(),
+            "Cooldown-ul ar fi trebuit sa previna alerta"
+        );
     }
 
     #[test]
@@ -1367,8 +1399,14 @@ mod tests {
 
         // Trebuie sa contina porturile CELE MAI RECENTE (6..=10), nu pe cele vechi (1..5).
         let ports: Vec<u16> = entry.iter().map(|h| h.port).collect();
-        assert!(ports.contains(&10), "Portul cel mai recent (10) trebuie sa fie prezent");
-        assert!(!ports.contains(&1), "Portul cel mai vechi (1) trebuia eliminat");
+        assert!(
+            ports.contains(&10),
+            "Portul cel mai recent (10) trebuie sa fie prezent"
+        );
+        assert!(
+            !ports.contains(&1),
+            "Portul cel mai vechi (1) trebuia eliminat"
+        );
     }
 
     // =========================================================================
@@ -1396,13 +1434,22 @@ mod tests {
         for port in 1..=3 {
             let alerts = detector.process_event(&make_accept_event("10.1.0.1", port));
             if port == 3 {
-                assert_eq!(alerts.len(), 1, "Trebuia o alerta Accept Scan la {} porturi", port);
+                assert_eq!(
+                    alerts.len(),
+                    1,
+                    "Trebuia o alerta Accept Scan la {} porturi",
+                    port
+                );
                 assert!(
                     matches!(alerts[0].scan_type, ScanType::AcceptScan),
                     "Tipul alertei trebuie sa fie AcceptScan"
                 );
             } else {
-                assert!(alerts.is_empty(), "Fara alerta la {} porturi (sub prag)", port);
+                assert!(
+                    alerts.is_empty(),
+                    "Fara alerta la {} porturi (sub prag)",
+                    port
+                );
             }
         }
     }
@@ -1418,7 +1465,8 @@ mod tests {
             for alert in &alerts {
                 assert!(
                     !matches!(alert.scan_type, ScanType::AcceptScan),
-                    "Drop events NU trebuie sa declanseze Accept Scan (port {})", port
+                    "Drop events NU trebuie sa declanseze Accept Scan (port {})",
+                    port
                 );
             }
         }
@@ -1435,11 +1483,13 @@ mod tests {
             for alert in &alerts {
                 assert!(
                     !matches!(alert.scan_type, ScanType::Fast),
-                    "Accept events NU trebuie sa declanseze Fast Scan (port {})", port
+                    "Accept events NU trebuie sa declanseze Fast Scan (port {})",
+                    port
                 );
                 assert!(
                     !matches!(alert.scan_type, ScanType::Slow),
-                    "Accept events NU trebuie sa declanseze Slow Scan (port {})", port
+                    "Accept events NU trebuie sa declanseze Slow Scan (port {})",
+                    port
                 );
             }
         }
@@ -1559,7 +1609,12 @@ mod tests {
         for port in 1..=3u16 {
             let alerts = detector.process_event(&make_event("192.168.1.1", port));
             if port == 3 {
-                assert_eq!(alerts.len(), 1, "Trebuia o alerta Slow Scan la {} porturi", port);
+                assert_eq!(
+                    alerts.len(),
+                    1,
+                    "Trebuia o alerta Slow Scan la {} porturi",
+                    port
+                );
                 assert!(
                     matches!(alerts[0].scan_type, ScanType::Slow),
                     "Tipul alertei trebuie sa fie Slow, nu {:?}",
@@ -1613,7 +1668,10 @@ mod tests {
         }
 
         assert!(got_slow, "Trebuia o alerta Slow Scan");
-        assert!(!got_fast, "Fast Scan NU trebuia sa se declanseze cu prag 1000");
+        assert!(
+            !got_fast,
+            "Fast Scan NU trebuia sa se declanseze cu prag 1000"
+        );
     }
 
     // =========================================================================
@@ -1630,7 +1688,10 @@ mod tests {
         // Trimitem 5 porturi (peste prag 3) — fara alerta.
         for port in 1..=5 {
             let alerts = detector.process_event(&make_event("10.0.0.1", port));
-            assert!(alerts.is_empty(), "IP in whitelist nu trebuie sa genereze alerta");
+            assert!(
+                alerts.is_empty(),
+                "IP in whitelist nu trebuie sa genereze alerta"
+            );
         }
     }
 
@@ -1643,7 +1704,10 @@ mod tests {
 
         for port in 1..=5 {
             let alerts = detector.process_event(&make_event("10.0.0.50", port));
-            assert!(alerts.is_empty(), "IP din subnet whitelist nu trebuie sa genereze alerta");
+            assert!(
+                alerts.is_empty(),
+                "IP din subnet whitelist nu trebuie sa genereze alerta"
+            );
         }
     }
 
@@ -1657,7 +1721,11 @@ mod tests {
         for port in 1..=3 {
             let alerts = detector.process_event(&make_event("10.0.0.2", port));
             if port == 3 {
-                assert_eq!(alerts.len(), 1, "IP-ul care NU e in whitelist trebuie sa genereze alerta");
+                assert_eq!(
+                    alerts.len(),
+                    1,
+                    "IP-ul care NU e in whitelist trebuie sa genereze alerta"
+                );
             }
         }
     }
@@ -1672,7 +1740,11 @@ mod tests {
         for port in 1..=3 {
             let alerts = detector.process_event(&make_event("10.0.2.1", port));
             if port == 3 {
-                assert_eq!(alerts.len(), 1, "IP din alt subnet nu e acoperit de whitelist");
+                assert_eq!(
+                    alerts.len(),
+                    1,
+                    "IP din alt subnet nu e acoperit de whitelist"
+                );
             }
         }
     }
@@ -1730,7 +1802,8 @@ mod tests {
             let alerts = detector.process_event(&make_lateral_event("10.0.1.5", dest, 445));
             assert!(
                 alerts.is_empty(),
-                "Nu trebuie alerta sub prag ({} destinatii)", dest
+                "Nu trebuie alerta sub prag ({} destinatii)",
+                dest
             );
         }
     }
@@ -1891,8 +1964,11 @@ mod tests {
         for src in &["10.0.1.1", "10.0.1.2"] {
             let alerts = detector.process_event(&make_distributed_event(src, "10.0.0.100", 80));
             assert!(
-                alerts.iter().all(|a| !matches!(a.scan_type, ScanType::DistributedScan)),
-                "Nu trebuie alerta sub prag ({} surse)", src
+                alerts
+                    .iter()
+                    .all(|a| !matches!(a.scan_type, ScanType::DistributedScan)),
+                "Nu trebuie alerta sub prag ({} surse)",
+                src
             );
         }
     }
@@ -1909,7 +1985,8 @@ mod tests {
         // 1 sursa → tinta B (diferita)
         let alerts = detector.process_event(&make_distributed_event("10.0.1.3", "10.0.0.200", 80));
         // Tinta A are 2 surse (sub prag), tinta B are 1 sursa (sub prag).
-        let dist: Vec<_> = alerts.iter()
+        let dist: Vec<_> = alerts
+            .iter()
             .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
             .collect();
         assert!(
@@ -1930,7 +2007,8 @@ mod tests {
 
         // A 4-a sursa — cooldown activ, nu trebuie alerta.
         let alerts = detector.process_event(&make_distributed_event("10.0.1.4", "10.0.0.100", 80));
-        let dist: Vec<_> = alerts.iter()
+        let dist: Vec<_> = alerts
+            .iter()
             .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
             .collect();
         assert!(
@@ -1946,7 +2024,8 @@ mod tests {
 
         for src in &["10.0.1.1", "10.0.1.2", "10.0.1.3"] {
             let alerts = detector.process_event(&make_distributed_event(src, "10.0.0.100", 80));
-            let dist: Vec<_> = alerts.iter()
+            let dist: Vec<_> = alerts
+                .iter()
                 .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
                 .collect();
             assert!(
@@ -1975,11 +2054,13 @@ mod tests {
         // Sursa 3: drop → ar trebui sa declanseze alerta
         let alerts = detector.process_event(&make_distributed_event("10.0.1.3", "10.0.0.100", 80));
 
-        let dist: Vec<_> = alerts.iter()
+        let dist: Vec<_> = alerts
+            .iter()
             .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
             .collect();
         assert_eq!(
-            dist.len(), 1,
+            dist.len(),
+            1,
             "Distributed Scan trebuie sa detecteze mix de drop si accept"
         );
     }
@@ -1993,7 +2074,8 @@ mod tests {
         detector.process_event(&make_distributed_event("10.0.1.2", "10.0.0.100", 80));
         let alerts = detector.process_event(&make_distributed_event("10.0.1.3", "10.0.0.100", 443));
 
-        let dist: Vec<_> = alerts.iter()
+        let dist: Vec<_> = alerts
+            .iter()
             .filter(|a| matches!(a.scan_type, ScanType::DistributedScan))
             .collect();
         assert_eq!(dist.len(), 1);

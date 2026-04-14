@@ -221,8 +221,8 @@ impl GaiaCefParser {
         let source_ip: IpAddr = src_str.parse().ok()?;
 
         // Extragem IP destinatie (optional).
-        let dest_ip: Option<IpAddr> = Self::extract_lea_field(blob, "dst")
-            .and_then(|s| s.parse().ok());
+        let dest_ip: Option<IpAddr> =
+            Self::extract_lea_field(blob, "dst").and_then(|s| s.parse().ok());
 
         // Extragem portul destinatie din "service" (obligatoriu).
         let service_str = Self::extract_lea_field(blob, "service")?;
@@ -365,7 +365,9 @@ mod tests {
     fn test_reject_non_cef() {
         // Input invalid (nu contine CEF: si nici action=) — return None.
         let parser = GaiaCefParser::new();
-        assert!(parser.parse("some random text that is not a LEA log").is_none());
+        assert!(parser
+            .parse("some random text that is not a LEA log")
+            .is_none());
     }
 
     #[test]

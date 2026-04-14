@@ -65,9 +65,7 @@ impl GaiaParser {
         //   Checkpoint:\s+ = literalul "Checkpoint:" urmat de spatii
         //   \S+\s+\S+\s+  = checkpoint date + time (ex: "3Sep2007 15:10:28")
         //   (accept|drop|reject) = actiunea (grup 1 capturat)
-        let header_re = Regex::new(
-            r"(?i)Checkpoint:\s+\S+\s+\S+\s+(accept|drop|reject)\s+"
-        )?;
+        let header_re = Regex::new(r"(?i)Checkpoint:\s+\S+\s+\S+\s+(accept|drop|reject)\s+")?;
 
         Ok(Self { header_re })
     }
@@ -151,8 +149,8 @@ impl LogParser for GaiaParser {
 
         // Extragem dest_ip din "dst: <IP>" (tinta atacului).
         // Option<> - unele log-uri pot lipsi campul dst.
-        let dest_ip: Option<IpAddr> = Self::extract_field(extensions, "dst")
-            .and_then(|s| s.parse().ok());
+        let dest_ip: Option<IpAddr> =
+            Self::extract_field(extensions, "dst").and_then(|s| s.parse().ok());
 
         // Extragem protocolul din "proto: <proto>".
         let protocol = Self::extract_field(extensions, "proto")

@@ -21,7 +21,12 @@
 use crate::config::WebDashboardConfig;
 use crate::detector::{Alert, ScanType};
 use crate::display;
-use axum::{extract::{Query, State}, response::Html, routing::get, Json, Router};
+use axum::{
+    extract::{Query, State},
+    response::Html,
+    routing::get,
+    Json, Router,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -63,10 +68,7 @@ pub async fn start_web_server(
         .await
         .map_err(|e| anyhow::anyhow!("Nu pot face bind pe {}: {}", bind_addr, e))?;
 
-    display::log_info(&format!(
-        "Web dashboard activ: http://{}",
-        bind_addr
-    ));
+    display::log_info(&format!("Web dashboard activ: http://{}", bind_addr));
 
     let handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -90,9 +92,15 @@ async fn get_dashboard() -> Html<&'static str> {
 ///
 /// `include_str!` imbeddeaza fisierul in binar la compile-time. Zero I/O la runtime,
 /// zero dependente externe. Adauga ~273KB la dimensiunea binarului.
-async fn get_d3_js() -> ([(axum::http::header::HeaderName, &'static str); 1], &'static str) {
+async fn get_d3_js() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
     static D3_JS: &str = include_str!("../static/d3.v7.min.js");
-    ([(axum::http::header::CONTENT_TYPE, "application/javascript")], D3_JS)
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        D3_JS,
+    )
 }
 
 /// Parametri de query pentru filtrarea alertelor si grafului.
@@ -128,11 +136,14 @@ async fn get_alerts(
 ) -> Json<serde_json::Value> {
     let buffer = state.alerts.lock().unwrap_or_else(|e| e.into_inner());
 
-    let filter_ip: Option<IpAddr> = params.ip.as_deref()
-        .and_then(|s| s.parse::<IpAddr>().ok());
+    let filter_ip: Option<IpAddr> = params.ip.as_deref().and_then(|s| s.parse::<IpAddr>().ok());
 
     let alerts: Vec<&Alert> = match filter_ip {
-        Some(ip) => buffer.iter().rev().filter(|a| alert_matches_ip(a, ip)).collect(),
+        Some(ip) => buffer
+            .iter()
+            .rev()
+            .filter(|a| alert_matches_ip(a, ip))
+            .collect(),
         None => buffer.iter().rev().collect(),
     };
     Json(serde_json::json!(alerts))
@@ -196,19 +207,16 @@ async fn get_graph(
     Query(params): Query<AlertQuery>,
 ) -> Json<GraphResponse> {
     let buffer = state.alerts.lock().unwrap_or_else(|e| e.into_inner());
-    let filter_ip: Option<IpAddr> = params.ip.as_deref()
-        .and_then(|s| s.parse::<IpAddr>().ok());
+    let filter_ip: Option<IpAddr> = params.ip.as_deref().and_then(|s| s.parse::<IpAddr>().ok());
 
     let mut attackers: HashMap<IpAddr, NodeAccum> = HashMap::new();
     let mut targets: HashMap<IpAddr, NodeAccum> = HashMap::new();
     // Deduplicam muchiile: (src, dst, scan_type) → count + porturi
     let mut edge_map: HashMap<(String, String, String), EdgeAccum> = HashMap::new();
 
-    for alert in buffer.iter().filter(|a| {
-        match filter_ip {
-            Some(ip) => alert_matches_ip(a, ip),
-            None => true,
-        }
+    for alert in buffer.iter().filter(|a| match filter_ip {
+        Some(ip) => alert_matches_ip(a, ip),
+        None => true,
     }) {
         let ts = alert.timestamp.to_rfc3339();
         let stype = alert.scan_type.to_string();
@@ -416,8 +424,12 @@ async fn get_ip_dossier(
     }
 
     let mut roles = Vec::new();
-    if as_attacker > 0 { roles.push("attacker"); }
-    if as_target > 0 { roles.push("target"); }
+    if as_attacker > 0 {
+        roles.push("attacker");
+    }
+    if as_target > 0 {
+        roles.push("target");
+    }
 
     let mut ports_vec: Vec<u16> = ports.into_iter().collect();
     ports_vec.sort_unstable();
@@ -803,6 +815,93 @@ body {
   padding: 3px 8px;
   border-bottom: 1px solid rgba(48,54,61,0.5);
 }
+
+/* Graph Toolbar */
+.graph-toolbar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 10;
+}
+.graph-toolbar button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  color: var(--accent);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.graph-toolbar button:hover { border-color: var(--accent); }
+.graph-toolbar button.active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* Scan Type Filter Bar */
+.filter-bar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.filter-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-right: 4px;
+}
+.filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+.filter-btn .fdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.filter-btn.off { opacity: 0.3; }
+.filter-btn:hover { border-color: var(--accent); }
+
+/* Glow pulse for recent alerts */
+@keyframes glow-pulse {
+  0%, 100% { filter: drop-shadow(0 0 3px var(--glow-color)) drop-shadow(0 0 6px var(--glow-color)); }
+  50% { filter: drop-shadow(0 0 8px var(--glow-color)) drop-shadow(0 0 16px var(--glow-color)); }
+}
+.node-glow { animation: glow-pulse 2s ease-in-out infinite; }
+
+/* Hover neighborhood highlighting */
+.links.dimmed line { stroke-opacity: 0.04 !important; }
+.nodes.dimmed circle { opacity: 0.08 !important; }
+.labels.dimmed text { opacity: 0.05 !important; }
+.link-hl { stroke-opacity: 0.9 !important; }
+.node-hl { opacity: 1 !important; }
+.label-hl { opacity: 1 !important; }
+
+/* Animated edge flow */
+@keyframes edge-flow {
+  to { stroke-dashoffset: -12; }
+}
+.edge-flow { stroke-dasharray: 6 3; animation: edge-flow 0.8s linear infinite; }
 </style>
 </head>
 <body>
@@ -837,14 +936,22 @@ body {
 </div>
 
 <div class="container">
+  <div class="filter-bar" id="filter-bar">
+    <span class="filter-label">Filtre:</span>
+    <button class="filter-btn" data-scan="Fast Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#f85149"></span> Fast</button>
+    <button class="filter-btn" data-scan="Slow Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#d29922"></span> Slow</button>
+    <button class="filter-btn" data-scan="Accept Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#bc8cff"></span> Accept</button>
+    <button class="filter-btn" data-scan="Lateral Movement" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#d18616"></span> Lateral</button>
+    <button class="filter-btn" data-scan="Distributed Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#39d353"></span> Distributed</button>
+  </div>
   <div class="graph-area" id="graph-area">
     <svg id="graph-svg"></svg>
     <div class="tooltip" id="tooltip"></div>
-    <div style="position:absolute;top:12px;right:12px;display:flex;gap:6px;z-index:10;">
-      <button id="btn-fit" style="background:var(--surface);
-        border:1px solid var(--border);border-radius:6px;padding:6px 14px;color:var(--accent);
-        cursor:pointer;font-family:inherit;font-size:11px;"
-        title="Centreaza graful in viewport">&#8982; Fit</button>
+    <div class="graph-toolbar">
+      <button id="btn-freeze" title="Freeze/Play simulare">&#10074;&#10074; Freeze</button>
+      <button id="btn-pin-all" title="Fixeaza toate nodurile">Pin All</button>
+      <button id="btn-unpin-all" title="Elibereaza toate nodurile">Unpin All</button>
+      <button id="btn-fit" title="Centreaza graful">&#8982; Fit</button>
     </div>
     <div class="legend">
       <div class="legend-item"><span class="legend-dot" style="background:#f85149"></span> Atacator</div>
@@ -905,6 +1012,10 @@ let currentNodes = [];
 let currentLinks = [];
 let width, height;
 let activeSearchIp = null;  // IP filtrat in omnisearch (null = fara filtru)
+let isFrozen = false;
+let rawGraphData = null;
+let rawAlertData = null;
+let activeScanTypes = new Set(Object.keys(SCAN_COLORS));
 
 // ==== D3 Graph ====
 
@@ -917,6 +1028,22 @@ function initGraph() {
 
   svg = d3.select("#graph-svg")
     .attr("viewBox", [0, 0, width, height]);
+
+  // Arrow markers per scan type
+  const defs = svg.append("defs");
+  Object.entries(SCAN_COLORS).forEach(([type, color]) => {
+    defs.append("marker")
+      .attr("id", "arrow-" + type.replace(/\s+/g, "-"))
+      .attr("viewBox", "0 -4 8 8")
+      .attr("refX", 12)
+      .attr("refY", 0)
+      .attr("markerWidth", 5)
+      .attr("markerHeight", 5)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M0,-4L8,0L0,4Z")
+      .attr("fill", color);
+  });
 
   linkGroup  = svg.append("g").attr("class", "links");
   nodeGroup  = svg.append("g").attr("class", "nodes");
@@ -931,8 +1058,6 @@ function initGraph() {
     });
   svg.call(zoom);
 
-  // Sarcina 1: Forte echilibrate — collision previne suprapunerea,
-  // charge repinge moderat, alpha decay mare = oprire rapida.
   simulation = d3.forceSimulation()
     .force("link", d3.forceLink().id(d => d.id).distance(80))
     .force("charge", d3.forceManyBody().strength(-150).distanceMax(400))
@@ -940,32 +1065,36 @@ function initGraph() {
     .force("collide", d3.forceCollide().radius(d => nodeRadius(d) + 8).strength(0.8))
     .force("x", d3.forceX(width / 2).strength(0.04))
     .force("y", d3.forceY(height / 2).strength(0.04))
-    .alphaDecay(0.03)       // Mai rapid decat default (0.0228) — se opreste mai repede
-    .alphaMin(0.005)        // Pragul sub care simularea se opreste
-    .velocityDecay(0.4)     // Frictiune mai mare — nodurile se opresc mai repede
+    .alphaDecay(0.04)
+    .alphaMin(0.001)
+    .velocityDecay(0.65)
     .on("tick", ticked);
 
-  window.zoomToFit = function() {
-    if (currentNodes.length === 0) return;
-    const pad = 60;
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    currentNodes.forEach(n => {
-      const r = nodeRadius(n);
-      if (n.x - r < x0) x0 = n.x - r;
-      if (n.y - r < y0) y0 = n.y - r;
-      if (n.x + r > x1) x1 = n.x + r;
-      if (n.y + r > y1) y1 = n.y + r;
-    });
-    const bw = x1 - x0, bh = y1 - y0;
-    if (bw <= 0 || bh <= 0) return;
-    const scale = Math.min((width - 2*pad) / bw, (height - 2*pad) / bh, 2.5);
-    const tx = (width - bw * scale) / 2 - x0 * scale;
-    const ty = (height - bh * scale) / 2 - y0 * scale;
-    svg.transition().duration(500).call(
-      zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale)
-    );
-  };
-  document.getElementById("btn-fit").addEventListener("click", window.zoomToFit);
+  document.getElementById("btn-fit").addEventListener("click", zoomToFit);
+  document.getElementById("btn-freeze").addEventListener("click", toggleFreeze);
+  document.getElementById("btn-pin-all").addEventListener("click", pinAll);
+  document.getElementById("btn-unpin-all").addEventListener("click", unpinAll);
+}
+
+function zoomToFit() {
+  if (currentNodes.length === 0) return;
+  const pad = 60;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  currentNodes.forEach(n => {
+    const r = nodeRadius(n);
+    if (n.x - r < x0) x0 = n.x - r;
+    if (n.y - r < y0) y0 = n.y - r;
+    if (n.x + r > x1) x1 = n.x + r;
+    if (n.y + r > y1) y1 = n.y + r;
+  });
+  const bw = x1 - x0, bh = y1 - y0;
+  if (bw <= 0 || bh <= 0) return;
+  const scale = Math.min((width - 2*pad) / bw, (height - 2*pad) / bh, 2.5);
+  const tx = (width - bw * scale) / 2 - x0 * scale;
+  const ty = (height - bh * scale) / 2 - y0 * scale;
+  svg.transition().duration(500).call(
+    zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale)
+  );
 }
 
 function nodeRadius(d) {
@@ -977,11 +1106,16 @@ function nodeColor(d) {
 }
 
 function ticked() {
-  linkGroup.selectAll("line")
-    .attr("x1", d => d.source.x)
-    .attr("y1", d => d.source.y)
-    .attr("x2", d => d.target.x)
-    .attr("y2", d => d.target.y);
+  linkGroup.selectAll("line").each(function(d) {
+    const dx = d.target.x - d.source.x;
+    const dy = d.target.y - d.source.y;
+    const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+    const offset = nodeRadius(d.target) + 4;
+    this.setAttribute("x1", d.source.x);
+    this.setAttribute("y1", d.source.y);
+    this.setAttribute("x2", d.target.x - (dx/dist) * offset);
+    this.setAttribute("y2", d.target.y - (dy/dist) * offset);
+  });
 
   nodeGroup.selectAll("circle")
     .attr("cx", d => d.x)
@@ -1032,18 +1166,22 @@ function updateGraph(data) {
     return s + "-" + t + "-" + d.scan_type;
   });
   link.exit().remove();
-  link.enter().append("line")
+  const linkEnter = link.enter().append("line")
     .attr("stroke-width", d => Math.min(5, 1.5 + d.count * 0.5))
     .attr("stroke", d => scanColor(d.scan_type))
     .attr("stroke-opacity", 0.6)
+    .attr("marker-end", d => "url(#arrow-" + d.scan_type.replace(/\s+/g, "-") + ")")
+    .classed("edge-flow", true)
     .style("pointer-events", "stroke")
     .style("cursor", "pointer")
     .on("mouseover", showEdgeTooltip)
     .on("mousemove", moveTooltip)
-    .on("mouseout", hideTooltip)
-    .merge(link);
+    .on("mouseout", hideTooltip);
+  linkEnter.merge(link)
+    .attr("stroke-width", d => Math.min(5, 1.5 + d.count * 0.5));
 
-  // Nodes — Sarcina 1: drag pins, dblclick unpins, click opens dossier
+  const now = Date.now();
+  const GLOW_MS = 30000;
   const node = nodeGroup.selectAll("circle").data(nodes, d => d.id);
   node.exit().remove();
   const entered = node.enter().append("circle")
@@ -1053,30 +1191,33 @@ function updateGraph(data) {
     .attr("stroke-width", 2)
     .attr("cursor", "pointer")
     .call(drag(simulation))
-    .on("mouseover", showTooltip)
+    .on("mouseover", function(event, d) { showTooltip(event, d); highlightNeighborhood(d.id); })
     .on("mousemove", moveTooltip)
-    .on("mouseout", hideTooltip)
+    .on("mouseout", function() { hideTooltip(); clearHighlight(); })
     .on("click", (event, d) => { openDossier(d.id); })
     .on("dblclick", (event, d) => {
-      // Sarcina 1: dublu-click elibereaza nodul (unpin)
       d.fx = null;
       d.fy = null;
       d3.select(event.currentTarget).classed("node-pinned", false);
-      simulation.alpha(0.1).restart();
+      if (!isFrozen) simulation.alpha(0.1).restart();
     })
     .on("contextmenu", (event, d) => {
-      // Click-dreapta: unpin (alternativa la dblclick)
       event.preventDefault();
       d.fx = null;
       d.fy = null;
       d3.select(event.currentTarget).classed("node-pinned", false);
-      simulation.alpha(0.1).restart();
+      if (!isFrozen) simulation.alpha(0.1).restart();
     });
 
   entered.merge(node)
     .attr("r", nodeRadius)
     .attr("fill", nodeColor)
-    .classed("node-pinned", d => d.fx != null);
+    .classed("node-pinned", d => d.fx != null)
+    .style("--glow-color", d => nodeColor(d))
+    .classed("node-glow", d => {
+      if (!d.last_seen) return false;
+      return (now - new Date(d.last_seen).getTime()) < GLOW_MS;
+    });
 
   // Labels
   const showAll = nodes.length < 40;
@@ -1094,30 +1235,115 @@ function updateGraph(data) {
   simulation.nodes(nodes);
   simulation.force("link").links(links);
 
-  // Sarcina 1: alpha mic la update (nu re-agita graful puternic),
-  // doar daca au aparut noduri noi.
-  const hasNewNodes = nodes.some(n => !oldMap[n.id]);
-  simulation.alpha(hasNewNodes ? 0.3 : 0.05).restart();
+  const newNodeSet = new Set(nodes.map(n => n.id));
+  const hasNewNodes = nodes.some(n => !(n.id in oldMap));
+  const hasRemovedNodes = Object.keys(oldMap).some(id => !newNodeSet.has(id));
+  if (!isFrozen && (hasNewNodes || hasRemovedNodes)) {
+    simulation.alpha(0.3).restart();
+  } else {
+    ticked();
+  }
 }
 
-// Sarcina 1: Drag PINEAZA nodul (fx/fy raman setate dupa drag end).
-// Dublu-click sau click-dreapta elibereaza nodul.
-function drag(simulation) {
+function drag(sim) {
   return d3.drag()
     .on("start", (event, d) => {
-      if (!event.active) simulation.alphaTarget(0.1).restart();
+      if (!event.active && !isFrozen) sim.alphaTarget(0.1).restart();
       d.fx = d.x;
       d.fy = d.y;
     })
     .on("drag", (event, d) => {
       d.fx = event.x;
       d.fy = event.y;
+      if (isFrozen) ticked();
     })
     .on("end", (event, d) => {
-      if (!event.active) simulation.alphaTarget(0);
-      // NODE PINNING: NU resetam fx/fy — nodul ramane fixat!
+      if (!event.active) sim.alphaTarget(0);
       d3.select(event.sourceEvent.target).classed("node-pinned", true);
     });
+}
+
+// ==== Graph Controls ====
+
+function toggleFreeze() {
+  const btn = document.getElementById("btn-freeze");
+  isFrozen = !isFrozen;
+  if (isFrozen) {
+    simulation.stop();
+    btn.classList.add("active");
+    btn.innerHTML = "&#9654; Play";
+  } else {
+    simulation.alpha(0.15).restart();
+    btn.classList.remove("active");
+    btn.innerHTML = "&#10074;&#10074; Freeze";
+  }
+}
+
+function pinAll() {
+  currentNodes.forEach(n => { n.fx = n.x; n.fy = n.y; });
+  nodeGroup.selectAll("circle").classed("node-pinned", true);
+}
+
+function unpinAll() {
+  currentNodes.forEach(n => { n.fx = null; n.fy = null; });
+  nodeGroup.selectAll("circle").classed("node-pinned", false);
+  if (!isFrozen) simulation.alpha(0.15).restart();
+}
+
+function highlightNeighborhood(nodeId) {
+  const neighbors = new Set([nodeId]);
+  currentLinks.forEach(l => {
+    const s = typeof l.source === "object" ? l.source.id : l.source;
+    const t = typeof l.target === "object" ? l.target.id : l.target;
+    if (s === nodeId) neighbors.add(t);
+    if (t === nodeId) neighbors.add(s);
+  });
+  linkGroup.classed("dimmed", true);
+  nodeGroup.classed("dimmed", true);
+  labelGroup.classed("dimmed", true);
+  linkGroup.selectAll("line").classed("link-hl", l => {
+    const s = typeof l.source === "object" ? l.source.id : l.source;
+    const t = typeof l.target === "object" ? l.target.id : l.target;
+    return s === nodeId || t === nodeId;
+  });
+  nodeGroup.selectAll("circle").classed("node-hl", d => neighbors.has(d.id));
+  labelGroup.selectAll("text").classed("label-hl", d => neighbors.has(d.id));
+}
+
+function clearHighlight() {
+  linkGroup.classed("dimmed", false);
+  nodeGroup.classed("dimmed", false);
+  labelGroup.classed("dimmed", false);
+  linkGroup.selectAll("line").classed("link-hl", false);
+  nodeGroup.selectAll("circle").classed("node-hl", false);
+  labelGroup.selectAll("text").classed("label-hl", false);
+}
+
+window.toggleScanFilter = function(btn) {
+  const st = btn.dataset.scan;
+  if (activeScanTypes.has(st)) {
+    activeScanTypes.delete(st);
+    btn.classList.add("off");
+  } else {
+    activeScanTypes.add(st);
+    btn.classList.remove("off");
+  }
+  if (rawGraphData) {
+    updateGraph(applyGraphFilters(rawGraphData));
+    updateTable(applyAlertFilters(rawAlertData));
+  }
+};
+
+function applyGraphFilters(data) {
+  const edges = data.edges.filter(e => activeScanTypes.has(e.scan_type));
+  const ids = new Set();
+  edges.forEach(e => { ids.add(e.source); ids.add(e.target); });
+  const nodes = data.nodes.filter(n => ids.has(n.id));
+  return { nodes, edges, stats: data.stats };
+}
+
+function applyAlertFilters(alerts) {
+  return alerts.filter(a => activeScanTypes.has(a.scan_type));
 }
 
 // ==== Tooltip ====
@@ -1367,13 +1593,16 @@ async function refresh() {
     const graph = await graphRes.json();
     const alerts = await alertsRes.json();
 
+    rawGraphData = graph;
+    rawAlertData = alerts;
+
     document.getElementById("stat-alerts").textContent    = graph.stats.total_alerts;
     document.getElementById("stat-attackers").textContent  = graph.stats.unique_attackers;
     document.getElementById("stat-targets").textContent    = graph.stats.unique_targets;
     document.getElementById("last-update").textContent     = new Date().toLocaleTimeString("ro-RO", { hour12: false });
 
-    updateGraph(graph);
-    updateTable(alerts);
+    updateGraph(applyGraphFilters(graph));
+    updateTable(applyAlertFilters(alerts));
 
     const area = document.getElementById("graph-area");
     if (graph.nodes.length === 0 && !document.querySelector(".empty-state")) {
@@ -1406,7 +1635,7 @@ window.addEventListener("resize", () => {
   simulation.force("center", d3.forceCenter(width / 2, height / 2).strength(0.05));
   simulation.force("x", d3.forceX(width / 2).strength(0.04));
   simulation.force("y", d3.forceY(height / 2).strength(0.04));
-  simulation.alpha(0.1).restart();
+  if (!isFrozen) simulation.alpha(0.1).restart();
 });
 </script>
 </body>
