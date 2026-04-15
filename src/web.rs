@@ -981,6 +981,31 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 .stat-val.changed { animation: countUp 0.3s ease-out; }
+
+/* Light theme */
+:root.light {
+  --bg: #ffffff;
+  --surface: #f6f8fa;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --text-dim: #656d76;
+  --accent: #0969da;
+  --red: #cf222e;
+  --yellow: #9a6700;
+  --magenta: #8250df;
+  --orange: #bc4c00;
+  --cyan: #1a7f37;
+  --green: #1a7f37;
+}
+
+/* Fullscreen graph */
+.graph-area:fullscreen, .graph-area:-webkit-full-screen {
+  background: var(--bg);
+  height: 100vh;
+}
+
+/* Sound toggle active */
+.btn-sound-on { color: var(--green) !important; border-color: var(--green) !important; }
 </style>
 </head>
 <body>
@@ -1044,6 +1069,10 @@ body {
       <button id="btn-pin-all" title="Fixeaza toate nodurile">Pin All</button>
       <button id="btn-unpin-all" title="Elibereaza toate nodurile">Unpin All</button>
       <button id="btn-fit" title="Centreaza graful">&#8982; Fit</button>
+      <button id="btn-fullscreen" title="Fullscreen (F11)">&#9974; Full</button>
+      <button id="btn-export" title="Export graf ca PNG">&#128247; PNG</button>
+      <button id="btn-theme" title="Dark/Light mode (T)">&#9788; Theme</button>
+      <button id="btn-sound" title="Alert sound on/off">&#128264; Sound</button>
     </div>
     <div class="legend">
       <div class="legend-item"><span class="legend-dot" style="background:#f85149"></span> Atacator</div>
@@ -1053,7 +1082,7 @@ body {
       <div class="legend-item"><span class="legend-dot" style="background:#bc8cff;width:20px;height:3px;border-radius:1px"></span> Accept</div>
       <div class="legend-item"><span class="legend-dot" style="background:#d18616;width:20px;height:3px;border-radius:1px"></span> Lateral</div>
       <div class="legend-item"><span class="legend-dot" style="background:#39d353;width:20px;height:3px;border-radius:1px"></span> Distributed</div>
-      <div class="legend-item" style="margin-left:8px;color:var(--text-dim)">Drag=Pin | DblClick=Unpin</div>
+      <div class="legend-item" style="margin-left:8px;color:var(--text-dim)">Drag=Pin | DblClick=Unpin | F=Fit Space=Freeze T=Theme 1-5=Filters</div>
     </div>
   </div>
   <div class="table-area">
@@ -1109,6 +1138,9 @@ let activeScanTypes = new Set(Object.keys(SCAN_COLORS));
 let selectedNodes = new Set();
 let isolatedMode = false;
 let prevStats = null;
+let soundEnabled = false;
+let prevAlertCount = 0;
+let audioCtx = null;
 
 const SEVERITY_MAP = {
   "Lateral Movement": { level: "Critical", color: "#f85149", value: 8 },
@@ -1799,6 +1831,8 @@ async function refresh() {
     updateStatWithTrend("stat-attackers", graph.stats.unique_attackers, prevStats ? prevStats.attackers : null);
     updateStatWithTrend("stat-targets", graph.stats.unique_targets, prevStats ? prevStats.targets : null);
     prevStats = { alerts: graph.stats.total_alerts, attackers: graph.stats.unique_attackers, targets: graph.stats.unique_targets };
+    if (soundEnabled && prevAlertCount > 0 && graph.stats.total_alerts > prevAlertCount) playAlertBeep();
+    prevAlertCount = graph.stats.total_alerts;
     document.getElementById("last-update").textContent     = new Date().toLocaleTimeString("ro-RO", { hour12: false });
 
     updateGraph(applyGraphFilters(graph));
@@ -1819,8 +1853,126 @@ async function refresh() {
   }
 }
 
+// ==== Fullscreen (D14) ====
+function toggleFullscreen() {
+  const area = document.getElementById("graph-area");
+  if (!document.fullscreenElement) {
+    (area.requestFullscreen || area.webkitRequestFullscreen || area.msRequestFullscreen).call(area);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen).call(document);
+  }
+}
+document.addEventListener("fullscreenchange", () => {
+  const btn = document.getElementById("btn-fullscreen");
+  btn.innerHTML = document.fullscreenElement ? "&#10005; Exit" : "&#9974; Full";
+});
+
+// ==== Export PNG (D15) ====
+function exportPNG() {
+  const svgEl = document.getElementById("graph-svg");
+  const clone = svgEl.cloneNode(true);
+  const vb = svgEl.getAttribute("viewBox").split(" ");
+  const w = parseInt(vb[2]), h = parseInt(vb[3]);
+  clone.setAttribute("width", w);
+  clone.setAttribute("height", h);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  bgRect.setAttribute("width", w);
+  bgRect.setAttribute("height", h);
+  bgRect.setAttribute("fill", getComputedStyle(document.documentElement).getPropertyValue('--bg').trim());
+  clone.insertBefore(bgRect, clone.firstChild);
+  const xml = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = w * 2; canvas.height = h * 2;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(2, 2);
+    ctx.drawImage(img, 0, 0, w, h);
+    URL.revokeObjectURL(url);
+    const a = document.createElement("a");
+    a.download = "ids-rs-graph-" + new Date().toISOString().slice(0,19).replace(/:/g,"-") + ".png";
+    a.href = canvas.toDataURL("image/png");
+    a.click();
+  };
+  img.src = url;
+}
+
+// ==== Dark/Light Theme (D17) ====
+function toggleTheme() {
+  const root = document.documentElement;
+  root.classList.toggle("light");
+  const isLight = root.classList.contains("light");
+  document.getElementById("btn-theme").innerHTML = isLight ? "&#9790; Theme" : "&#9788; Theme";
+  localStorage.setItem("ids-theme", isLight ? "light" : "dark");
+}
+
+// ==== Alert Sound (D18) ====
+function playAlertBeep() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+  gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+  osc.start(audioCtx.currentTime);
+  osc.stop(audioCtx.currentTime + 0.3);
+}
+
+function toggleSound() {
+  soundEnabled = !soundEnabled;
+  const btn = document.getElementById("btn-sound");
+  btn.classList.toggle("btn-sound-on", soundEnabled);
+  btn.innerHTML = soundEnabled ? "&#128266; Sound" : "&#128264; Sound";
+}
+
+// ==== Keyboard Shortcuts (D16) ====
+function handleKeyboard(e) {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  switch(e.key.toLowerCase()) {
+    case "f":
+      if (!e.ctrlKey && !e.metaKey) { e.preventDefault(); zoomToFit(); }
+      break;
+    case " ":
+      e.preventDefault(); toggleFreeze();
+      break;
+    case "escape":
+      clearSearch(); clearSelection();
+      break;
+    case "t":
+      if (!e.ctrlKey && !e.metaKey) toggleTheme();
+      break;
+    case "1": case "2": case "3": case "4": case "5": {
+      const types = Object.keys(SCAN_COLORS);
+      const idx = parseInt(e.key) - 1;
+      if (idx < types.length) {
+        const btn = document.querySelector('.filter-btn[data-scan="' + types[idx] + '"]');
+        if (btn) toggleScanFilter(btn);
+      }
+      break;
+    }
+    case "f11":
+      e.preventDefault(); toggleFullscreen();
+      break;
+  }
+}
+
 // ==== Init ====
 document.addEventListener("DOMContentLoaded", () => {
+  if (localStorage.getItem("ids-theme") === "light") {
+    document.documentElement.classList.add("light");
+    document.getElementById("btn-theme").innerHTML = "&#9790; Theme";
+  }
+  document.getElementById("btn-fullscreen").addEventListener("click", toggleFullscreen);
+  document.getElementById("btn-export").addEventListener("click", exportPNG);
+  document.getElementById("btn-theme").addEventListener("click", toggleTheme);
+  document.getElementById("btn-sound").addEventListener("click", toggleSound);
+  document.addEventListener("keydown", handleKeyboard);
   initGraph();
   refresh();
   setInterval(refresh, 5000);
