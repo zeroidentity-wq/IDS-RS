@@ -708,6 +708,7 @@ body {
 .node-pinned {
   stroke: var(--accent) !important;
   stroke-width: 3px !important;
+  stroke-opacity: 1 !important;
 }
 
 /* Status indicator */
@@ -902,6 +903,84 @@ body {
   to { stroke-dashoffset: -12; }
 }
 .edge-flow { stroke-dasharray: 6 3; animation: edge-flow 0.8s linear infinite; }
+
+/* Side Panel (replaces modal) */
+.side-panel {
+  position: fixed;
+  top: 0;
+  right: -420px;
+  width: 420px;
+  height: 100vh;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  z-index: 50;
+  transition: right 0.3s ease;
+  overflow-y: auto;
+  padding: 20px;
+  box-shadow: -4px 0 20px rgba(0,0,0,0.4);
+}
+.side-panel.open { right: 0; }
+.side-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.side-panel-header h2 { font-size: 16px; color: var(--accent); }
+.side-panel-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  cursor: pointer;
+}
+.side-panel-close:hover { color: var(--text); }
+
+/* Severity group labels in filter bar */
+.sev-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.sev-label {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: opacity 0.15s;
+  color: #fff;
+}
+.sev-label:hover { opacity: 0.8; }
+.sev-label.off { opacity: 0.3; }
+.filter-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+/* Multi-select */
+.node-selected {
+  stroke: var(--yellow) !important;
+  stroke-width: 3px !important;
+  stroke-opacity: 1 !important;
+}
+
+/* Stats trend */
+.stat-trend {
+  font-size: 11px;
+  margin-left: 2px;
+  font-weight: 400;
+}
+.stat-trend.up { color: var(--red); }
+.stat-trend.down { color: var(--green); }
+@keyframes countUp {
+  from { opacity: 0.5; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.stat-val.changed { animation: countUp 0.3s ease-out; }
 </style>
 </head>
 <body>
@@ -938,16 +1017,29 @@ body {
 <div class="container">
   <div class="filter-bar" id="filter-bar">
     <span class="filter-label">Filtre:</span>
-    <button class="filter-btn" data-scan="Fast Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#f85149"></span> Fast</button>
-    <button class="filter-btn" data-scan="Slow Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#d29922"></span> Slow</button>
-    <button class="filter-btn" data-scan="Accept Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#bc8cff"></span> Accept</button>
-    <button class="filter-btn" data-scan="Lateral Movement" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#d18616"></span> Lateral</button>
-    <button class="filter-btn" data-scan="Distributed Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#39d353"></span> Distributed</button>
+    <span class="sev-group">
+      <span class="sev-label" style="background:#f85149" data-sev="Critical" onclick="toggleSevFilter(this)">CRITICAL</span>
+      <button class="filter-btn" data-scan="Lateral Movement" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#d18616"></span> Lateral</button>
+    </span>
+    <span class="filter-sep"></span>
+    <span class="sev-group">
+      <span class="sev-label" style="background:#d18616" data-sev="High" onclick="toggleSevFilter(this)">HIGH</span>
+      <button class="filter-btn" data-scan="Fast Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#f85149"></span> Fast</button>
+      <button class="filter-btn" data-scan="Distributed Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#39d353"></span> Distributed</button>
+    </span>
+    <span class="filter-sep"></span>
+    <span class="sev-group">
+      <span class="sev-label" style="background:#d29922" data-sev="Medium" onclick="toggleSevFilter(this)">MEDIUM</span>
+      <button class="filter-btn" data-scan="Slow Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#d29922"></span> Slow</button>
+      <button class="filter-btn" data-scan="Accept Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#bc8cff"></span> Accept</button>
+    </span>
   </div>
   <div class="graph-area" id="graph-area">
     <svg id="graph-svg"></svg>
     <div class="tooltip" id="tooltip"></div>
     <div class="graph-toolbar">
+      <button id="btn-isolate" style="display:none" title="Izoleaza selectia">Isolate</button>
+      <button id="btn-clear-sel" style="display:none" title="Sterge selectia">Clear Sel</button>
       <button id="btn-freeze" title="Freeze/Play simulare">&#10074;&#10074; Freeze</button>
       <button id="btn-pin-all" title="Fixeaza toate nodurile">Pin All</button>
       <button id="btn-unpin-all" title="Elibereaza toate nodurile">Unpin All</button>
@@ -980,15 +1072,13 @@ body {
   </div>
 </div>
 
-<!-- IP Dossier Modal -->
-<div class="modal-overlay" id="dossier-modal">
-  <div class="modal">
-    <div class="modal-header">
-      <h2 id="dossier-title">IP Dossier</h2>
-      <button class="modal-close" id="dossier-close">&times;</button>
-    </div>
-    <div id="dossier-body"></div>
+<!-- IP Dossier Side Panel -->
+<div class="side-panel" id="dossier-panel">
+  <div class="side-panel-header">
+    <h2 id="dossier-title">IP Dossier</h2>
+    <button class="side-panel-close" id="dossier-close">&times;</button>
   </div>
+  <div id="dossier-body"></div>
 </div>
 
 <script src="/static/d3.min.js"></script>
@@ -1016,6 +1106,31 @@ let isFrozen = false;
 let rawGraphData = null;
 let rawAlertData = null;
 let activeScanTypes = new Set(Object.keys(SCAN_COLORS));
+let selectedNodes = new Set();
+let isolatedMode = false;
+let prevStats = null;
+
+const SEVERITY_MAP = {
+  "Lateral Movement": { level: "Critical", color: "#f85149", value: 8 },
+  "Fast Scan":        { level: "High",     color: "#d18616", value: 7 },
+  "Distributed Scan": { level: "High",     color: "#d18616", value: 7 },
+  "Slow Scan":        { level: "Medium",   color: "#d29922", value: 6 },
+  "Accept Scan":      { level: "Medium",   color: "#d29922", value: 5 },
+};
+const SEV_TO_TYPES = {
+  Critical: ["Lateral Movement"],
+  High: ["Fast Scan", "Distributed Scan"],
+  Medium: ["Slow Scan", "Accept Scan"],
+};
+
+function maxSeverityColor(node) {
+  let maxVal = 0, color = "#30363d";
+  (node.scan_types || []).forEach(st => {
+    const s = SEVERITY_MAP[st];
+    if (s && s.value > maxVal) { maxVal = s.value; color = s.color; }
+  });
+  return color;
+}
 
 // ==== D3 Graph ====
 
@@ -1074,6 +1189,8 @@ function initGraph() {
   document.getElementById("btn-freeze").addEventListener("click", toggleFreeze);
   document.getElementById("btn-pin-all").addEventListener("click", pinAll);
   document.getElementById("btn-unpin-all").addEventListener("click", unpinAll);
+  document.getElementById("btn-isolate").addEventListener("click", isolateSelection);
+  document.getElementById("btn-clear-sel").addEventListener("click", clearSelection);
 }
 
 function zoomToFit() {
@@ -1187,14 +1304,18 @@ function updateGraph(data) {
   const entered = node.enter().append("circle")
     .attr("r", nodeRadius)
     .attr("fill", nodeColor)
-    .attr("stroke", "#0d1117")
-    .attr("stroke-width", 2)
+    .attr("stroke", d => maxSeverityColor(d))
+    .attr("stroke-width", 2.5)
+    .attr("stroke-opacity", 0.7)
     .attr("cursor", "pointer")
     .call(drag(simulation))
     .on("mouseover", function(event, d) { showTooltip(event, d); highlightNeighborhood(d.id); })
     .on("mousemove", moveTooltip)
     .on("mouseout", function() { hideTooltip(); clearHighlight(); })
-    .on("click", (event, d) => { openDossier(d.id); })
+    .on("click", (event, d) => {
+      if (event.shiftKey) { toggleNodeSelection(d.id); }
+      else { openDossier(d.id); }
+    })
     .on("dblclick", (event, d) => {
       d.fx = null;
       d.fy = null;
@@ -1212,7 +1333,9 @@ function updateGraph(data) {
   entered.merge(node)
     .attr("r", nodeRadius)
     .attr("fill", nodeColor)
+    .attr("stroke", d => maxSeverityColor(d))
     .classed("node-pinned", d => d.fx != null)
+    .classed("node-selected", d => selectedNodes.has(d.id))
     .style("--glow-color", d => nodeColor(d))
     .classed("node-glow", d => {
       if (!d.last_seen) return false;
@@ -1328,22 +1451,101 @@ window.toggleScanFilter = function(btn) {
     activeScanTypes.add(st);
     btn.classList.remove("off");
   }
+  updateSevLabels();
+  reapplyFilters();
+};
+
+window.toggleSevFilter = function(label) {
+  const types = SEV_TO_TYPES[label.dataset.sev];
+  const allOn = types.every(t => activeScanTypes.has(t));
+  types.forEach(t => {
+    if (allOn) activeScanTypes.delete(t);
+    else activeScanTypes.add(t);
+  });
+  document.querySelectorAll(".filter-btn").forEach(b => {
+    b.classList.toggle("off", !activeScanTypes.has(b.dataset.scan));
+  });
+  updateSevLabels();
+  reapplyFilters();
+};
+
+function updateSevLabels() {
+  document.querySelectorAll(".sev-label").forEach(lbl => {
+    const types = SEV_TO_TYPES[lbl.dataset.sev];
+    lbl.classList.toggle("off", !types.some(t => activeScanTypes.has(t)));
+  });
+}
+
+function reapplyFilters() {
   if (rawGraphData) {
     updateGraph(applyGraphFilters(rawGraphData));
     updateTable(applyAlertFilters(rawAlertData));
   }
-};
+}
 
 function applyGraphFilters(data) {
-  const edges = data.edges.filter(e => activeScanTypes.has(e.scan_type));
-  const ids = new Set();
-  edges.forEach(e => { ids.add(e.source); ids.add(e.target); });
-  const nodes = data.nodes.filter(n => ids.has(n.id));
+  let edges = data.edges.filter(e => activeScanTypes.has(e.scan_type));
+  let nodes;
+  if (isolatedMode && selectedNodes.size > 0) {
+    nodes = data.nodes.filter(n => selectedNodes.has(n.id));
+    edges = edges.filter(e => selectedNodes.has(e.source) && selectedNodes.has(e.target));
+  } else {
+    const ids = new Set();
+    edges.forEach(e => { ids.add(e.source); ids.add(e.target); });
+    nodes = data.nodes.filter(n => ids.has(n.id));
+  }
   return { nodes, edges, stats: data.stats };
 }
 
 function applyAlertFilters(alerts) {
   return alerts.filter(a => activeScanTypes.has(a.scan_type));
+}
+
+// ==== Multi-select ====
+
+function toggleNodeSelection(nodeId) {
+  if (selectedNodes.has(nodeId)) selectedNodes.delete(nodeId);
+  else selectedNodes.add(nodeId);
+  nodeGroup.selectAll("circle").classed("node-selected", d => selectedNodes.has(d.id));
+  updateSelectionUI();
+}
+
+function updateSelectionUI() {
+  const has = selectedNodes.size > 0;
+  document.getElementById("btn-isolate").style.display = has ? "" : "none";
+  document.getElementById("btn-clear-sel").style.display = has ? "" : "none";
+  if (has) document.getElementById("btn-isolate").textContent = "Isolate (" + selectedNodes.size + ")";
+}
+
+function isolateSelection() {
+  if (selectedNodes.size < 1) return;
+  isolatedMode = true;
+  document.getElementById("btn-isolate").classList.add("active");
+  reapplyFilters();
+}
+
+function clearSelection() {
+  selectedNodes.clear();
+  isolatedMode = false;
+  nodeGroup.selectAll("circle").classed("node-selected", false);
+  document.getElementById("btn-isolate").classList.remove("active");
+  updateSelectionUI();
+  reapplyFilters();
+}
+
+function updateStatWithTrend(id, val, prev) {
+  const el = document.getElementById(id);
+  if (prev != null && val !== prev) {
+    const d = val - prev;
+    const cls = d > 0 ? "up" : "down";
+    const arrow = d > 0 ? "\u25B2+" + d : "\u25BC" + d;
+    el.innerHTML = val + ' <span class="stat-trend ' + cls + '">' + arrow + '</span>';
+    el.classList.add("changed");
+    setTimeout(() => el.classList.remove("changed"), 300);
+    setTimeout(() => { const t = el.querySelector(".stat-trend"); if (t) t.remove(); }, 10000);
+  } else {
+    el.textContent = val;
+  }
 }
 
 // ==== Tooltip ====
@@ -1377,7 +1579,7 @@ function showTooltip(event, d) {
     <div class="detail">Alerte: ${d.alert_count}</div>
     <div class="detail">${badges}</div>
     <div class="detail" style="color:#8b949e;font-size:11px">Ultima: ${formatTime(d.last_seen)}</div>
-    <div class="detail" style="color:#8b949e;font-size:10px">Click = Dossier | DblClick = Unpin</div>
+    <div class="detail" style="color:#8b949e;font-size:10px">Click=Dossier | Shift=Select | DblClick=Unpin</div>
   `;
   tooltip.style.opacity = 1;
 }
@@ -1394,12 +1596,12 @@ function hideTooltip() {
 // ==== IP Dossier Modal (Sarcina 2) ====
 
 async function openDossier(ip) {
-  const modal = document.getElementById("dossier-modal");
+  const panel = document.getElementById("dossier-panel");
   const title = document.getElementById("dossier-title");
   const body  = document.getElementById("dossier-body");
   title.textContent = "IP Dossier: " + ip;
   body.innerHTML = '<div style="color:var(--text-dim)">Se incarca...</div>';
-  modal.classList.add("open");
+  panel.classList.add("open");
 
   try {
     const res = await fetch("/api/ip/" + encodeURIComponent(ip));
@@ -1457,10 +1659,7 @@ async function openDossier(ip) {
 }
 
 document.getElementById("dossier-close").addEventListener("click", () => {
-  document.getElementById("dossier-modal").classList.remove("open");
-});
-document.getElementById("dossier-modal").addEventListener("click", (e) => {
-  if (e.target === e.currentTarget) e.currentTarget.classList.remove("open");
+  document.getElementById("dossier-panel").classList.remove("open");
 });
 
 // ==== Alert Table cu Clustering (Sarcina 2) ====
@@ -1596,9 +1795,10 @@ async function refresh() {
     rawGraphData = graph;
     rawAlertData = alerts;
 
-    document.getElementById("stat-alerts").textContent    = graph.stats.total_alerts;
-    document.getElementById("stat-attackers").textContent  = graph.stats.unique_attackers;
-    document.getElementById("stat-targets").textContent    = graph.stats.unique_targets;
+    updateStatWithTrend("stat-alerts", graph.stats.total_alerts, prevStats ? prevStats.alerts : null);
+    updateStatWithTrend("stat-attackers", graph.stats.unique_attackers, prevStats ? prevStats.attackers : null);
+    updateStatWithTrend("stat-targets", graph.stats.unique_targets, prevStats ? prevStats.targets : null);
+    prevStats = { alerts: graph.stats.total_alerts, attackers: graph.stats.unique_attackers, targets: graph.stats.unique_targets };
     document.getElementById("last-update").textContent     = new Date().toLocaleTimeString("ro-RO", { hour12: false });
 
     updateGraph(applyGraphFilters(graph));
