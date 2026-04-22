@@ -625,9 +625,54 @@ body {
 
 /* Alert Table */
 .table-area {
-  height: 240px;
+  height: 280px;
   background: var(--surface);
   border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+.table-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.table-toolbar .table-title {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.table-toolbar .table-title b { color: var(--accent); font-weight: 600; margin-left: 4px; }
+.density-toggle {
+  display: inline-flex;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.density-toggle button {
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  transition: background .12s, color .12s;
+}
+.density-toggle button:last-child { border-right: none; }
+.density-toggle button:hover { color: var(--text); }
+.density-toggle button.active {
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+.table-scroll {
+  flex: 1;
   overflow-y: auto;
 }
 .table-area table {
@@ -651,6 +696,11 @@ body {
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
+.table-area.density-comfortable td { padding: 8px 14px; font-size: 13px; }
+.table-area.density-comfortable th { padding: 8px 14px; }
+.table-area.density-compact   td { padding: 4px 12px; font-size: 12px; }
+.table-area.density-dense     td { padding: 1px 10px; font-size: 11px; line-height: 1.4; }
+.table-area.density-dense     th { padding: 4px 10px; font-size: 10px; }
 .table-area tr:hover { background: rgba(88,166,255,0.05); }
 .table-area tr.cluster-header { cursor: pointer; }
 .table-area tr.cluster-header td:first-child::before {
@@ -853,6 +903,60 @@ body {
   border-bottom: 1px solid var(--border);
   align-items: center;
 }
+
+/* Heatmap 24h (Tier 1 #5) */
+.heatmap-24 {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+  margin-left: auto;
+  padding-left: 12px;
+}
+.heatmap-24-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-right: 6px;
+}
+.heatmap-cell {
+  width: 10px;
+  height: 18px;
+  border-radius: 2px;
+  position: relative;
+  background: rgba(139, 148, 158, 0.18);
+  transition: transform .1s, outline-color .1s;
+  outline: 1px solid transparent;
+}
+.heatmap-cell:hover {
+  transform: scaleY(1.15);
+  outline-color: var(--accent);
+  z-index: 20;
+}
+.heatmap-cell.sev-critical { background: var(--red); }
+.heatmap-cell.sev-high     { background: var(--orange); }
+.heatmap-cell.sev-medium   { background: var(--yellow); }
+.heatmap-cell.sev-low      { background: var(--green); opacity: 0.65; }
+.heatmap-cell.sev-none     { background: rgba(139, 148, 158, 0.18); }
+.heatmap-tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 10px;
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .1s;
+  z-index: 30;
+}
+.heatmap-cell:hover .heatmap-tooltip { opacity: 1; }
+.heatmap-tooltip b { color: var(--accent); }
 .filter-label {
   font-size: 11px;
   color: var(--text-dim);
@@ -1006,6 +1110,249 @@ body {
 
 /* Sound toggle active */
 .btn-sound-on { color: var(--green) !important; border-color: var(--green) !important; }
+
+/* Toasts Critical (Tier 1 #3) */
+.toast-container {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+  max-width: 380px;
+}
+.toast {
+  background: var(--surface);
+  border: 1px solid var(--red);
+  border-left: 4px solid var(--red);
+  border-radius: 6px;
+  padding: 10px 14px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  pointer-events: auto;
+  cursor: pointer;
+  animation: toast-in .22s ease-out;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  min-width: 300px;
+  position: relative;
+}
+.toast::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px rgba(248, 81, 73, 0);
+  pointer-events: none;
+  animation: toast-pulse 1.4s ease-out 1;
+}
+@keyframes toast-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.55); }
+  100% { box-shadow: 0 0 0 12px rgba(248, 81, 73, 0); }
+}
+.toast.removing { animation: toast-out .22s ease-out forwards; }
+@keyframes toast-in {
+  from { transform: translateX(110%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes toast-out {
+  to { transform: translateX(110%); opacity: 0; }
+}
+.toast-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.toast-title {
+  color: var(--red);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.toast-time { color: var(--text-dim); font-size: 10px; font-family: inherit; }
+.toast-body { color: var(--text); }
+.toast-body b { color: var(--accent); font-weight: 600; }
+.toast-hint { color: var(--text-dim); font-size: 10px; margin-top: 2px; }
+
+/* Sparkline 60 min (Tier 1 #2) */
+.sparkline-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 120px;
+}
+.sparkline-svg {
+  width: 120px;
+  height: 34px;
+  display: block;
+  overflow: visible;
+}
+.sparkline-svg .spark-path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+.sparkline-svg .spark-area { fill: var(--accent); opacity: 0.18; }
+.sparkline-svg .spark-dot  { fill: var(--accent); }
+.sparkline-caption {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.sparkline-caption b { color: var(--accent); font-weight: 600; }
+
+/* Command Palette (Cmd/Ctrl+K) */
+.cmdk-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.cmdk-trigger:hover { border-color: var(--accent); color: var(--text); }
+.cmdk-trigger .cmdk-kbd {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: var(--accent);
+}
+.cmdk-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  animation: cmdk-fade .12s ease-out;
+}
+.cmdk-overlay[hidden] { display: none; }
+@keyframes cmdk-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.cmdk-panel {
+  width: min(620px, 92vw);
+  max-height: 70vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: cmdk-slide .14s ease-out;
+}
+@keyframes cmdk-slide {
+  from { transform: translateY(-8px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+.cmdk-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  padding: 14px 18px;
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.cmdk-input::placeholder { color: var(--text-dim); }
+.cmdk-list {
+  overflow-y: auto;
+  padding: 6px 0;
+  flex: 1;
+}
+.cmdk-list::-webkit-scrollbar { width: 8px; }
+.cmdk-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.cmdk-cat {
+  padding: 6px 18px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 18px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background .1s;
+}
+.cmdk-item:hover { background: rgba(88, 166, 255, 0.06); }
+.cmdk-item.active {
+  background: rgba(88, 166, 255, 0.12);
+  border-left-color: var(--accent);
+}
+.cmdk-item .cmdk-icon {
+  width: 18px;
+  text-align: center;
+  color: var(--accent);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.cmdk-item .cmdk-label { flex: 1; color: var(--text); font-size: 13px; }
+.cmdk-item .cmdk-sub { color: var(--text-dim); font-size: 11px; margin-left: 6px; }
+.cmdk-item .cmdk-kbd {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: inherit;
+}
+.cmdk-item.active .cmdk-kbd { color: var(--accent); border-color: var(--accent); }
+.cmdk-empty {
+  padding: 28px 18px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.cmdk-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 8px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.cmdk-footer .cmdk-kbd {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: var(--accent);
+  margin-right: 4px;
+}
 </style>
 </head>
 <body>
@@ -1019,6 +1366,9 @@ body {
       <span id="search-tag-ip"></span>
       <span class="close-tag" id="search-tag-close">&times;</span>
     </span>
+    <button class="cmdk-trigger" id="cmdk-trigger" title="Command palette (Ctrl+K)">
+      <span>Commands</span><span class="cmdk-kbd">&#8984;K</span>
+    </button>
   </div>
   <div class="stats">
     <div class="stat">
@@ -1032,6 +1382,14 @@ body {
     <div class="stat">
       <div class="stat-val cyan" id="stat-targets">0</div>
       <div class="stat-label">Tinte</div>
+    </div>
+    <div class="stat sparkline-wrap" title="Alerte/minut, ultimele 60 minute">
+      <svg class="sparkline-svg" id="sparkline" viewBox="0 0 120 34" preserveAspectRatio="none">
+        <path class="spark-area" id="spark-area"></path>
+        <path class="spark-path" id="spark-path"></path>
+        <circle class="spark-dot" id="spark-dot" r="2.2" cx="0" cy="0"></circle>
+      </svg>
+      <div class="sparkline-caption">60 min &middot; peak <b id="spark-peak">0</b>/min</div>
     </div>
     <div class="stat">
       <span class="status"><span class="dot"></span>Live — <span id="last-update">-</span></span>
@@ -1058,6 +1416,9 @@ body {
       <button class="filter-btn" data-scan="Slow Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#d29922"></span> Slow</button>
       <button class="filter-btn" data-scan="Accept Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#bc8cff"></span> Accept</button>
     </span>
+    <div class="heatmap-24" id="heatmap-24" title="Severitate maxima / ora, ultimele 24h">
+      <span class="heatmap-24-label">24h</span>
+    </div>
   </div>
   <div class="graph-area" id="graph-area">
     <svg id="graph-svg"></svg>
@@ -1085,19 +1446,47 @@ body {
       <div class="legend-item" style="margin-left:8px;color:var(--text-dim)">Drag=Pin | DblClick=Unpin | F=Fit Space=Freeze T=Theme 1-5=Filters</div>
     </div>
   </div>
-  <div class="table-area">
-    <table>
-      <thead>
-        <tr>
-          <th>Timestamp</th>
-          <th>Tip</th>
-          <th>Sursa</th>
-          <th>Destinatie</th>
-          <th>Detalii</th>
-        </tr>
-      </thead>
-      <tbody id="alert-tbody"></tbody>
-    </table>
+  <div class="table-area density-compact" id="table-area">
+    <div class="table-toolbar">
+      <span class="table-title">Alerte<b id="alert-count">0</b></span>
+      <div class="density-toggle" role="group" aria-label="Densitate tabel">
+        <button data-density="comfortable" title="Confortabil (10 vizibile)">Confortabil</button>
+        <button data-density="compact" title="Compact (20 vizibile)">Compact</button>
+        <button data-density="dense" title="Dens (40 vizibile)">Dens</button>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Tip</th>
+            <th>Sursa</th>
+            <th>Destinatie</th>
+            <th>Detalii</th>
+          </tr>
+        </thead>
+        <tbody id="alert-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container (Tier 1 #3) -->
+<div class="toast-container" id="toast-container"></div>
+
+<!-- Command Palette -->
+<div class="cmdk-overlay" id="cmdk-overlay" hidden>
+  <div class="cmdk-panel" role="dialog" aria-label="Command palette">
+    <input type="text" class="cmdk-input" id="cmdk-input"
+           placeholder="Scrie o comanda sau un IP..."
+           autocomplete="off" spellcheck="false">
+    <div class="cmdk-list" id="cmdk-list"></div>
+    <div class="cmdk-footer">
+      <span><span class="cmdk-kbd">&#8593;&#8595;</span>Navigheaza</span>
+      <span><span class="cmdk-kbd">Enter</span>Executa</span>
+      <span><span class="cmdk-kbd">Esc</span>Inchide</span>
+    </div>
   </div>
 </div>
 
@@ -1834,6 +2223,11 @@ async function refresh() {
     if (soundEnabled && prevAlertCount > 0 && graph.stats.total_alerts > prevAlertCount) playAlertBeep();
     prevAlertCount = graph.stats.total_alerts;
     document.getElementById("last-update").textContent     = new Date().toLocaleTimeString("ro-RO", { hour12: false });
+    updateSparkline(alerts);
+    updateHeatmap(alerts);
+    processCriticalToasts(alerts);
+    const cnt = document.getElementById("alert-count");
+    if (cnt) cnt.textContent = Array.isArray(alerts) ? alerts.length : 0;
 
     updateGraph(applyGraphFilters(graph));
     updateTable(applyAlertFilters(alerts));
@@ -1867,37 +2261,106 @@ document.addEventListener("fullscreenchange", () => {
   btn.innerHTML = document.fullscreenElement ? "&#10005; Exit" : "&#9974; Full";
 });
 
-// ==== Export PNG (D15) ====
+// ==== Export PNG (D15 + bugfix B1) ====
+// Bug B1: PNG download returning 0 bytes.
+// Root cause 1: SVG elements styled via document <style> (CSS classes) have no inline
+//   attributes. Cand SVG-ul este incarcat ca <img>, document-ul extern de CSS nu se
+//   aplica — conturul/textul raman default (fill:none, stroke:none) si imaginea e goala.
+// Root cause 2: `canvas.toDataURL` poate returna "data:," pe canvas taintat sau pe
+//   eroare silentioasa, rezultand download 0 bytes. `canvas.toBlob` raporteaza null
+//   explicit, asa avem error handling real.
+const SVG_STYLE_PROPS = [
+  "fill", "fill-opacity", "stroke", "stroke-width", "stroke-opacity",
+  "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin",
+  "opacity", "visibility",
+  "font-family", "font-size", "font-weight", "text-anchor", "dominant-baseline"
+];
+
+function inlineSvgStyles(source, clone) {
+  const srcAll = source.querySelectorAll("*");
+  const cloneAll = clone.querySelectorAll("*");
+  const n = Math.min(srcAll.length, cloneAll.length);
+  for (let i = 0; i < n; i++) {
+    const cs = getComputedStyle(srcAll[i]);
+    const existing = cloneAll[i].getAttribute("style") || "";
+    let css = "";
+    for (const p of SVG_STYLE_PROPS) {
+      const v = cs.getPropertyValue(p);
+      if (v) css += p + ":" + v + ";";
+    }
+    cloneAll[i].setAttribute("style", css + existing);
+  }
+}
+
 function exportPNG() {
   const svgEl = document.getElementById("graph-svg");
+  if (!svgEl) return;
+  const vbRaw = svgEl.getAttribute("viewBox");
+  if (!vbRaw) return;
+  const vb = vbRaw.split(/\s+/);
+  const w = parseInt(vb[2], 10);
+  const h = parseInt(vb[3], 10);
+  if (!w || !h) return;
+
   const clone = svgEl.cloneNode(true);
-  const vb = svgEl.getAttribute("viewBox").split(" ");
-  const w = parseInt(vb[2]), h = parseInt(vb[3]);
+  inlineSvgStyles(svgEl, clone);
+
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
   clone.setAttribute("width", w);
   clone.setAttribute("height", h);
-  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+
+  const bgColor = getComputedStyle(document.documentElement)
+    .getPropertyValue("--bg").trim() || "#0d1117";
   const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
   bgRect.setAttribute("width", w);
   bgRect.setAttribute("height", h);
-  bgRect.setAttribute("fill", getComputedStyle(document.documentElement).getPropertyValue('--bg').trim());
+  bgRect.setAttribute("fill", bgColor);
   clone.insertBefore(bgRect, clone.firstChild);
+
   const xml = new XMLSerializer().serializeToString(clone);
-  const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
+  const svgDoc = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml;
+  const svgBlob = new Blob([svgDoc], { type: "image/svg+xml;charset=utf-8" });
+  const svgUrl = URL.createObjectURL(svgBlob);
+
   const img = new Image();
   img.onload = () => {
-    const canvas = document.createElement("canvas");
-    canvas.width = w * 2; canvas.height = h * 2;
-    const ctx = canvas.getContext("2d");
-    ctx.scale(2, 2);
-    ctx.drawImage(img, 0, 0, w, h);
-    URL.revokeObjectURL(url);
-    const a = document.createElement("a");
-    a.download = "ids-rs-graph-" + new Date().toISOString().slice(0,19).replace(/:/g,"-") + ".png";
-    a.href = canvas.toDataURL("image/png");
-    a.click();
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = w * 2;
+      canvas.height = h * 2;
+      const ctx = canvas.getContext("2d");
+      ctx.scale(2, 2);
+      ctx.drawImage(img, 0, 0, w, h);
+      canvas.toBlob((pngBlob) => {
+        URL.revokeObjectURL(svgUrl);
+        if (!pngBlob || pngBlob.size === 0) {
+          console.error("exportPNG: toBlob a returnat gol (canvas taintat?)");
+          alert("Export PNG a esuat. Vezi consola.");
+          return;
+        }
+        const pngUrl = URL.createObjectURL(pngBlob);
+        const a = document.createElement("a");
+        a.download = "ids-rs-graph-"
+          + new Date().toISOString().slice(0, 19).replace(/:/g, "-") + ".png";
+        a.href = pngUrl;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(pngUrl), 1500);
+      }, "image/png");
+    } catch (err) {
+      URL.revokeObjectURL(svgUrl);
+      console.error("exportPNG error:", err);
+      alert("Export PNG a esuat: " + err.message);
+    }
   };
-  img.src = url;
+  img.onerror = (e) => {
+    URL.revokeObjectURL(svgUrl);
+    console.error("exportPNG: imaginea SVG nu s-a incarcat", e);
+    alert("Export PNG a esuat: SVG invalid.");
+  };
+  img.src = svgUrl;
 }
 
 // ==== Dark/Light Theme (D17) ====
@@ -1931,8 +2394,346 @@ function toggleSound() {
   btn.innerHTML = soundEnabled ? "&#128266; Sound" : "&#128264; Sound";
 }
 
+// ==== Heatmap 24h (Tier 1 #5) ====
+function severityLevelForValue(v) {
+  if (v >= 8) return { cls: "critical", label: "Critical" };
+  if (v === 7) return { cls: "high",     label: "High" };
+  if (v === 6) return { cls: "medium",   label: "Medium" };
+  if (v >= 1) return { cls: "low",       label: "Low" };
+  return { cls: "none", label: "-" };
+}
+
+function updateHeatmap(alerts) {
+  const HOURS = 24;
+  const now = new Date();
+  const currentHourMs = new Date(
+    now.getFullYear(), now.getMonth(), now.getDate(), now.getHours()
+  ).getTime();
+  const firstMs = currentHourMs - (HOURS - 1) * 3600000;
+  const counts = new Array(HOURS).fill(0);
+  const maxSev = new Array(HOURS).fill(0);
+
+  for (const a of (alerts || [])) {
+    const t = new Date(a.timestamp).getTime();
+    if (Number.isNaN(t)) continue;
+    const idx = Math.floor((t - firstMs) / 3600000);
+    if (idx < 0 || idx >= HOURS) continue;
+    counts[idx]++;
+    const sv = SEVERITY_MAP[a.scan_type];
+    if (sv && sv.value > maxSev[idx]) maxSev[idx] = sv.value;
+  }
+
+  const cont = document.getElementById("heatmap-24");
+  const label = cont.querySelector(".heatmap-24-label");
+  cont.innerHTML = "";
+  if (label) cont.appendChild(label);
+
+  for (let i = 0; i < HOURS; i++) {
+    const sev = severityLevelForValue(maxSev[i]);
+    const start = new Date(firstMs + i * 3600000);
+    const hh = String(start.getHours()).padStart(2, "0");
+    const cell = document.createElement("div");
+    cell.className = "heatmap-cell sev-" + sev.cls;
+    const tip = hh + ":00 &middot; <b>" + counts[i] + "</b> alerte &middot; " + sev.label;
+    cell.innerHTML = '<span class="heatmap-tooltip">' + tip + '</span>';
+    cont.appendChild(cell);
+  }
+}
+
+// ==== Density toggle (Tier 1 #4) ====
+const DENSITIES = ["comfortable", "compact", "dense"];
+
+function setDensity(name) {
+  if (!DENSITIES.includes(name)) name = "compact";
+  const area = document.getElementById("table-area");
+  DENSITIES.forEach(d => area.classList.remove("density-" + d));
+  area.classList.add("density-" + name);
+  document.querySelectorAll(".density-toggle button").forEach(b => {
+    b.classList.toggle("active", b.dataset.density === name);
+  });
+  try { localStorage.setItem("ids-density", name); } catch {}
+}
+
+function initDensity() {
+  let saved = "compact";
+  try { saved = localStorage.getItem("ids-density") || "compact"; } catch {}
+  setDensity(saved);
+  document.querySelectorAll(".density-toggle button").forEach(b => {
+    b.addEventListener("click", () => setDensity(b.dataset.density));
+  });
+}
+
+// ==== Toasts Critical (Tier 1 #3) ====
+const SEEN_CRITICALS = new Set();
+let seenCriticalsInit = false;
+const MAX_TOASTS = 3;
+const TOAST_TTL_MS = 8000;
+
+function alertKey(a) {
+  return a.timestamp + "|" + a.source_ip + "|" + (a.dest_ip || "") + "|" + a.scan_type;
+}
+
+function processCriticalToasts(alerts) {
+  if (!seenCriticalsInit) {
+    for (const a of alerts || []) {
+      if (SEVERITY_MAP[a.scan_type] && SEVERITY_MAP[a.scan_type].level === "Critical") {
+        SEEN_CRITICALS.add(alertKey(a));
+      }
+    }
+    seenCriticalsInit = true;
+    return;
+  }
+  const fresh = [];
+  for (const a of alerts || []) {
+    const sev = SEVERITY_MAP[a.scan_type];
+    if (!sev || sev.level !== "Critical") continue;
+    const k = alertKey(a);
+    if (!SEEN_CRITICALS.has(k)) {
+      SEEN_CRITICALS.add(k);
+      fresh.push(a);
+    }
+  }
+  fresh.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  for (const a of fresh.slice(-MAX_TOASTS)) showToast(a);
+}
+
+function showToast(a) {
+  const cont = document.getElementById("toast-container");
+  while (cont.children.length >= MAX_TOASTS) {
+    cont.removeChild(cont.firstChild);
+  }
+  const t = document.createElement("div");
+  t.className = "toast";
+  const dest = a.dest_ip || "-";
+  const time = formatTime(a.timestamp);
+  t.innerHTML =
+    '<div class="toast-header">' +
+      '<span class="toast-title">&#9888; Critical &middot; ' + a.scan_type + '</span>' +
+      '<span class="toast-time">' + time + '</span>' +
+    '</div>' +
+    '<div class="toast-body"><b>' + a.source_ip + '</b> &rarr; <b>' + dest + '</b></div>' +
+    '<div class="toast-hint">Click pentru dosier</div>';
+  t.addEventListener("click", () => {
+    dismissToast(t);
+    openDossier(a.source_ip);
+  });
+  cont.appendChild(t);
+  setTimeout(() => dismissToast(t), TOAST_TTL_MS);
+}
+
+function dismissToast(t) {
+  if (!t.parentNode) return;
+  if (t.classList.contains("removing")) return;
+  t.classList.add("removing");
+  setTimeout(() => { if (t.parentNode) t.parentNode.removeChild(t); }, 220);
+}
+
+// ==== Sparkline 60 min (Tier 1 #2) ====
+function updateSparkline(alerts) {
+  const BUCKETS = 60;
+  const WINDOW_MS = BUCKETS * 60 * 1000;
+  const now = Date.now();
+  const buckets = new Array(BUCKETS).fill(0);
+  for (const a of (alerts || [])) {
+    const t = new Date(a.timestamp).getTime();
+    if (Number.isNaN(t)) continue;
+    const diff = now - t;
+    if (diff < 0 || diff >= WINDOW_MS) continue;
+    const idx = BUCKETS - 1 - Math.floor(diff / 60000);
+    if (idx >= 0 && idx < BUCKETS) buckets[idx]++;
+  }
+  const peak = Math.max(1, ...buckets);
+  const W = 120, H = 34, PAD = 2;
+  const stepX = (W - 2 * PAD) / (BUCKETS - 1);
+  const pts = buckets.map((v, i) => [
+    PAD + i * stepX,
+    H - PAD - ((H - 2 * PAD) * v) / peak,
+  ]);
+  let line = "M " + pts[0][0].toFixed(1) + " " + pts[0][1].toFixed(1);
+  for (let i = 1; i < pts.length; i++) {
+    line += " L " + pts[i][0].toFixed(1) + " " + pts[i][1].toFixed(1);
+  }
+  const area = line
+    + " L " + (W - PAD).toFixed(1) + " " + (H - PAD).toFixed(1)
+    + " L " + PAD.toFixed(1) + " " + (H - PAD).toFixed(1) + " Z";
+  document.getElementById("spark-path").setAttribute("d", line);
+  document.getElementById("spark-area").setAttribute("d", area);
+  const last = pts[pts.length - 1];
+  const dot = document.getElementById("spark-dot");
+  dot.setAttribute("cx", last[0].toFixed(1));
+  dot.setAttribute("cy", last[1].toFixed(1));
+  document.getElementById("spark-peak").textContent =
+    Math.max(...buckets);
+}
+
+// ==== Command Palette (Tier 1 #1) ====
+const IP_RE = /^\d{1,3}(\.\d{1,3}){0,3}$/;
+
+function toggleScanByName(name) {
+  const btn = document.querySelector('.filter-btn[data-scan="' + name + '"]');
+  if (btn) window.toggleScanFilter(btn);
+}
+function toggleSevByName(name) {
+  const lbl = document.querySelector('.sev-label[data-sev="' + name + '"]');
+  if (lbl) window.toggleSevFilter(lbl);
+}
+function resetAllFilters() {
+  activeScanTypes = new Set(Object.keys(SCAN_COLORS));
+  document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("off"));
+  document.querySelectorAll(".sev-label").forEach(l => l.classList.remove("off"));
+  reapplyFilters();
+}
+function searchIp(ip) {
+  const input = document.getElementById("omnisearch");
+  input.value = ip;
+  doSearch();
+}
+
+const COMMANDS = [
+  { id: "fit",          cat: "Graph",  icon: "\u2316", label: "Fit graph",                   sub: "Centreaza si ajusteaza zoom",   kbd: "F",     run: zoomToFit },
+  { id: "freeze",       cat: "Graph",  icon: "\u23F8", label: "Freeze / Play simulation",    sub: "Opreste/porneste fortele",      kbd: "Space", run: toggleFreeze },
+  { id: "pin-all",      cat: "Graph",  icon: "\u{1F4CC}", label: "Pin all nodes",            sub: "Fixeaza toate nodurile",                     run: pinAll },
+  { id: "unpin-all",    cat: "Graph",  icon: "\u2205", label: "Unpin all nodes",             sub: "Elibereaza toate nodurile",                  run: unpinAll },
+  { id: "isolate",      cat: "Graph",  icon: "\u25EF", label: "Isolate selection",           sub: "Arata doar nodurile selectate",              run: isolateSelection },
+  { id: "clear-sel",    cat: "Graph",  icon: "\u2715", label: "Clear selection",             sub: "Deselecteaza nodurile",         kbd: "Esc",  run: clearSelection },
+
+  { id: "fullscreen",   cat: "View",   icon: "\u26F6", label: "Toggle fullscreen",           sub: "Extinde graful pe tot ecranul", kbd: "F11",  run: toggleFullscreen },
+  { id: "theme",        cat: "View",   icon: "\u263E", label: "Toggle light / dark theme",                                         kbd: "T",    run: toggleTheme },
+  { id: "export",       cat: "View",   icon: "\u{1F4F7}", label: "Export graph as PNG",      sub: "Descarca vizualizarea curenta",              run: exportPNG },
+  { id: "sound",        cat: "View",   icon: "\u{1F509}", label: "Toggle alert sound",                                                             run: toggleSound },
+
+  { id: "f-lateral",    cat: "Filter", icon: "\u25CF", label: "Toggle Lateral Movement",     sub: "Scan type filter",              kbd: "1",    run: () => toggleScanByName("Lateral Movement") },
+  { id: "f-fast",       cat: "Filter", icon: "\u25CF", label: "Toggle Fast Scan",            sub: "Scan type filter",              kbd: "2",    run: () => toggleScanByName("Fast Scan") },
+  { id: "f-slow",       cat: "Filter", icon: "\u25CF", label: "Toggle Slow Scan",            sub: "Scan type filter",              kbd: "3",    run: () => toggleScanByName("Slow Scan") },
+  { id: "f-accept",     cat: "Filter", icon: "\u25CF", label: "Toggle Accept Scan",          sub: "Scan type filter",              kbd: "4",    run: () => toggleScanByName("Accept Scan") },
+  { id: "f-distrib",    cat: "Filter", icon: "\u25CF", label: "Toggle Distributed Scan",     sub: "Scan type filter",              kbd: "5",    run: () => toggleScanByName("Distributed Scan") },
+  { id: "s-critical",   cat: "Filter", icon: "\u25A0", label: "Toggle Critical severity",                                                        run: () => toggleSevByName("Critical") },
+  { id: "s-high",       cat: "Filter", icon: "\u25A0", label: "Toggle High severity",                                                            run: () => toggleSevByName("High") },
+  { id: "s-medium",     cat: "Filter", icon: "\u25A0", label: "Toggle Medium severity",                                                          run: () => toggleSevByName("Medium") },
+  { id: "reset-filter", cat: "Filter", icon: "\u21BB", label: "Reset all filters",           sub: "Activeaza toate tipurile",                   run: resetAllFilters },
+
+  { id: "clear-search", cat: "Search", icon: "\u2715", label: "Clear IP search",             sub: "Sterge filtrul omnisearch",                  run: clearSearch },
+];
+
+const CAT_ORDER = ["Search", "Graph", "Filter", "View"];
+let cmdkActiveIdx = 0;
+let cmdkVisible = [];
+
+function fuzzyScore(query, text) {
+  if (!query) return 1;
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  if (t.includes(q)) return 100 - (t.indexOf(q));
+  let qi = 0, score = 0;
+  for (let i = 0; i < t.length && qi < q.length; i++) {
+    if (t[i] === q[qi]) { score += 1; qi++; }
+  }
+  return qi === q.length ? score : 0;
+}
+
+function renderCmdkList() {
+  const input = document.getElementById("cmdk-input");
+  const list  = document.getElementById("cmdk-list");
+  const q = input.value.trim();
+  const dynamic = [];
+
+  if (IP_RE.test(q)) {
+    dynamic.push({ id: "search-ip", cat: "Search", icon: "\u{1F50D}",
+      label: "Filtreaza dupa IP " + q, sub: "Aplica omnisearch",
+      run: () => searchIp(q) });
+  }
+
+  const scored = COMMANDS
+    .map(c => ({ c, score: fuzzyScore(q, c.label + " " + (c.sub || "") + " " + c.cat) }))
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(x => x.c);
+
+  cmdkVisible = dynamic.concat(scored);
+
+  if (cmdkVisible.length === 0) {
+    list.innerHTML = '<div class="cmdk-empty">Niciun rezultat</div>';
+    return;
+  }
+
+  cmdkActiveIdx = Math.min(cmdkActiveIdx, cmdkVisible.length - 1);
+
+  const groups = {};
+  cmdkVisible.forEach((c, i) => {
+    (groups[c.cat] = groups[c.cat] || []).push({ c, i });
+  });
+
+  let html = "";
+  const cats = Object.keys(groups).sort((a, b) => {
+    const ai = CAT_ORDER.indexOf(a), bi = CAT_ORDER.indexOf(b);
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+  });
+  for (const cat of cats) {
+    html += '<div class="cmdk-cat">' + cat + '</div>';
+    for (const {c, i} of groups[cat]) {
+      const active = i === cmdkActiveIdx ? " active" : "";
+      const kbd = c.kbd ? '<span class="cmdk-kbd">' + c.kbd + '</span>' : '';
+      const sub = c.sub ? '<span class="cmdk-sub">' + c.sub + '</span>' : '';
+      html += '<div class="cmdk-item' + active + '" data-idx="' + i + '">'
+           + '<span class="cmdk-icon">' + c.icon + '</span>'
+           + '<span class="cmdk-label">' + c.label + sub + '</span>'
+           + kbd
+           + '</div>';
+    }
+  }
+  list.innerHTML = html;
+
+  const activeEl = list.querySelector(".cmdk-item.active");
+  if (activeEl) activeEl.scrollIntoView({ block: "nearest" });
+}
+
+function openCmdk() {
+  const overlay = document.getElementById("cmdk-overlay");
+  const input = document.getElementById("cmdk-input");
+  overlay.hidden = false;
+  input.value = "";
+  cmdkActiveIdx = 0;
+  renderCmdkList();
+  setTimeout(() => input.focus(), 0);
+}
+
+function closeCmdk() {
+  document.getElementById("cmdk-overlay").hidden = true;
+}
+
+function runActiveCmdk() {
+  const cmd = cmdkVisible[cmdkActiveIdx];
+  if (!cmd) return;
+  closeCmdk();
+  try { cmd.run(); } catch (err) { console.error("cmdk run error", err); }
+}
+
+function handleCmdkKey(e) {
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    cmdkActiveIdx = Math.min(cmdkActiveIdx + 1, cmdkVisible.length - 1);
+    renderCmdkList();
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    cmdkActiveIdx = Math.max(cmdkActiveIdx - 1, 0);
+    renderCmdkList();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    runActiveCmdk();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeCmdk();
+  }
+}
+
 // ==== Keyboard Shortcuts (D16) ====
 function handleKeyboard(e) {
+  if ((e.key === "k" || e.key === "K") && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    const overlay = document.getElementById("cmdk-overlay");
+    if (overlay.hidden) openCmdk(); else closeCmdk();
+    return;
+  }
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
   switch(e.key.toLowerCase()) {
     case "f":
@@ -1973,6 +2774,25 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-theme").addEventListener("click", toggleTheme);
   document.getElementById("btn-sound").addEventListener("click", toggleSound);
   document.addEventListener("keydown", handleKeyboard);
+
+  initDensity();
+
+  // Command palette wiring
+  document.getElementById("cmdk-trigger").addEventListener("click", openCmdk);
+  document.getElementById("cmdk-input").addEventListener("input", () => {
+    cmdkActiveIdx = 0;
+    renderCmdkList();
+  });
+  document.getElementById("cmdk-input").addEventListener("keydown", handleCmdkKey);
+  document.getElementById("cmdk-list").addEventListener("click", e => {
+    const item = e.target.closest(".cmdk-item");
+    if (!item) return;
+    cmdkActiveIdx = parseInt(item.dataset.idx, 10);
+    runActiveCmdk();
+  });
+  document.getElementById("cmdk-overlay").addEventListener("click", e => {
+    if (e.target.id === "cmdk-overlay") closeCmdk();
+  });
   initGraph();
   refresh();
   setInterval(refresh, 5000);
