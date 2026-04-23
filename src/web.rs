@@ -622,6 +622,11 @@ body {
   font-weight: 600;
   margin: 2px 2px 0 0;
 }
+.tooltip .peer-list { color: var(--text); font-size: 11px; }
+.tooltip .peer-list .peer { color: var(--accent); }
+.tooltip .mini-spark { margin-top: 4px; }
+.tooltip .mini-spark-label { color: var(--text-dim); font-size: 10px; margin-bottom: 2px; }
+.tooltip .subnet { color: var(--text-dim); font-size: 11px; font-style: italic; }
 
 /* Alert Table */
 .table-area {
@@ -701,6 +706,114 @@ body {
 .table-area.density-compact   td { padding: 4px 12px; font-size: 12px; }
 .table-area.density-dense     td { padding: 1px 10px; font-size: 11px; line-height: 1.4; }
 .table-area.density-dense     th { padding: 4px 10px; font-size: 10px; }
+
+/* MITRE ATT&CK tags (Tier 2 #9) */
+.mitre-tag {
+  display: inline-block;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 1px 6px;
+  margin-left: 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color .1s, border-color .1s, background .1s;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.mitre-tag:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+}
+.mitre-tag.small { font-size: 9px; padding: 0 4px; margin-left: 2px; }
+
+/* Triage (Tier 2 #6) */
+.table-area tr.alert-row { transition: opacity .15s; }
+.table-area tr.alert-row[data-status="ack"] {
+  box-shadow: inset 3px 0 0 0 var(--green);
+}
+.table-area tr.alert-row[data-status="escalated"] {
+  box-shadow: inset 3px 0 0 0 var(--red);
+  background: rgba(248, 81, 73, 0.04);
+}
+.table-area tr.alert-row[data-status="dismissed"] {
+  opacity: 0.4;
+}
+.table-area tr.alert-row.hover-key {
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+}
+.triage {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+.triage-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color .1s, color .1s, background .1s;
+}
+.triage-btn:hover { color: var(--text); border-color: var(--accent); }
+.triage-btn[data-action="ack"].active       { background: var(--green);  color: #0d1117; border-color: var(--green); }
+.triage-btn[data-action="dismiss"].active   { background: var(--text-dim); color: var(--bg); border-color: var(--text-dim); }
+.triage-btn[data-action="escalate"].active  { background: var(--red);    color: #fff; border-color: var(--red); }
+.cluster-badge {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.cluster-badge .dot-sm {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.cluster-badge .dot-sm.new  { background: var(--accent); }
+.cluster-badge .dot-sm.ack  { background: var(--green); }
+.cluster-badge .dot-sm.esc  { background: var(--red); }
+.cluster-badge .dot-sm.dis  { background: var(--text-dim); }
+.triage-summary {
+  display: inline-flex;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+.triage-summary span b { color: var(--accent); font-weight: 600; }
+.triage-summary .s-ack b  { color: var(--green); }
+.triage-summary .s-esc b  { color: var(--red); }
+.triage-summary .s-dis b  { color: var(--text-dim); }
+.hide-dismissed-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  margin-right: 10px;
+  user-select: none;
+}
+.hide-dismissed-toggle input { accent-color: var(--accent); cursor: pointer; }
 .table-area tr:hover { background: rgba(88,166,255,0.05); }
 .table-area tr.cluster-header { cursor: pointer; }
 .table-area tr.cluster-header td:first-child::before {
@@ -986,6 +1099,35 @@ body {
 }
 .filter-btn.off { opacity: 0.3; }
 .filter-btn:hover { border-color: var(--accent); }
+
+/* Negative filters (Tier 2 #8) */
+.filter-btn.neg {
+  opacity: 1;
+  border-color: var(--red);
+  color: var(--red);
+  text-decoration: line-through;
+  background: rgba(248, 81, 73, 0.06);
+}
+.filter-btn.neg .fdot { filter: saturate(0.3); }
+.filter-btn.neg::before {
+  content: "\2298";
+  margin-right: 4px;
+  color: var(--red);
+  font-weight: 700;
+  text-decoration: none;
+  display: inline-block;
+}
+.sev-label.neg {
+  background: transparent !important;
+  border: 1px dashed var(--red);
+  color: var(--red) !important;
+  text-decoration: line-through;
+  opacity: 1;
+}
+.sev-label.neg::before {
+  content: "\2298 ";
+  margin-right: 2px;
+}
 
 /* Glow pulse for recent alerts */
 @keyframes glow-pulse {
@@ -1401,20 +1543,20 @@ body {
   <div class="filter-bar" id="filter-bar">
     <span class="filter-label">Filtre:</span>
     <span class="sev-group">
-      <span class="sev-label" style="background:#f85149" data-sev="Critical" onclick="toggleSevFilter(this)">CRITICAL</span>
-      <button class="filter-btn" data-scan="Lateral Movement" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#d18616"></span> Lateral</button>
+      <span class="sev-label" style="background:#f85149" data-sev="Critical" onclick="toggleSevFilter(this, event)">CRITICAL</span>
+      <button class="filter-btn" data-scan="Lateral Movement" onclick="toggleScanFilter(this, event)"><span class="fdot" style="background:#d18616"></span> Lateral</button>
     </span>
     <span class="filter-sep"></span>
     <span class="sev-group">
-      <span class="sev-label" style="background:#d18616" data-sev="High" onclick="toggleSevFilter(this)">HIGH</span>
-      <button class="filter-btn" data-scan="Fast Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#f85149"></span> Fast</button>
-      <button class="filter-btn" data-scan="Distributed Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#39d353"></span> Distributed</button>
+      <span class="sev-label" style="background:#d18616" data-sev="High" onclick="toggleSevFilter(this, event)">HIGH</span>
+      <button class="filter-btn" data-scan="Fast Scan" onclick="toggleScanFilter(this, event)"><span class="fdot" style="background:#f85149"></span> Fast</button>
+      <button class="filter-btn" data-scan="Distributed Scan" onclick="toggleScanFilter(this, event)"><span class="fdot" style="background:#39d353"></span> Distributed</button>
     </span>
     <span class="filter-sep"></span>
     <span class="sev-group">
-      <span class="sev-label" style="background:#d29922" data-sev="Medium" onclick="toggleSevFilter(this)">MEDIUM</span>
-      <button class="filter-btn" data-scan="Slow Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#d29922"></span> Slow</button>
-      <button class="filter-btn" data-scan="Accept Scan" onclick="toggleScanFilter(this)"><span class="fdot" style="background:#bc8cff"></span> Accept</button>
+      <span class="sev-label" style="background:#d29922" data-sev="Medium" onclick="toggleSevFilter(this, event)">MEDIUM</span>
+      <button class="filter-btn" data-scan="Slow Scan" onclick="toggleScanFilter(this, event)"><span class="fdot" style="background:#d29922"></span> Slow</button>
+      <button class="filter-btn" data-scan="Accept Scan" onclick="toggleScanFilter(this, event)"><span class="fdot" style="background:#bc8cff"></span> Accept</button>
     </span>
     <div class="heatmap-24" id="heatmap-24" title="Severitate maxima / ora, ultimele 24h">
       <span class="heatmap-24-label">24h</span>
@@ -1443,16 +1585,30 @@ body {
       <div class="legend-item"><span class="legend-dot" style="background:#bc8cff;width:20px;height:3px;border-radius:1px"></span> Accept</div>
       <div class="legend-item"><span class="legend-dot" style="background:#d18616;width:20px;height:3px;border-radius:1px"></span> Lateral</div>
       <div class="legend-item"><span class="legend-dot" style="background:#39d353;width:20px;height:3px;border-radius:1px"></span> Distributed</div>
-      <div class="legend-item" style="margin-left:8px;color:var(--text-dim)">Drag=Pin | DblClick=Unpin | F=Fit Space=Freeze T=Theme 1-5=Filters</div>
+      <div class="legend-item" style="margin-left:8px;color:var(--text-dim)">Drag=Pin | DblClick=Unpin | F=Fit Space=Freeze T=Theme 1-5=Filters | Shift+Click filtru=Exclude | A/D/E=Triage</div>
     </div>
   </div>
   <div class="table-area density-compact" id="table-area">
     <div class="table-toolbar">
-      <span class="table-title">Alerte<b id="alert-count">0</b></span>
-      <div class="density-toggle" role="group" aria-label="Densitate tabel">
-        <button data-density="comfortable" title="Confortabil (10 vizibile)">Confortabil</button>
-        <button data-density="compact" title="Compact (20 vizibile)">Compact</button>
-        <button data-density="dense" title="Dens (40 vizibile)">Dens</button>
+      <span class="table-title">
+        Alerte<b id="alert-count">0</b>
+        <span class="triage-summary" id="triage-summary" hidden>
+          <span class="s-new"><b id="ts-new">0</b> new</span>
+          <span class="s-ack"><b id="ts-ack">0</b> ack</span>
+          <span class="s-esc"><b id="ts-esc">0</b> esc</span>
+          <span class="s-dis"><b id="ts-dis">0</b> dis</span>
+        </span>
+      </span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <label class="hide-dismissed-toggle" title="Ascunde alertele marcate Dismiss">
+          <input type="checkbox" id="hide-dismissed" checked>
+          <span>Ascunde Dismissed</span>
+        </label>
+        <div class="density-toggle" role="group" aria-label="Densitate tabel">
+          <button data-density="comfortable" title="Confortabil (10 vizibile)">Confortabil</button>
+          <button data-density="compact" title="Compact (20 vizibile)">Compact</button>
+          <button data-density="dense" title="Dens (40 vizibile)">Dens</button>
+        </div>
       </div>
     </div>
     <div class="table-scroll">
@@ -1464,6 +1620,7 @@ body {
             <th>Sursa</th>
             <th>Destinatie</th>
             <th>Detalii</th>
+            <th title="Triage: A=Ack, D=Dismiss, E=Escalate">Status</th>
           </tr>
         </thead>
         <tbody id="alert-tbody"></tbody>
@@ -1524,6 +1681,7 @@ let isFrozen = false;
 let rawGraphData = null;
 let rawAlertData = null;
 let activeScanTypes = new Set(Object.keys(SCAN_COLORS));
+let excludedScanTypes = new Set();
 let selectedNodes = new Set();
 let isolatedMode = false;
 let prevStats = null;
@@ -1863,45 +2021,166 @@ function clearHighlight() {
   labelGroup.selectAll("text").classed("label-hl", false);
 }
 
-window.toggleScanFilter = function(btn) {
+window.toggleScanFilter = function(btn, evt) {
   const st = btn.dataset.scan;
-  if (activeScanTypes.has(st)) {
-    activeScanTypes.delete(st);
-    btn.classList.add("off");
+  const shift = !!(evt && evt.shiftKey);
+  if (shift) {
+    if (excludedScanTypes.has(st)) {
+      excludedScanTypes.delete(st);
+      activeScanTypes.add(st);
+    } else {
+      activeScanTypes.delete(st);
+      excludedScanTypes.add(st);
+    }
   } else {
-    activeScanTypes.add(st);
-    btn.classList.remove("off");
+    if (excludedScanTypes.has(st)) {
+      excludedScanTypes.delete(st);
+      activeScanTypes.add(st);
+    } else if (activeScanTypes.has(st)) {
+      activeScanTypes.delete(st);
+    } else {
+      activeScanTypes.add(st);
+    }
   }
-  updateSevLabels();
+  syncFilterUi();
   reapplyFilters();
 };
 
-window.toggleSevFilter = function(label) {
+window.toggleSevFilter = function(label, evt) {
   const types = SEV_TO_TYPES[label.dataset.sev];
-  const allOn = types.every(t => activeScanTypes.has(t));
-  types.forEach(t => {
-    if (allOn) activeScanTypes.delete(t);
-    else activeScanTypes.add(t);
-  });
-  document.querySelectorAll(".filter-btn").forEach(b => {
-    b.classList.toggle("off", !activeScanTypes.has(b.dataset.scan));
-  });
-  updateSevLabels();
+  const shift = !!(evt && evt.shiftKey);
+  if (shift) {
+    const allNeg = types.every(t => excludedScanTypes.has(t));
+    types.forEach(t => {
+      if (allNeg) {
+        excludedScanTypes.delete(t);
+        activeScanTypes.add(t);
+      } else {
+        activeScanTypes.delete(t);
+        excludedScanTypes.add(t);
+      }
+    });
+  } else {
+    const anyExcluded = types.some(t => excludedScanTypes.has(t));
+    if (anyExcluded) {
+      types.forEach(t => { excludedScanTypes.delete(t); activeScanTypes.add(t); });
+    } else {
+      const allOn = types.every(t => activeScanTypes.has(t));
+      types.forEach(t => {
+        if (allOn) activeScanTypes.delete(t);
+        else activeScanTypes.add(t);
+      });
+    }
+  }
+  syncFilterUi();
   reapplyFilters();
 };
-
-function updateSevLabels() {
-  document.querySelectorAll(".sev-label").forEach(lbl => {
-    const types = SEV_TO_TYPES[lbl.dataset.sev];
-    lbl.classList.toggle("off", !types.some(t => activeScanTypes.has(t)));
-  });
-}
 
 function reapplyFilters() {
   if (rawGraphData) {
     updateGraph(applyGraphFilters(rawGraphData));
     updateTable(applyAlertFilters(rawAlertData));
   }
+  updateUrlFromFilters();
+}
+
+// ==== Saved Views + URL state (Tier 2 #7) ====
+const VIEWS = {
+  all:         new Set(["Lateral Movement", "Fast Scan", "Slow Scan", "Accept Scan", "Distributed Scan"]),
+  criticals:   new Set(["Lateral Movement"]),
+  high:        new Set(["Lateral Movement", "Fast Scan", "Distributed Scan"]),
+  scans:       new Set(["Fast Scan", "Slow Scan", "Accept Scan", "Distributed Scan"]),
+  lateral:     new Set(["Lateral Movement"]),
+  distributed: new Set(["Distributed Scan"]),
+};
+
+function setsEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const x of a) if (!b.has(x)) return false;
+  return true;
+}
+
+function currentViewName() {
+  for (const [name, set] of Object.entries(VIEWS)) {
+    if (setsEqual(activeScanTypes, set)) return name;
+  }
+  return null;
+}
+
+function applyView(name) {
+  const v = VIEWS[name];
+  if (!v) return false;
+  activeScanTypes = new Set(v);
+  excludedScanTypes = new Set();
+  syncFilterUi();
+  reapplyFilters();
+  return true;
+}
+
+function syncFilterUi() {
+  document.querySelectorAll(".filter-btn").forEach(b => {
+    const t = b.dataset.scan;
+    const isOn   = activeScanTypes.has(t);
+    const isNeg  = excludedScanTypes.has(t);
+    b.classList.toggle("off", !isOn && !isNeg);
+    b.classList.toggle("neg", isNeg);
+  });
+  document.querySelectorAll(".sev-label").forEach(l => {
+    const types = SEV_TO_TYPES[l.dataset.sev];
+    const allNeg = types.every(t => excludedScanTypes.has(t));
+    const anyOn = types.some(t => activeScanTypes.has(t));
+    l.classList.toggle("off", !anyOn && !allNeg);
+    l.classList.toggle("neg", allNeg);
+  });
+}
+
+function updateUrlFromFilters() {
+  try {
+    const u = new URL(window.location);
+    u.searchParams.delete("view");
+    u.searchParams.delete("scans");
+    u.searchParams.delete("exclude");
+    const hasExcl = excludedScanTypes.size > 0;
+    const view = !hasExcl ? currentViewName() : null;
+    if (view && view !== "all") {
+      u.searchParams.set("view", view);
+    } else {
+      if (!setsEqual(activeScanTypes, VIEWS.all) || hasExcl) {
+        if (!setsEqual(activeScanTypes, VIEWS.all)) {
+          u.searchParams.set("scans", [...activeScanTypes].sort().join(","));
+        }
+        if (hasExcl) {
+          u.searchParams.set("exclude", [...excludedScanTypes].sort().join(","));
+        }
+      }
+    }
+    window.history.replaceState({}, "", u);
+  } catch {}
+}
+
+function loadFiltersFromUrl() {
+  try {
+    const u = new URL(window.location);
+    const view = u.searchParams.get("view");
+    if (view && VIEWS[view]) {
+      activeScanTypes = new Set(VIEWS[view]);
+      excludedScanTypes = new Set();
+      syncFilterUi();
+      return;
+    }
+    const scans = u.searchParams.get("scans");
+    const excl  = u.searchParams.get("exclude");
+    const allowed = new Set(Object.keys(SCAN_COLORS));
+    if (scans) {
+      const set = new Set(scans.split(",").map(s => s.trim()).filter(s => allowed.has(s)));
+      if (set.size > 0) activeScanTypes = set;
+    }
+    if (excl) {
+      excludedScanTypes = new Set(excl.split(",").map(s => s.trim()).filter(s => allowed.has(s)));
+      excludedScanTypes.forEach(t => activeScanTypes.delete(t));
+    }
+    syncFilterUi();
+  } catch {}
 }
 
 function applyGraphFilters(data) {
@@ -1919,7 +2198,11 @@ function applyGraphFilters(data) {
 }
 
 function applyAlertFilters(alerts) {
-  return alerts.filter(a => activeScanTypes.has(a.scan_type));
+  let out = alerts.filter(a => activeScanTypes.has(a.scan_type));
+  if (hideDismissed) {
+    out = out.filter(a => getStatus(alertKey(a)) !== "dismissed");
+  }
+  return out;
 }
 
 // ==== Multi-select ====
@@ -1990,15 +2273,72 @@ function showEdgeTooltip(event, d) {
   tooltip.style.opacity = 1;
 }
 
+function enrichNodeStats(ip, role) {
+  const out = { count24h: 0, topPeers: [], buckets: new Array(60).fill(0), subnetGuess: "" };
+  if (!Array.isArray(rawAlertData)) return out;
+  const now = Date.now();
+  const cutoff24 = now - 24 * 60 * 60 * 1000;
+  const cutoff60 = now - 60 * 60 * 1000;
+  const peerCount = {};
+  for (const a of rawAlertData) {
+    const isSrc = a.source_ip === ip;
+    const isDst = a.dest_ip === ip;
+    if (!isSrc && !isDst) continue;
+    const ts = Date.parse(a.timestamp);
+    if (isNaN(ts)) continue;
+    if (ts >= cutoff24) out.count24h++;
+    if (ts >= cutoff60) {
+      const bucket = Math.floor((now - ts) / 60000);
+      if (bucket >= 0 && bucket < 60) out.buckets[59 - bucket]++;
+    }
+    const peer = isSrc ? a.dest_ip : a.source_ip;
+    if (peer) peerCount[peer] = (peerCount[peer] || 0) + 1;
+  }
+  out.topPeers = Object.entries(peerCount)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([p, c]) => ({ ip: p, count: c }));
+  const parts = ip.split(".");
+  if (parts.length === 4) out.subnetGuess = parts[0] + "." + parts[1] + "." + parts[2] + ".0/24";
+  return out;
+}
+
+function miniSparklineSvg(buckets) {
+  const w = 140, h = 22;
+  const max = Math.max(1, ...buckets);
+  const step = w / (buckets.length - 1);
+  const pts = buckets.map((v, i) => {
+    const x = i * step;
+    const y = h - 2 - (v / max) * (h - 4);
+    return x.toFixed(1) + "," + y.toFixed(1);
+  }).join(" ");
+  return '<svg class="mini-spark" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">' +
+         '<polyline fill="none" stroke="var(--accent)" stroke-width="1.2" points="' + pts + '" />' +
+         '</svg>';
+}
+
 function showTooltip(event, d) {
   const badges = d.scan_types.map(t =>
     `<span class="scan-badge" style="background:${scanColor(t)}">${t}</span>`
   ).join(" ");
+  const stats = enrichNodeStats(d.id, d.role);
+  const peersHtml = stats.topPeers.length > 0
+    ? '<div class="detail peer-list">Top peers: ' + stats.topPeers.map(p =>
+        '<span class="peer">' + p.ip + '</span>&nbsp;<span style="color:var(--text-dim)">&times;' + p.count + '</span>'
+      ).join(", ") + '</div>'
+    : "";
+  const sparkHtml = stats.count24h > 0
+    ? '<div class="mini-spark-label">Ultimele 60 min</div>' + miniSparklineSvg(stats.buckets)
+    : "";
+  const subnetHtml = stats.subnetGuess ? '<div class="subnet">Subnet: ' + stats.subnetGuess + '</div>' : "";
   tooltip.innerHTML = `
     <div class="ip">${d.id}</div>
     <div class="role">${d.role === "attacker" ? "ATACATOR" : "TINTA"}</div>
-    <div class="detail">Alerte: ${d.alert_count}</div>
+    ${subnetHtml}
+    <div class="detail">Alerte total: ${d.alert_count} &middot; 24h: ${stats.count24h}</div>
     <div class="detail">${badges}</div>
+    ${peersHtml}
+    ${sparkHtml}
     <div class="detail" style="color:#8b949e;font-size:11px">Ultima: ${formatTime(d.last_seen)}</div>
     <div class="detail" style="color:#8b949e;font-size:10px">Click=Dossier | Shift=Select | DblClick=Unpin</div>
   `;
@@ -2034,7 +2374,7 @@ async function openDossier(ip) {
     ).join(' ');
 
     const scanBadges = d.scan_types.map(t =>
-      `<span class="type-badge" style="background:${scanColor(t)}">${t}</span>`
+      `<span class="type-badge" style="background:${scanColor(t)}">${t}</span>${mitreBadgeHtml(t, true)}`
     ).join(' ');
 
     const portsStr = d.ports_accessed.length > 0
@@ -2048,7 +2388,7 @@ async function openDossier(ip) {
     const timelineRows = d.timeline.slice(0, 50).map(e => `
       <tr>
         <td style="color:var(--text-dim)">${formatTime(e.timestamp)}</td>
-        <td><span class="type-badge" style="background:${scanColor(e.scan_type)};font-size:10px;padding:1px 6px">${e.scan_type}</span></td>
+        <td><span class="type-badge" style="background:${scanColor(e.scan_type)};font-size:10px;padding:1px 6px">${e.scan_type}</span>${mitreBadgeHtml(e.scan_type, true)}</td>
         <td>${e.role === 'attacker' ? 'ATK' : 'TGT'}</td>
         <td><span class="ip-link" onclick="openDossier('${e.peer_ip}')">${e.peer_ip}</span></td>
         <td style="color:var(--text-dim)">${e.ports.slice(0,10).join(', ')}</td>
@@ -2109,36 +2449,44 @@ function updateTable(alerts) {
     const detail = alertDetail(a);
 
     if (cluster.items.length === 1) {
-      // Rand simplu (fara cluster)
-      html += `<tr>
+      const k = alertKey(a);
+      const st = getStatus(k);
+      html += `<tr class="alert-row" data-alert-key="${k}" data-status="${st}">
         <td style="color:#8b949e">${formatTime(a.timestamp)}</td>
-        <td><span class="type-badge" style="background:${color}">${a.scan_type}</span></td>
+        <td><span class="type-badge" style="background:${color}">${a.scan_type}</span>${mitreBadgeHtml(a.scan_type, true)}</td>
         <td><span class="ip-link" onclick="openDossier('${a.source_ip}')">${a.source_ip}</span></td>
         <td><span class="ip-link" onclick="openDossier('${dest}')">${dest}</span></td>
         <td style="color:#8b949e">${detail}</td>
+        <td>${triageCellHtml(k)}</td>
       </tr>`;
     } else {
-      // Cluster header (expandable)
       const cid = 'c' + Math.random().toString(36).slice(2, 8);
-      html += `<tr class="cluster-header" onclick="toggleCluster('${cid}', this)">
+      const childKeys = cluster.items.map(alertKey);
+      const joinedKeys = childKeys.join("\u0001");
+      html += `<tr class="cluster-header" data-cluster-keys="${joinedKeys}" onclick="toggleCluster('${cid}', this)">
         <td style="color:#8b949e">${formatTime(a.timestamp)}</td>
-        <td><span class="type-badge" style="background:${color}">${a.scan_type}</span></td>
+        <td><span class="type-badge" style="background:${color}">${a.scan_type}</span>${mitreBadgeHtml(a.scan_type, true)}</td>
         <td><span class="ip-link" onclick="event.stopPropagation();openDossier('${a.source_ip}')">${a.source_ip}</span></td>
         <td colspan="2" style="color:var(--yellow)">&#215;${cluster.items.length} alerte grupate (click pentru expand)</td>
+        <td>${clusterStatusBadge(childKeys)}</td>
       </tr>`;
       for (const child of cluster.items) {
         const cd = child.dest_ip || "N/A";
-        html += `<tr class="cluster-child ${cid}">
+        const ck = alertKey(child);
+        const cs = getStatus(ck);
+        html += `<tr class="cluster-child alert-row ${cid}" data-alert-key="${ck}" data-status="${cs}">
           <td style="color:#8b949e">${formatTime(child.timestamp)}</td>
-          <td><span class="type-badge" style="background:${color};font-size:10px">${child.scan_type}</span></td>
+          <td><span class="type-badge" style="background:${color};font-size:10px">${child.scan_type}</span>${mitreBadgeHtml(child.scan_type, true)}</td>
           <td><span class="ip-link" onclick="openDossier('${child.source_ip}')">${child.source_ip}</span></td>
           <td><span class="ip-link" onclick="openDossier('${cd}')">${cd}</span></td>
           <td style="color:#8b949e">${alertDetail(child)}</td>
+          <td>${triageCellHtml(ck)}</td>
         </tr>`;
       }
     }
   }
   tbody.innerHTML = html;
+  updateTriageSummary(alerts);
 }
 
 function alertDetail(a) {
@@ -2440,6 +2788,187 @@ function updateHeatmap(alerts) {
   }
 }
 
+// ==== MITRE ATT&CK tags (Tier 2 #9) ====
+const MITRE_MAP = {
+  "Fast Scan":        { id: "T1046",     name: "Network Service Discovery" },
+  "Slow Scan":        { id: "T1046",     name: "Network Service Discovery" },
+  "Accept Scan":      { id: "T1046",     name: "Network Service Discovery (passive)" },
+  "Distributed Scan": { id: "T1595.001", name: "Active Scanning: Scanning IP Blocks" },
+  "Lateral Movement": { id: "T1021",     name: "Remote Services" },
+};
+
+function mitreBadgeHtml(scanType, small) {
+  const m = MITRE_MAP[scanType];
+  if (!m) return "";
+  const cls = small ? "mitre-tag small" : "mitre-tag";
+  const title = "MITRE ATT&CK " + m.id + " &ndash; " + m.name + " (click pentru filtrare)";
+  return '<span class="' + cls + '" data-ttp="' + m.id + '" title="' + title + '">' + m.id + '</span>';
+}
+
+function filterByTtp(ttp) {
+  const matching = Object.keys(MITRE_MAP).filter(k => MITRE_MAP[k].id === ttp);
+  if (matching.length === 0) return;
+  activeScanTypes = new Set(matching);
+  excludedScanTypes = new Set();
+  syncFilterUi();
+  reapplyFilters();
+}
+
+function initMitreClicks() {
+  document.addEventListener("click", e => {
+    const tag = e.target.closest(".mitre-tag[data-ttp]");
+    if (!tag) return;
+    e.stopPropagation();
+    filterByTtp(tag.dataset.ttp);
+  });
+}
+
+// ==== Triage state (Tier 2 #6) ====
+const ALERT_STATUS_KEY = "ids-alert-status";
+const ALERT_STATUS_MAX = 500;
+let alertStatus = {};
+let hideDismissed = true;
+let hoverAlertKey = null;
+let hoverClusterKeys = null;
+
+function loadTriage() {
+  try { alertStatus = JSON.parse(localStorage.getItem(ALERT_STATUS_KEY) || "{}"); }
+  catch { alertStatus = {}; }
+  try {
+    const raw = localStorage.getItem("ids-hide-dismissed");
+    hideDismissed = raw === null ? true : raw === "true";
+  } catch {}
+  const cb = document.getElementById("hide-dismissed");
+  if (cb) cb.checked = hideDismissed;
+}
+
+function saveTriage() {
+  const entries = Object.entries(alertStatus);
+  if (entries.length > ALERT_STATUS_MAX) {
+    alertStatus = Object.fromEntries(entries.slice(-ALERT_STATUS_MAX));
+  }
+  try { localStorage.setItem(ALERT_STATUS_KEY, JSON.stringify(alertStatus)); } catch {}
+}
+
+function getStatus(key) { return alertStatus[key] || "new"; }
+
+function setStatus(key, status) {
+  if (!key) return;
+  if (!status || status === "new") delete alertStatus[key];
+  else alertStatus[key] = status;
+  saveTriage();
+  reapplyFilters();
+}
+
+function bulkSetStatus(keys, status) {
+  if (!keys || keys.length === 0) return;
+  for (const k of keys) {
+    if (!status || status === "new") delete alertStatus[k];
+    else alertStatus[k] = status;
+  }
+  saveTriage();
+  reapplyFilters();
+}
+
+function triageCellHtml(key) {
+  const st = getStatus(key);
+  return '<div class="triage">'
+    + '<button class="triage-btn' + (st === "ack" ? " active" : "") + '" data-action="ack" title="Ack (A)">&#10003;</button>'
+    + '<button class="triage-btn' + (st === "dismissed" ? " active" : "") + '" data-action="dismiss" title="Dismiss (D)">&#10005;</button>'
+    + '<button class="triage-btn' + (st === "escalated" ? " active" : "") + '" data-action="escalate" title="Escalate (E)">&#9650;</button>'
+    + '</div>';
+}
+
+function clusterStatusBadge(keys) {
+  const counts = { new: 0, ack: 0, dismissed: 0, escalated: 0 };
+  for (const k of keys) counts[getStatus(k)]++;
+  const parts = [];
+  if (counts.new > 0)        parts.push('<span class="dot-sm new"></span>' + counts.new);
+  if (counts.ack > 0)        parts.push('<span class="dot-sm ack"></span>' + counts.ack);
+  if (counts.escalated > 0)  parts.push('<span class="dot-sm esc"></span>' + counts.escalated);
+  if (counts.dismissed > 0)  parts.push('<span class="dot-sm dis"></span>' + counts.dismissed);
+  return '<div class="cluster-badge" title="Triage in cluster: A/D/E bulk">' + parts.join(" ") + '</div>';
+}
+
+function updateTriageSummary(alerts) {
+  const el = document.getElementById("triage-summary");
+  if (!el) return;
+  const c = { new: 0, ack: 0, dismissed: 0, escalated: 0 };
+  for (const a of alerts || []) c[getStatus(alertKey(a))]++;
+  el.hidden = (alerts || []).length === 0;
+  document.getElementById("ts-new").textContent = c.new;
+  document.getElementById("ts-ack").textContent = c.ack;
+  document.getElementById("ts-esc").textContent = c.escalated;
+  document.getElementById("ts-dis").textContent = c.dismissed;
+}
+
+function initTriage() {
+  loadTriage();
+  const tbody = document.getElementById("alert-tbody");
+
+  tbody.addEventListener("click", e => {
+    const btn = e.target.closest(".triage-btn");
+    if (!btn) return;
+    const row = btn.closest("[data-alert-key]");
+    if (!row) return;
+    e.stopPropagation();
+    const key = row.dataset.alertKey;
+    const action = btn.dataset.action;
+    const targetMap = { ack: "ack", dismiss: "dismissed", escalate: "escalated" };
+    const target = targetMap[action];
+    const cur = getStatus(key);
+    setStatus(key, cur === target ? "new" : target);
+  });
+
+  tbody.addEventListener("mouseover", e => {
+    const row = e.target.closest("tr.alert-row, tr.cluster-header");
+    if (!row) return;
+    document.querySelectorAll(".hover-key").forEach(r => r.classList.remove("hover-key"));
+    if (row.dataset.alertKey) {
+      hoverAlertKey = row.dataset.alertKey;
+      hoverClusterKeys = null;
+      row.classList.add("hover-key");
+    } else if (row.dataset.clusterKeys) {
+      hoverAlertKey = null;
+      hoverClusterKeys = row.dataset.clusterKeys.split("\u0001");
+    }
+  });
+  tbody.addEventListener("mouseleave", () => {
+    hoverAlertKey = null;
+    hoverClusterKeys = null;
+    document.querySelectorAll(".hover-key").forEach(r => r.classList.remove("hover-key"));
+  });
+
+  const cb = document.getElementById("hide-dismissed");
+  if (cb) {
+    cb.addEventListener("change", () => {
+      hideDismissed = cb.checked;
+      try { localStorage.setItem("ids-hide-dismissed", String(hideDismissed)); } catch {}
+      reapplyFilters();
+    });
+  }
+}
+
+function handleTriageKey(e) {
+  if (e.ctrlKey || e.metaKey || e.altKey) return false;
+  const k = e.key.toLowerCase();
+  if (k !== "a" && k !== "d" && k !== "e") return false;
+  const map = { a: "ack", d: "dismissed", e: "escalated" };
+  const target = map[k];
+  if (hoverAlertKey) {
+    e.preventDefault();
+    const cur = getStatus(hoverAlertKey);
+    setStatus(hoverAlertKey, cur === target ? "new" : target);
+    return true;
+  }
+  if (hoverClusterKeys) {
+    e.preventDefault();
+    bulkSetStatus(hoverClusterKeys, target);
+    return true;
+  }
+  return false;
+}
+
 // ==== Density toggle (Tier 1 #4) ====
 const DENSITIES = ["comfortable", "compact", "dense"];
 
@@ -2579,8 +3108,8 @@ function toggleSevByName(name) {
 }
 function resetAllFilters() {
   activeScanTypes = new Set(Object.keys(SCAN_COLORS));
-  document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("off"));
-  document.querySelectorAll(".sev-label").forEach(l => l.classList.remove("off"));
+  excludedScanTypes = new Set();
+  syncFilterUi();
   reapplyFilters();
 }
 function searchIp(ip) {
@@ -2612,10 +3141,31 @@ const COMMANDS = [
   { id: "s-medium",     cat: "Filter", icon: "\u25A0", label: "Toggle Medium severity",                                                          run: () => toggleSevByName("Medium") },
   { id: "reset-filter", cat: "Filter", icon: "\u21BB", label: "Reset all filters",           sub: "Activeaza toate tipurile",                   run: resetAllFilters },
 
+  { id: "v-all",         cat: "Views", icon: "\u25A3", label: "View: All",                    sub: "Toate tipurile active",                      run: () => applyView("all") },
+  { id: "v-criticals",   cat: "Views", icon: "\u25A0", label: "View: Criticals only",         sub: "Doar Lateral Movement",                      run: () => applyView("criticals") },
+  { id: "v-high",        cat: "Views", icon: "\u25A0", label: "View: High + Critical",        sub: "Lateral + Fast + Distributed",               run: () => applyView("high") },
+  { id: "v-scans",       cat: "Views", icon: "\u25A0", label: "View: Scans only",             sub: "Fast + Slow + Accept + Distributed",         run: () => applyView("scans") },
+  { id: "v-lateral",     cat: "Views", icon: "\u25A0", label: "View: Lateral only",                                                              run: () => applyView("lateral") },
+  { id: "v-distributed", cat: "Views", icon: "\u25A0", label: "View: Distributed only",                                                          run: () => applyView("distributed") },
+  { id: "v-share",       cat: "Views", icon: "\u{1F517}", label: "Copy shareable URL",        sub: "Copiaza URL cu filtrele curente",            run: copyShareUrl },
+
   { id: "clear-search", cat: "Search", icon: "\u2715", label: "Clear IP search",             sub: "Sterge filtrul omnisearch",                  run: clearSearch },
 ];
 
-const CAT_ORDER = ["Search", "Graph", "Filter", "View"];
+function copyShareUrl() {
+  updateUrlFromFilters();
+  const url = window.location.href;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(
+      () => console.info("URL copiat:", url),
+      () => window.prompt("Copiaza URL:", url)
+    );
+  } else {
+    window.prompt("Copiaza URL:", url);
+  }
+}
+
+const CAT_ORDER = ["Search", "Views", "Graph", "Filter", "View"];
 let cmdkActiveIdx = 0;
 let cmdkVisible = [];
 
@@ -2735,6 +3285,7 @@ function handleKeyboard(e) {
     return;
   }
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (handleTriageKey(e)) return;
   switch(e.key.toLowerCase()) {
     case "f":
       if (!e.ctrlKey && !e.metaKey) { e.preventDefault(); zoomToFit(); }
@@ -2776,6 +3327,9 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("keydown", handleKeyboard);
 
   initDensity();
+  initTriage();
+  initMitreClicks();
+  loadFiltersFromUrl();
 
   // Command palette wiring
   document.getElementById("cmdk-trigger").addEventListener("click", openCmdk);
