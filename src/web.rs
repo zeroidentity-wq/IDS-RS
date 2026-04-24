@@ -585,6 +585,26 @@ body {
   flex-direction: column;
   height: calc(100vh - 56px);
 }
+/* B3/B4 fix: cand containerul intra in fullscreen, ia tot ecranul iar panourile
+   (dossier, workspace, toast, cmdk) raman vizibile pentru ca sunt descendente. */
+.container:fullscreen,
+.container:-webkit-full-screen {
+  height: 100vh;
+  background: var(--bg);
+  padding: 0;
+}
+.container:fullscreen .side-panel,
+.container:-webkit-full-screen .side-panel,
+.container:fullscreen .workspace-panel,
+.container:-webkit-full-screen .workspace-panel,
+.container:fullscreen .workspace-toggle,
+.container:-webkit-full-screen .workspace-toggle,
+.container:fullscreen .toast-container,
+.container:-webkit-full-screen .toast-container,
+.container:fullscreen .cmdk-overlay,
+.container:-webkit-full-screen .cmdk-overlay {
+  position: absolute;
+}
 .graph-area {
   flex: 1;
   position: relative;
@@ -1144,6 +1164,15 @@ body {
 .node-hl { opacity: 1 !important; }
 .label-hl { opacity: 1 !important; }
 
+/* Bug B2 fix: pin SVG text weight, prevent inheritance drift on drag/hover */
+#graph-svg text {
+  font-weight: 400;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  paint-order: stroke fill;
+}
+#graph-svg g.hull-labels text { font-weight: 600; }
+
 /* Animated edge flow */
 @keyframes edge-flow {
   to { stroke-dashoffset: -12; }
@@ -1181,6 +1210,188 @@ body {
   cursor: pointer;
 }
 .side-panel-close:hover { color: var(--text); }
+
+/* Investigation Workspace (Tier 3 #11) */
+.workspace-toggle {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 45;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+}
+.workspace-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.workspace-toggle .ws-count {
+  background: var(--accent);
+  color: #0d1117;
+  border-radius: 10px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 18px;
+  text-align: center;
+}
+.workspace-panel {
+  position: fixed;
+  left: -380px;
+  top: 0;
+  width: 380px;
+  height: 100vh;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  z-index: 48;
+  transition: left 0.3s ease;
+  overflow-y: auto;
+  padding: 18px;
+  box-shadow: 4px 0 20px rgba(0,0,0,0.4);
+}
+.workspace-panel.open { left: 0; }
+.workspace-empty { color: var(--text-dim); font-size: 12px; font-style: italic; padding: 20px 0; text-align: center; }
+.ws-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 10px;
+  background: var(--surface-alt, rgba(255,255,255,0.02));
+}
+.ws-item-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.ws-item-ip {
+  font-weight: 700;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+}
+.ws-item-ip:hover { text-decoration: underline; }
+.ws-item-meta { color: var(--text-dim); font-size: 10px; }
+.ws-item-actions { display: flex; gap: 6px; }
+.ws-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.ws-btn:hover { color: var(--red); border-color: var(--red); }
+.ws-note {
+  width: 100%;
+  min-height: 50px;
+  background: rgba(0,0,0,0.2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  resize: vertical;
+}
+.ws-note:focus { outline: none; border-color: var(--accent); }
+.ws-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.ws-tag {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(88, 166, 255, 0.3);
+}
+.pin-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 3px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-left: 8px;
+}
+.pin-btn:hover { color: var(--accent); border-color: var(--accent); }
+.pin-btn.pinned { color: var(--yellow); border-color: var(--yellow); }
+
+/* Replay Mode (Tier 3 #12) */
+.replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.replay-bar.active { background: linear-gradient(90deg, rgba(88,166,255,0.08), transparent); }
+.replay-bar button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 3px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.replay-bar button:hover { border-color: var(--accent); color: var(--accent); }
+.replay-bar button.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+.replay-bar button.primary:hover { color: #0d1117; }
+.replay-bar input[type=range] {
+  flex: 1;
+  min-width: 180px;
+  accent-color: var(--accent);
+}
+.replay-bar select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+.replay-time { color: var(--accent); font-weight: 600; font-family: monospace; }
+.replay-range { color: var(--text-dim); font-family: monospace; font-size: 10px; }
+.replay-hint { color: var(--text-dim); font-style: italic; }
+
+/* Aerial Subnet Grouping (Tier 3 #13) */
+.subnet-hull {
+  fill-opacity: 0.08;
+  stroke-opacity: 0.55;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+.subnet-hull-label {
+  font-size: 10px;
+  fill: var(--text-dim);
+  font-weight: 600;
+  pointer-events: none;
+  text-anchor: middle;
+  letter-spacing: 0.4px;
+}
+.graph-toolbar button.aerial-active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(88,166,255,0.12);
+}
 
 /* Severity group labels in filter bar */
 .sev-group {
@@ -1539,7 +1750,7 @@ body {
   </div>
 </div>
 
-<div class="container">
+<div class="container" id="dashboard-root">
   <div class="filter-bar" id="filter-bar">
     <span class="filter-label">Filtre:</span>
     <span class="sev-group">
@@ -1571,6 +1782,7 @@ body {
       <button id="btn-freeze" title="Freeze/Play simulare">&#10074;&#10074; Freeze</button>
       <button id="btn-pin-all" title="Fixeaza toate nodurile">Pin All</button>
       <button id="btn-unpin-all" title="Elibereaza toate nodurile">Unpin All</button>
+      <button id="btn-aerial" title="Grupare aeriana pe subnet /24 (Shift+G)">&#9711; Aerial</button>
       <button id="btn-fit" title="Centreaza graful">&#8982; Fit</button>
       <button id="btn-fullscreen" title="Fullscreen (F11)">&#9974; Full</button>
       <button id="btn-export" title="Export graf ca PNG">&#128247; PNG</button>
@@ -1585,8 +1797,33 @@ body {
       <div class="legend-item"><span class="legend-dot" style="background:#bc8cff;width:20px;height:3px;border-radius:1px"></span> Accept</div>
       <div class="legend-item"><span class="legend-dot" style="background:#d18616;width:20px;height:3px;border-radius:1px"></span> Lateral</div>
       <div class="legend-item"><span class="legend-dot" style="background:#39d353;width:20px;height:3px;border-radius:1px"></span> Distributed</div>
-      <div class="legend-item" style="margin-left:8px;color:var(--text-dim)">Drag=Pin | DblClick=Unpin | F=Fit Space=Freeze T=Theme 1-5=Filters | Shift+Click filtru=Exclude | A/D/E=Triage</div>
+      <div class="legend-item" style="margin-left:8px;color:var(--text-dim)">Drag=Pin | DblClick=Unpin | F=Fit Space=Freeze T=Theme 1-5=Filters | Shift+Click filtru=Exclude | A/D/E=Triage | Shift+P=Workspace Shift+G=Aerial</div>
     </div>
+  </div>
+  <div class="replay-bar" id="replay-bar">
+    <button id="replay-toggle" title="Activeaza/dezactiveaza replay mode">&#9654; Replay</button>
+    <button id="replay-play" title="Play/Pause" disabled>&#10074;&#10074;</button>
+    <button id="replay-rewind" title="Inapoi la inceput" disabled>&#124;&#9664;</button>
+    <input type="range" id="replay-slider" min="0" max="100" value="100" disabled />
+    <span class="replay-time" id="replay-time">--:--:--</span>
+    <label class="replay-hint">Window:
+      <select id="replay-window" disabled>
+        <option value="1">1 min</option>
+        <option value="5">5 min</option>
+        <option value="10" selected>10 min</option>
+        <option value="30">30 min</option>
+        <option value="60">60 min</option>
+      </select>
+    </label>
+    <label class="replay-hint">Speed:
+      <select id="replay-speed" disabled>
+        <option value="500">0.5&times;</option>
+        <option value="250" selected>1&times;</option>
+        <option value="100">2.5&times;</option>
+        <option value="50">5&times;</option>
+      </select>
+    </label>
+    <span class="replay-range" id="replay-range"></span>
   </div>
   <div class="table-area density-compact" id="table-area">
     <div class="table-toolbar">
@@ -1627,33 +1864,47 @@ body {
       </table>
     </div>
   </div>
-</div>
 
-<!-- Toast container (Tier 1 #3) -->
-<div class="toast-container" id="toast-container"></div>
+  <!-- Panels mutate inside .container (B3/B4 fix: fullscreen pe #dashboard-root) -->
+  <div class="toast-container" id="toast-container"></div>
 
-<!-- Command Palette -->
-<div class="cmdk-overlay" id="cmdk-overlay" hidden>
-  <div class="cmdk-panel" role="dialog" aria-label="Command palette">
-    <input type="text" class="cmdk-input" id="cmdk-input"
-           placeholder="Scrie o comanda sau un IP..."
-           autocomplete="off" spellcheck="false">
-    <div class="cmdk-list" id="cmdk-list"></div>
-    <div class="cmdk-footer">
-      <span><span class="cmdk-kbd">&#8593;&#8595;</span>Navigheaza</span>
-      <span><span class="cmdk-kbd">Enter</span>Executa</span>
-      <span><span class="cmdk-kbd">Esc</span>Inchide</span>
+  <div class="cmdk-overlay" id="cmdk-overlay" hidden>
+    <div class="cmdk-panel" role="dialog" aria-label="Command palette">
+      <input type="text" class="cmdk-input" id="cmdk-input"
+             placeholder="Scrie o comanda sau un IP..."
+             autocomplete="off" spellcheck="false">
+      <div class="cmdk-list" id="cmdk-list"></div>
+      <div class="cmdk-footer">
+        <span><span class="cmdk-kbd">&#8593;&#8595;</span>Navigheaza</span>
+        <span><span class="cmdk-kbd">Enter</span>Executa</span>
+        <span><span class="cmdk-kbd">Esc</span>Inchide</span>
+      </div>
     </div>
   </div>
-</div>
 
-<!-- IP Dossier Side Panel -->
-<div class="side-panel" id="dossier-panel">
-  <div class="side-panel-header">
-    <h2 id="dossier-title">IP Dossier</h2>
-    <button class="side-panel-close" id="dossier-close">&times;</button>
+  <div class="side-panel" id="dossier-panel">
+    <div class="side-panel-header">
+      <h2 id="dossier-title">IP Dossier</h2>
+      <button class="side-panel-close" id="dossier-close">&times;</button>
+    </div>
+    <div id="dossier-body"></div>
   </div>
-  <div id="dossier-body"></div>
+
+  <button class="workspace-toggle" id="workspace-toggle" title="Investigation workspace (pinned IPs + notes)">
+    <span>&#128269;</span> Investigation
+    <span class="ws-count" id="ws-count">0</span>
+  </button>
+  <div class="workspace-panel" id="workspace-panel">
+    <div class="side-panel-header">
+      <h2>&#128269; Investigation Workspace</h2>
+      <button class="side-panel-close" id="workspace-close">&times;</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:12px">
+      <button class="ws-btn" id="ws-export" title="Export JSON">Export</button>
+      <button class="ws-btn" id="ws-clear" title="Sterge tot workspace-ul">Clear all</button>
+    </div>
+    <div id="workspace-body"></div>
+  </div>
 </div>
 
 <script src="/static/d3.min.js"></script>
@@ -1672,7 +1923,8 @@ function scanColor(type) {
 
 // ==== State ====
 let simulation = null;
-let svg, linkGroup, nodeGroup, labelGroup, zoom;
+let svg, hullGroup, hullLabelGroup, linkGroup, nodeGroup, labelGroup, zoom;
+let aerialEnabled = false;
 let currentNodes = [];
 let currentLinks = [];
 let width, height;
@@ -1739,6 +1991,8 @@ function initGraph() {
       .attr("fill", color);
   });
 
+  hullGroup      = svg.append("g").attr("class", "hulls");
+  hullLabelGroup = svg.append("g").attr("class", "hull-labels");
   linkGroup  = svg.append("g").attr("class", "links");
   nodeGroup  = svg.append("g").attr("class", "nodes");
   labelGroup = svg.append("g").attr("class", "labels");
@@ -1746,6 +2000,8 @@ function initGraph() {
   zoom = d3.zoom()
     .scaleExtent([0.2, 5])
     .on("zoom", (event) => {
+      hullGroup.attr("transform", event.transform);
+      hullLabelGroup.attr("transform", event.transform);
       linkGroup.attr("transform", event.transform);
       nodeGroup.attr("transform", event.transform);
       labelGroup.attr("transform", event.transform);
@@ -1770,6 +2026,8 @@ function initGraph() {
   document.getElementById("btn-unpin-all").addEventListener("click", unpinAll);
   document.getElementById("btn-isolate").addEventListener("click", isolateSelection);
   document.getElementById("btn-clear-sel").addEventListener("click", clearSelection);
+  const aerialBtn = document.getElementById("btn-aerial");
+  if (aerialBtn) aerialBtn.addEventListener("click", toggleAerial);
 }
 
 function zoomToFit() {
@@ -1801,6 +2059,98 @@ function nodeColor(d) {
   return d.role === "attacker" ? "#f85149" : "#8b949e";
 }
 
+// ==== Aerial Subnet Grouping (Tier 3 #13) ====
+function subnetKey(ip) {
+  const parts = (ip || "").split(".");
+  if (parts.length !== 4) return null;
+  return parts[0] + "." + parts[1] + "." + parts[2] + ".0/24";
+}
+
+function subnetColor(key) {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  return "hsl(" + hue + ", 65%, 60%)";
+}
+
+function toggleAerial() {
+  aerialEnabled = !aerialEnabled;
+  const btn = document.getElementById("btn-aerial");
+  if (btn) btn.classList.toggle("aerial-active", aerialEnabled);
+  if (!aerialEnabled) {
+    hullGroup.selectAll("path").remove();
+    hullLabelGroup.selectAll("text").remove();
+  } else if (simulation) {
+    simulation.alpha(0.1).restart();
+  }
+}
+
+function roundedHullPath(points, pad) {
+  if (points.length < 3) return null;
+  const hull = d3.polygonHull(points);
+  if (!hull) return null;
+  const cx = hull.reduce((s, p) => s + p[0], 0) / hull.length;
+  const cy = hull.reduce((s, p) => s + p[1], 0) / hull.length;
+  const padded = hull.map(([x, y]) => {
+    const dx = x - cx, dy = y - cy;
+    const len = Math.sqrt(dx*dx + dy*dy) || 1;
+    return [x + (dx/len) * pad, y + (dy/len) * pad];
+  });
+  let d = "M" + padded[0][0].toFixed(1) + "," + padded[0][1].toFixed(1);
+  for (let i = 1; i < padded.length; i++) {
+    d += "L" + padded[i][0].toFixed(1) + "," + padded[i][1].toFixed(1);
+  }
+  return d + "Z";
+}
+
+function updateHulls() {
+  if (!hullGroup) return;
+  if (!aerialEnabled) {
+    hullGroup.selectAll("path").remove();
+    hullLabelGroup.selectAll("text").remove();
+    return;
+  }
+  const groups = {};
+  for (const n of currentNodes) {
+    const k = subnetKey(n.id);
+    if (!k) continue;
+    if (!groups[k]) groups[k] = [];
+    groups[k].push(n);
+  }
+  const entries = Object.entries(groups).filter(([_, ns]) => ns.length >= 2);
+
+  const paths = hullGroup.selectAll("path.subnet-hull").data(entries, d => d[0]);
+  paths.exit().remove();
+  const pathsEnter = paths.enter().append("path").attr("class", "subnet-hull");
+  pathsEnter.merge(paths)
+    .attr("stroke", ([k]) => subnetColor(k))
+    .attr("fill", ([k]) => subnetColor(k))
+    .attr("d", ([, ns]) => {
+      if (ns.length < 3) {
+        const x = ns.reduce((s, n) => s + n.x, 0) / ns.length;
+        const y = ns.reduce((s, n) => s + n.y, 0) / ns.length;
+        const maxR = Math.max(...ns.map(n => nodeRadius(n))) + 28;
+        const d0 = ns.length === 1 ? maxR : Math.max(maxR, Math.hypot(ns[0].x - ns[1].x, ns[0].y - ns[1].y) / 2 + 20);
+        return "M " + (x - d0) + "," + y +
+               " a " + d0 + "," + d0 + " 0 1,0 " + (2*d0) + ",0" +
+               " a " + d0 + "," + d0 + " 0 1,0 " + (-2*d0) + ",0 Z";
+      }
+      return roundedHullPath(ns.map(n => [n.x, n.y]), 22);
+    });
+
+  const labels = hullLabelGroup.selectAll("text.subnet-hull-label").data(entries, d => d[0]);
+  labels.exit().remove();
+  const labelsEnter = labels.enter().append("text").attr("class", "subnet-hull-label");
+  labelsEnter.merge(labels)
+    .attr("fill", ([k]) => subnetColor(k))
+    .attr("x", ([, ns]) => ns.reduce((s, n) => s + n.x, 0) / ns.length)
+    .attr("y", ([, ns]) => {
+      const ys = ns.map(n => n.y);
+      return Math.min(...ys) - 18;
+    })
+    .text(([k, ns]) => k + "  \u00B7  " + ns.length);
+}
+
 function ticked() {
   linkGroup.selectAll("line").each(function(d) {
     const dx = d.target.x - d.source.x;
@@ -1820,6 +2170,8 @@ function ticked() {
   labelGroup.selectAll("text")
     .attr("x", d => d.x)
     .attr("y", d => d.y - nodeRadius(d) - 5);
+
+  if (aerialEnabled) updateHulls();
 }
 
 function updateGraph(data) {
@@ -1921,18 +2273,19 @@ function updateGraph(data) {
       return (now - new Date(d.last_seen).getTime()) < GLOW_MS;
     });
 
-  // Labels
+  // Labels (B2 fix: reaplic atributele pe merge ca sa nu ramana textul fara font-weight explicit)
   const showAll = nodes.length < 40;
   const labelData = showAll ? nodes : nodes.filter(d => d.alert_count >= 3 || d.role === "attacker");
   const label = labelGroup.selectAll("text").data(labelData, d => d.id);
   label.exit().remove();
-  label.enter().append("text")
+  const labelEnter = label.enter().append("text")
     .attr("text-anchor", "middle")
+    .attr("font-family", "monospace");
+  labelEnter.merge(label)
     .attr("fill", "#8b949e")
     .attr("font-size", "10px")
-    .attr("font-family", "monospace")
-    .text(d => d.id)
-    .merge(label);
+    .attr("font-weight", 400)
+    .text(d => d.id);
 
   simulation.nodes(nodes);
   simulation.force("link").links(links);
@@ -2185,6 +2538,10 @@ function loadFiltersFromUrl() {
 
 function applyGraphFilters(data) {
   let edges = data.edges.filter(e => activeScanTypes.has(e.scan_type));
+  if (replayActive) {
+    const allowed = replayAllowedEdgeSet();
+    edges = edges.filter(e => allowed.has(e.source + "|" + e.target + "|" + e.scan_type));
+  }
   let nodes;
   if (isolatedMode && selectedNodes.size > 0) {
     nodes = data.nodes.filter(n => selectedNodes.has(n.id));
@@ -2201,6 +2558,9 @@ function applyAlertFilters(alerts) {
   let out = alerts.filter(a => activeScanTypes.has(a.scan_type));
   if (hideDismissed) {
     out = out.filter(a => getStatus(alertKey(a)) !== "dismissed");
+  }
+  if (replayActive) {
+    out = out.filter(a => inReplayWindow(a.timestamp));
   }
   return out;
 }
@@ -2360,7 +2720,7 @@ async function openDossier(ip) {
   const panel = document.getElementById("dossier-panel");
   const title = document.getElementById("dossier-title");
   const body  = document.getElementById("dossier-body");
-  title.textContent = "IP Dossier: " + ip;
+  title.innerHTML = "IP Dossier: " + ip + pinButtonHtml(ip);
   body.innerHTML = '<div style="color:var(--text-dim)">Se incarca...</div>';
   panel.classList.add("open");
 
@@ -2422,6 +2782,335 @@ async function openDossier(ip) {
 document.getElementById("dossier-close").addEventListener("click", () => {
   document.getElementById("dossier-panel").classList.remove("open");
 });
+
+// ==== Investigation Workspace (Tier 3 #11) ====
+const WORKSPACE_KEY = "ids-workspace";
+let workspace = {};
+
+function loadWorkspace() {
+  try { workspace = JSON.parse(localStorage.getItem(WORKSPACE_KEY) || "{}"); }
+  catch { workspace = {}; }
+}
+
+function saveWorkspace() {
+  try { localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspace)); } catch {}
+  updateWorkspaceCount();
+}
+
+function updateWorkspaceCount() {
+  const el = document.getElementById("ws-count");
+  if (el) el.textContent = Object.keys(workspace).length;
+}
+
+function pinIp(ip) {
+  if (!ip) return;
+  if (!workspace[ip]) {
+    workspace[ip] = { ip, pinnedAt: new Date().toISOString(), note: "" };
+    saveWorkspace();
+    renderWorkspace();
+  }
+  const title = document.getElementById("dossier-title");
+  if (title && title.textContent.includes(ip)) {
+    title.innerHTML = "IP Dossier: " + ip + pinButtonHtml(ip);
+  }
+}
+
+function unpinIp(ip) {
+  if (workspace[ip]) {
+    delete workspace[ip];
+    saveWorkspace();
+    renderWorkspace();
+    const title = document.getElementById("dossier-title");
+    if (title && title.textContent.includes(ip)) {
+      title.innerHTML = "IP Dossier: " + ip + pinButtonHtml(ip);
+    }
+  }
+}
+
+function pinButtonHtml(ip) {
+  const pinned = !!workspace[ip];
+  const cls = pinned ? "pin-btn pinned" : "pin-btn";
+  const label = pinned ? "&#9733; Pinned" : "&#9734; Pin";
+  return '<button class="' + cls + '" data-pin-ip="' + ip + '" title="Investigation workspace">' + label + '</button>';
+}
+
+function summarizeWorkspaceItem(ip) {
+  if (!Array.isArray(rawAlertData)) return { alerts: 0, scanTypes: [], lastSeen: null };
+  let count = 0;
+  let lastSeen = null;
+  const stypes = new Set();
+  for (const a of rawAlertData) {
+    if (a.source_ip !== ip && a.dest_ip !== ip) continue;
+    count++;
+    stypes.add(a.scan_type);
+    if (!lastSeen || a.timestamp > lastSeen) lastSeen = a.timestamp;
+  }
+  return { alerts: count, scanTypes: [...stypes], lastSeen };
+}
+
+function renderWorkspace() {
+  const body = document.getElementById("workspace-body");
+  if (!body) return;
+  const ips = Object.keys(workspace).sort((a, b) => (workspace[b].pinnedAt || "").localeCompare(workspace[a].pinnedAt || ""));
+  if (ips.length === 0) {
+    body.innerHTML = '<div class="workspace-empty">Niciun IP pinned. Deschide un dosar si apasa Pin, sau Shift+P pe nod.</div>';
+    updateWorkspaceCount();
+    return;
+  }
+  let html = "";
+  for (const ip of ips) {
+    const item = workspace[ip];
+    const s = summarizeWorkspaceItem(ip);
+    const tags = s.scanTypes.map(t =>
+      '<span class="ws-tag" style="color:' + scanColor(t) + ';border-color:' + scanColor(t) + '55">' + t + '</span>'
+    ).join("");
+    const last = s.lastSeen ? formatTime(s.lastSeen) : "N/A";
+    const noteEsc = (item.note || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    html += '<div class="ws-item" data-ws-ip="' + ip + '">' +
+      '<div class="ws-item-head">' +
+        '<span class="ws-item-ip" data-ws-open="' + ip + '">' + ip + '</span>' +
+        '<div class="ws-item-actions">' +
+          '<button class="ws-btn" data-ws-remove="' + ip + '" title="Unpin">&times;</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="ws-item-meta">Alerte: ' + s.alerts + ' &middot; ultima: ' + last + '</div>' +
+      (tags ? '<div class="ws-tags">' + tags + '</div>' : '') +
+      '<textarea class="ws-note" data-ws-note="' + ip + '" placeholder="Notite investigatie (salvat automat)...">' + noteEsc + '</textarea>' +
+    '</div>';
+  }
+  body.innerHTML = html;
+  updateWorkspaceCount();
+}
+
+function exportWorkspace() {
+  const payload = { exportedAt: new Date().toISOString(), items: workspace };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "ids-workspace-" + Date.now() + ".json";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+}
+
+function toggleWorkspace() {
+  const panel = document.getElementById("workspace-panel");
+  if (!panel) return;
+  const opening = !panel.classList.contains("open");
+  panel.classList.toggle("open");
+  if (opening) renderWorkspace();
+}
+
+function initWorkspace() {
+  loadWorkspace();
+  updateWorkspaceCount();
+  const btn = document.getElementById("workspace-toggle");
+  if (btn) btn.addEventListener("click", toggleWorkspace);
+  const closeBtn = document.getElementById("workspace-close");
+  if (closeBtn) closeBtn.addEventListener("click", toggleWorkspace);
+  const exportBtn = document.getElementById("ws-export");
+  if (exportBtn) exportBtn.addEventListener("click", exportWorkspace);
+  const clearBtn = document.getElementById("ws-clear");
+  if (clearBtn) clearBtn.addEventListener("click", () => {
+    if (Object.keys(workspace).length === 0) return;
+    if (confirm("Sterg " + Object.keys(workspace).length + " IP-uri din workspace?")) {
+      workspace = {};
+      saveWorkspace();
+      renderWorkspace();
+    }
+  });
+
+  document.addEventListener("click", e => {
+    const pinBtn = e.target.closest("[data-pin-ip]");
+    if (pinBtn) {
+      e.stopPropagation();
+      const ip = pinBtn.dataset.pinIp;
+      workspace[ip] ? unpinIp(ip) : pinIp(ip);
+      return;
+    }
+    const openBtn = e.target.closest("[data-ws-open]");
+    if (openBtn) { openDossier(openBtn.dataset.wsOpen); return; }
+    const rmBtn = e.target.closest("[data-ws-remove]");
+    if (rmBtn) { e.stopPropagation(); unpinIp(rmBtn.dataset.wsRemove); return; }
+  });
+
+  document.addEventListener("input", e => {
+    const noteEl = e.target.closest("[data-ws-note]");
+    if (!noteEl) return;
+    const ip = noteEl.dataset.wsNote;
+    if (!workspace[ip]) return;
+    workspace[ip].note = noteEl.value;
+    saveWorkspace();
+  });
+}
+
+// ==== Replay Mode (Tier 3 #12) ====
+let replayActive = false;
+let replayPlaying = false;
+let replayCursorMs = 0;
+let replayMinMs = 0;
+let replayMaxMs = 0;
+let replayWindowMin = 10;
+let replaySpeedStepMs = 250;
+let replayTimer = null;
+
+function computeReplayBounds() {
+  if (!Array.isArray(rawAlertData) || rawAlertData.length === 0) {
+    replayMinMs = 0; replayMaxMs = 0; return;
+  }
+  let mn = Infinity, mx = -Infinity;
+  for (const a of rawAlertData) {
+    const t = Date.parse(a.timestamp);
+    if (isNaN(t)) continue;
+    if (t < mn) mn = t;
+    if (t > mx) mx = t;
+  }
+  replayMinMs = isFinite(mn) ? mn : 0;
+  replayMaxMs = isFinite(mx) ? mx : 0;
+}
+
+function inReplayWindow(ts) {
+  const t = Date.parse(ts);
+  if (isNaN(t)) return false;
+  const start = replayCursorMs - replayWindowMin * 60000;
+  return t >= start && t <= replayCursorMs;
+}
+
+function replayAllowedEdgeSet() {
+  const set = new Set();
+  if (!Array.isArray(rawAlertData)) return set;
+  for (const a of rawAlertData) {
+    if (!inReplayWindow(a.timestamp)) continue;
+    if (!a.dest_ip) continue;
+    set.add(a.source_ip + "|" + a.dest_ip + "|" + a.scan_type);
+  }
+  return set;
+}
+
+function fmtReplayTime(ms) {
+  if (!ms) return "--:--:--";
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, "0");
+  return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+}
+
+function fmtReplayRange() {
+  if (!replayMinMs || !replayMaxMs) return "";
+  return fmtReplayTime(replayMinMs) + " &rarr; " + fmtReplayTime(replayMaxMs);
+}
+
+function updateReplayUi() {
+  const slider = document.getElementById("replay-slider");
+  const timeEl = document.getElementById("replay-time");
+  const rangeEl = document.getElementById("replay-range");
+  const bar = document.getElementById("replay-bar");
+  const toggle = document.getElementById("replay-toggle");
+  const play = document.getElementById("replay-play");
+  const rewind = document.getElementById("replay-rewind");
+  const winSel = document.getElementById("replay-window");
+  const spdSel = document.getElementById("replay-speed");
+  if (!slider) return;
+  const enabled = replayActive;
+  slider.disabled = !enabled;
+  play.disabled = !enabled;
+  rewind.disabled = !enabled;
+  winSel.disabled = !enabled;
+  spdSel.disabled = !enabled;
+  bar.classList.toggle("active", enabled);
+  toggle.textContent = enabled ? "\u2715 Exit Replay" : "\u25B6 Replay";
+  toggle.classList.toggle("primary", enabled);
+  play.innerHTML = replayPlaying ? "&#10074;&#10074;" : "&#9654;";
+  if (replayMaxMs > replayMinMs) {
+    const pct = ((replayCursorMs - replayMinMs) / (replayMaxMs - replayMinMs)) * 100;
+    slider.value = String(Math.max(0, Math.min(100, pct)));
+  }
+  timeEl.textContent = fmtReplayTime(replayCursorMs);
+  rangeEl.innerHTML = fmtReplayRange();
+}
+
+function enterReplay() {
+  computeReplayBounds();
+  if (replayMaxMs <= replayMinMs) {
+    alert("Nu sunt alerte suficiente pentru replay.");
+    return;
+  }
+  replayActive = true;
+  replayCursorMs = replayMinMs + replayWindowMin * 60000;
+  if (replayCursorMs > replayMaxMs) replayCursorMs = replayMaxMs;
+  updateReplayUi();
+  reapplyFilters();
+}
+
+function exitReplay() {
+  replayActive = false;
+  replayPlaying = false;
+  if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+  updateReplayUi();
+  reapplyFilters();
+}
+
+function toggleReplay() { replayActive ? exitReplay() : enterReplay(); }
+
+function toggleReplayPlay() {
+  if (!replayActive) return;
+  replayPlaying = !replayPlaying;
+  if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+  if (replayPlaying) {
+    replayTimer = setInterval(() => {
+      const step = 15000;
+      replayCursorMs += step;
+      if (replayCursorMs >= replayMaxMs) {
+        replayCursorMs = replayMaxMs;
+        replayPlaying = false;
+        if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+      }
+      updateReplayUi();
+      reapplyFilters();
+    }, replaySpeedStepMs);
+  }
+  updateReplayUi();
+}
+
+function replayRewind() {
+  if (!replayActive) return;
+  replayCursorMs = replayMinMs + replayWindowMin * 60000;
+  if (replayCursorMs > replayMaxMs) replayCursorMs = replayMaxMs;
+  updateReplayUi();
+  reapplyFilters();
+}
+
+function initReplay() {
+  const toggle = document.getElementById("replay-toggle");
+  const play = document.getElementById("replay-play");
+  const rewind = document.getElementById("replay-rewind");
+  const slider = document.getElementById("replay-slider");
+  const winSel = document.getElementById("replay-window");
+  const spdSel = document.getElementById("replay-speed");
+  if (!toggle) return;
+  toggle.addEventListener("click", toggleReplay);
+  play.addEventListener("click", toggleReplayPlay);
+  rewind.addEventListener("click", replayRewind);
+  slider.addEventListener("input", () => {
+    if (!replayActive || replayMaxMs <= replayMinMs) return;
+    const pct = Number(slider.value) / 100;
+    replayCursorMs = replayMinMs + pct * (replayMaxMs - replayMinMs);
+    updateReplayUi();
+    reapplyFilters();
+  });
+  winSel.addEventListener("change", () => {
+    replayWindowMin = Number(winSel.value) || 10;
+    if (replayActive) { updateReplayUi(); reapplyFilters(); }
+  });
+  spdSel.addEventListener("change", () => {
+    replaySpeedStepMs = Number(spdSel.value) || 250;
+    if (replayPlaying) {
+      if (replayTimer) clearInterval(replayTimer);
+      replayPlaying = false;
+      toggleReplayPlay();
+    }
+  });
+  updateReplayUi();
+}
 
 // ==== Alert Table cu Clustering (Sarcina 2) ====
 
@@ -2595,9 +3284,11 @@ async function refresh() {
   }
 }
 
-// ==== Fullscreen (D14) ====
+// ==== Fullscreen (D14 + fix B3/B4) ====
+// Facem fullscreen pe #dashboard-root (include graph, replay-bar, tabel alerte,
+// dossier-panel si workspace) ca sa nu dispara panourile laterale / bara alerte.
 function toggleFullscreen() {
-  const area = document.getElementById("graph-area");
+  const area = document.getElementById("dashboard-root") || document.getElementById("graph-area");
   if (!document.fullscreenElement) {
     (area.requestFullscreen || area.webkitRequestFullscreen || area.msRequestFullscreen).call(area);
   } else {
@@ -3150,6 +3841,15 @@ const COMMANDS = [
   { id: "v-share",       cat: "Views", icon: "\u{1F517}", label: "Copy shareable URL",        sub: "Copiaza URL cu filtrele curente",            run: copyShareUrl },
 
   { id: "clear-search", cat: "Search", icon: "\u2715", label: "Clear IP search",             sub: "Sterge filtrul omnisearch",                  run: clearSearch },
+
+  { id: "ws-toggle",     cat: "Workspace", icon: "\u{1F50D}", label: "Toggle investigation workspace", sub: "Panel cu IP-uri pinned + notite", kbd: "Shift+P", run: toggleWorkspace },
+  { id: "ws-export",     cat: "Workspace", icon: "\u{1F4E4}", label: "Export workspace (JSON)",        sub: "Descarca pinned IPs + notite",                    run: exportWorkspace },
+
+  { id: "replay-toggle", cat: "Replay", icon: "\u23EF", label: "Toggle replay mode",        sub: "Timeline slider peste alerte",        run: toggleReplay },
+  { id: "replay-play",   cat: "Replay", icon: "\u25B6", label: "Replay: play / pause",      sub: "Avansare automata cursor",             run: toggleReplayPlay },
+  { id: "replay-rewind", cat: "Replay", icon: "\u23EE", label: "Replay: rewind",            sub: "Mergi la inceputul istoricului",       run: replayRewind },
+
+  { id: "aerial",        cat: "Graph",  icon: "\u25EF", label: "Toggle aerial subnet grouping", sub: "Convex hulls per /24", kbd: "Shift+G", run: toggleAerial },
 ];
 
 function copyShareUrl() {
@@ -3165,7 +3865,7 @@ function copyShareUrl() {
   }
 }
 
-const CAT_ORDER = ["Search", "Views", "Graph", "Filter", "View"];
+const CAT_ORDER = ["Search", "Views", "Workspace", "Replay", "Graph", "Filter", "View"];
 let cmdkActiveIdx = 0;
 let cmdkVisible = [];
 
@@ -3299,6 +3999,12 @@ function handleKeyboard(e) {
     case "t":
       if (!e.ctrlKey && !e.metaKey) toggleTheme();
       break;
+    case "p":
+      if (e.shiftKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); toggleWorkspace(); }
+      break;
+    case "g":
+      if (e.shiftKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); toggleAerial(); }
+      break;
     case "1": case "2": case "3": case "4": case "5": {
       const types = Object.keys(SCAN_COLORS);
       const idx = parseInt(e.key) - 1;
@@ -3329,6 +4035,8 @@ document.addEventListener("DOMContentLoaded", () => {
   initDensity();
   initTriage();
   initMitreClicks();
+  initWorkspace();
+  initReplay();
   loadFiltersFromUrl();
 
   // Command palette wiring
