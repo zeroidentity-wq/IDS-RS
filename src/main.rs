@@ -61,9 +61,12 @@ use config::{AppConfig, SubnetEntry};
 use detector::Detector;
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 // =============================================================================
 // TokenBucket — Rate Limiter pentru receptie UDP
@@ -269,6 +272,16 @@ async fn main() -> anyhow::Result<()> {
         parse_hostnames(&config),
         SubnetEntry::parse_subnets(&config.network.subnets),
     )?);
+
+    let (alert_tx, mut alert_rx) = mpsc::channel(1024);
+    let alert_worker_alerter = Arc::clone(&alerter);
+    let dropped_alerts = Arc::new(AtomicU64::new(0));
+    let dropped_alerts_stats = Arc::clone(&dropped_alerts);
+    let alert_worker = tokio::spawn(async move {
+        while let Some(alert) = alert_rx.recv().await {
+            alert_worker_alerter.send_alert(&alert).await;
+        }
+    });
 
     display::log_info("Detector initializat (DashMap thread-safe)");
 
@@ -574,6 +587,13 @@ async fn main() -> anyhow::Result<()> {
                         display::log_rate_limited(dropped);
                     }
                 }
+                let dropped_alerts = dropped_alerts_stats.swap(0, Ordering::Relaxed);
+                if dropped_alerts > 0 {
+                    display::log_warning(&format!(
+                        "Coada de alerte plina: {} alerte au fost dropate",
+                        dropped_alerts
+                    ));
+                }
             }
 
             // Branch: Pachet UDP primit.
@@ -663,8 +683,16 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
 
-                                    // Trimitem alerta catre SIEM si email (async).
-                                    alerter.send_alert(&alert).await;
+                                    // Coada bounded decupleaza I/O-ul lent SIEM/SMTP de receptia UDP.
+                                    match alert_tx.try_send(alert) {
+                                        Ok(()) => {}
+                                        Err(TrySendError::Full(_)) => {
+                                            dropped_alerts.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(TrySendError::Closed(_)) => {
+                                            display::log_warning("Worker-ul de alerte este oprit");
+                                        }
+                                    }
                                 }
                             } else if debug_mode {
                                 // Debug: afiseaza detalii despre esecul parsarii.
@@ -683,6 +711,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+    }
+
+    drop(alert_tx);
+    match tokio::time::timeout(Duration::from_secs(10), alert_worker).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            display::log_warning(&format!("Worker-ul de alerte s-a oprit cu eroare: {}", e));
+        }
+        Err(_) => {
+            display::log_warning("Timeout la golirea cozii de alerte la oprire");
         }
     }
 

@@ -43,7 +43,7 @@ use lettre::{
     message::header::ContentType, transport::smtp::authentication::Credentials, AsyncSmtpTransport,
     AsyncTransport, Message, Tokio1Executor,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,7 +84,7 @@ use tokio::net::UdpSocket;
 ///
 /// Aplica escape conform standardului CEF (ArcSight) pentru a preveni
 /// injectia de caractere speciale din campuri controlate extern.
-fn sanitize_cef(input: &str) -> String {
+fn sanitize_cef_header(input: &str) -> String {
     // NOTA: ordinea replace-urilor este critica.
     // Backslash-ul trebuie escapeat primul; altfel secventele '\\n' deja
     // escapate anterior ar fi dublu-escapate incorect.
@@ -95,29 +95,91 @@ fn sanitize_cef(input: &str) -> String {
         .replace('\r', "\\r")
 }
 
+/// Escape dedicat pentru valorile din CEF extensions (`key=value`).
+///
+/// Aici separatorii relevanti sunt spatiul dintre perechi si `=` dintre cheie
+/// si valoare, nu separatorul `|` din header.
+fn sanitize_cef_extension(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('=', "\\=")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace(' ', "\\ ")
+}
+
+fn sorted_ip_list(ips: &[IpAddr]) -> String {
+    ips.iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|ip| ip.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn sorted_ip_list_with_primary(ips: &[IpAddr], primary: IpAddr) -> String {
+    let mut unique = ips.iter().copied().collect::<BTreeSet<_>>();
+    unique.insert(primary);
+    unique
+        .into_iter()
+        .map(|ip| ip.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn comma_to_display_list(value: &str) -> String {
+    value.replace(',', ", ")
+}
+
+struct HtmlAlertBody<'a> {
+    scan_type: &'a str,
+    severity: &'a str,
+    src_ip: &'a str,
+    src_hostname: &'a str,
+    src_location: &'a str,
+    dst_ip: &'a str,
+    dst_hostname: &'a str,
+    dst_location: &'a str,
+    item_count: usize,
+    timestamp: &'a str,
+    items: &'a str,
+    footer: &'a str,
+    count_label: &'a str,
+    list_label: &'a str,
+}
+
 /// Construieste body-ul HTML al email-ului de alerta.
 ///
 /// Folosim template cu placeholder-e `__VAR__` in loc de `format!` pentru a evita
 /// escaping-ul acoladelor CSS (`{` → `{{`). Textul din `email_footer` este HTML-escapeat
 /// pentru a preveni injectia de tag-uri din valori controlate extern.
-fn build_html_body(
-    scan_type: &str,
-    severity: &str,
-    src_ip: &str,
-    src_hostname: &str,
-    src_location: &str,
-    dst_ip: &str,
-    dst_hostname: &str,
-    dst_location: &str,
-    port_count: usize,
-    timestamp: &str,
-    ports: &str,
-    footer: &str,
-    count_label: &str,
-    list_label: &str,
-) -> String {
+///
+/// MODELUL DE INCREDERE — VALORI NE-ESCAPATE:
+///
+/// `scan_type`, `severity`, `count_label`, `list_label` provin din enum-uri /
+/// literal-uri hardcodate => safe by construction.
+///
+/// `src_ip`, `dst_ip`, `item_count`, `timestamp` provin din `IpAddr`, `usize`,
+/// `DateTime` formatate => safe (nu contin `<`, `>`, `&`).
+///
+/// `src_hostname`, `dst_hostname`, `src_location`, `dst_location`, `items` vin
+/// din configuratie (admin-controlled): `[network.hostnames]`, `[network.subnets]`
+/// si liste de IP-uri/porturi. Nu sunt escape-ate pentru ca:
+///   1. Sursa lor este admin-ul (incredere implicita la nivel de deploy)
+///   2. Pana acum, hostname-urile sunt scrise manual in config.toml
+///
+/// DACA ACEST MODEL SE SCHIMBA (de exemplu, hostname-uri populate din DNS reverse,
+/// LDAP, log-uri parsate de la firewall sau orice sursa netrustata) →
+/// TREBUIE adaugat HTML escape pe TOATE valorile `data.*` inainte de `.replace()`,
+/// la fel cum se face deja pentru `data.footer`. Altfel: XSS in clientii de email
+/// care randeaza HTML (Thunderbird, Outlook web, etc.).
+///
+/// `email_footer` este HTML-escapeat pentru ca poate contine ASCII art cu `<>&`.
+fn build_html_body(data: &HtmlAlertBody<'_>) -> String {
     // HTML-escape pentru campuri care pot contine caractere speciale (footer ASCII art).
-    let footer_safe = footer
+    let footer_safe = data
+        .footer
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;");
@@ -225,42 +287,42 @@ fn build_html_body(
 </html>"#;
 
     // Formatam hostname-urile: "(hostname)" daca exista, altfel string gol.
-    let src_host_display = if src_hostname.is_empty() {
+    let src_host_display = if data.src_hostname.is_empty() {
         String::new()
     } else {
-        format!("({})", src_hostname)
+        format!("({})", data.src_hostname)
     };
-    let dst_host_display = if dst_hostname.is_empty() {
+    let dst_host_display = if data.dst_hostname.is_empty() {
         String::new()
     } else {
-        format!("({})", dst_hostname)
+        format!("({})", data.dst_hostname)
     };
     // Formatam locatiile subnet: "[Etaj 1]" daca exista, altfel string gol.
-    let src_loc_display = if src_location.is_empty() {
+    let src_loc_display = if data.src_location.is_empty() {
         String::new()
     } else {
-        format!("[{}]", src_location)
+        format!("[{}]", data.src_location)
     };
-    let dst_loc_display = if dst_location.is_empty() {
+    let dst_loc_display = if data.dst_location.is_empty() {
         String::new()
     } else {
-        format!("[{}]", dst_location)
+        format!("[{}]", data.dst_location)
     };
 
     template
-        .replace("__SCAN_TYPE__", scan_type)
-        .replace("__SEVERITY__", severity)
-        .replace("__SRC_IP__", src_ip)
+        .replace("__SCAN_TYPE__", data.scan_type)
+        .replace("__SEVERITY__", data.severity)
+        .replace("__SRC_IP__", data.src_ip)
         .replace("__SRC_HOST__", &src_host_display)
         .replace("__SRC_LOC__", &src_loc_display)
-        .replace("__DST_IP__", dst_ip)
+        .replace("__DST_IP__", data.dst_ip)
         .replace("__DST_HOST__", &dst_host_display)
         .replace("__DST_LOC__", &dst_loc_display)
-        .replace("__PORT_COUNT__", &port_count.to_string())
-        .replace("__TIMESTAMP__", timestamp)
-        .replace("__PORTS__", ports)
-        .replace("__COUNT_LABEL__", count_label)
-        .replace("__LIST_LABEL__", list_label)
+        .replace("__PORT_COUNT__", &data.item_count.to_string())
+        .replace("__TIMESTAMP__", data.timestamp)
+        .replace("__PORTS__", data.items)
+        .replace("__COUNT_LABEL__", data.count_label)
+        .replace("__LIST_LABEL__", data.list_label)
         .replace("__FOOTER__", &footer_safe)
 }
 
@@ -497,26 +559,23 @@ impl Alerter {
             ),
         };
 
-        // Pentru Lateral Movement, campul cs1 contine destinatiile unice (IP-uri),
-        // nu porturi. Pentru celelalte tipuri, cs1 contine porturile scanate.
+        // Pentru Lateral Movement, campul cs1 contine destinatiile unice (IP-uri).
+        // Pentru DistributedScan, cs1 contine TOATE sursele atacatoare, deduplicate
+        // si sortate. `alert.source_ip` este inclus explicit ca fallback defensiv,
+        // chiar daca detectorul il include deja in `unique_sources`.
         let (cs1_label, cs1_value, cnt) = match alert.scan_type {
             ScanType::LateralMovement => {
-                let dest_list = alert
-                    .unique_dests
-                    .iter()
-                    .map(|ip| ip.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let dest_list = sorted_ip_list(&alert.unique_dests);
                 ("ContactedHosts", dest_list, alert.unique_dests.len())
             }
             ScanType::DistributedScan => {
-                let src_list = alert
-                    .unique_sources
-                    .iter()
-                    .map(|ip| ip.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                ("AttackingSources", src_list, alert.unique_sources.len())
+                let src_list = sorted_ip_list_with_primary(&alert.unique_sources, alert.source_ip);
+                let source_count = if src_list.is_empty() {
+                    0
+                } else {
+                    src_list.split(',').count()
+                };
+                ("AttackingSources", src_list, source_count)
             }
             _ => {
                 let port_list = alert
@@ -531,24 +590,30 @@ impl Alerter {
 
         // Lista pentru campul msg — trunchiem la 512 caractere pentru
         // compatibilitate cu syslog RFC 3164 si vizibilitate in ArcSight.
+        //
+        // NOTA UTF-8: `cs1_value` contine IP-uri si numere (ASCII), deci taiatul
+        // la byte 512 nu poate cadea in mijlocul unui caracter multi-byte in
+        // practica. Totusi, daca pe viitor adaugam hostname-uri / etichete cu
+        // diacritice in `cs1_value`, slice direct `cs1_value[..512]` ar putea
+        // panica. Cautam ultimul boundary UTF-8 valid <= 512 pentru defensiva.
         let cs1_msg = if cs1_value.len() <= 512 {
             cs1_value.clone()
         } else {
-            let truncated = &cs1_value[..512];
-            let cut = truncated.rfind(',').unwrap_or(512);
+            // Cautam pozitia maxima <= 512 care e boundary UTF-8 valid.
+            let mut safe_end = 512;
+            while safe_end > 0 && !cs1_value.is_char_boundary(safe_end) {
+                safe_end -= 1;
+            }
+            let truncated = &cs1_value[..safe_end];
+            let cut = truncated.rfind(',').unwrap_or(safe_end);
             format!("{}...", &cs1_value[..cut])
         };
 
         // Mesajul campului msg: descriere + lista valori (porturi sau IP-uri).
-        let msg_text = format!(
-            "{} | {}: {}",
-            sanitize_cef(&scan_label),
-            cs1_label.to_lowercase(),
-            cs1_msg
-        );
+        let msg_text = format!("{} | {}: {}", scan_label, cs1_label.to_lowercase(), cs1_msg);
 
         // Sanitizare anti-injection pentru event_name (camp header CEF, separator '|').
-        let event_name_safe = sanitize_cef(event_name);
+        let event_name_safe = sanitize_cef_header(event_name);
 
         // Campul dst (Target Address in ArcSight) — IP-ul tinta al scanarii.
         // Prezent doar daca log-ul sursa l-a furnizat.
@@ -561,12 +626,12 @@ impl Alerter {
         // Prezente doar daca hostname-ul este configurat in [network.hostnames].
         let hn = self.hostnames.load();
         let shost_field = match hn.get(&alert.source_ip) {
-            Some(name) => format!(" shost={}", sanitize_cef(name)),
+            Some(name) => format!(" shost={}", sanitize_cef_extension(name)),
             None => String::new(),
         };
         let dhost_field = match alert.dest_ip {
             Some(ref ip) => match hn.get(ip) {
-                Some(name) => format!(" dhost={}", sanitize_cef(name)),
+                Some(name) => format!(" dhost={}", sanitize_cef_extension(name)),
                 None => String::new(),
             },
             None => String::new(),
@@ -576,15 +641,28 @@ impl Alerter {
         // cs2 = locatie IP sursa, cs3 = locatie IP destinatie.
         let sn = self.subnets.load();
         let src_location_field = match SubnetEntry::lookup(&sn, &alert.source_ip) {
-            Some(loc) => format!(" cs2Label=SourceLocation cs2={}", sanitize_cef(&loc)),
+            Some(loc) => format!(
+                " cs2Label=SourceLocation cs2={}",
+                sanitize_cef_extension(&loc)
+            ),
             None => String::new(),
         };
         let dst_location_field = match alert.dest_ip {
             Some(ref ip) => match SubnetEntry::lookup(&sn, ip) {
-                Some(loc) => format!(" cs3Label=DestLocation cs3={}", sanitize_cef(&loc)),
+                Some(loc) => format!(
+                    " cs3Label=DestLocation cs3={}",
+                    sanitize_cef_extension(&loc)
+                ),
                 None => String::new(),
             },
             None => String::new(),
+        };
+        let distributed_target_field = match (alert.scan_type.clone(), alert.dest_ip) {
+            (ScanType::DistributedScan, Some(ip)) => format!(
+                " cs4Label=TargetAddress cs4={}",
+                sanitize_cef_extension(&ip.to_string())
+            ),
+            _ => String::new(),
         };
 
         let syslog_ts = alert.timestamp.format("%b %e %H:%M:%S");
@@ -593,7 +671,7 @@ impl Alerter {
         let message = format!(
             "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
              |{sig_id}|{event_name}|{sev}\
-             |rt={rt_ms} src={src}{shost}{src_loc}{dst}{dhost}{dst_loc} cnt={cnt} act=alert \
+             |rt={rt_ms} src={src}{shost}{src_loc}{dst}{dhost}{dst_loc}{distributed_target} cnt={cnt} act=alert \
              msg={msg} cs1Label={cs1label} cs1={cs1}",
             sev = cef_severity,
             syslog_ts = syslog_ts,
@@ -606,10 +684,11 @@ impl Alerter {
             dst = dst_field,
             dhost = dhost_field,
             dst_loc = dst_location_field,
+            distributed_target = distributed_target_field,
             cnt = cnt,
-            msg = msg_text,
+            msg = sanitize_cef_extension(&msg_text),
             cs1label = cs1_label,
-            cs1 = cs1_value,
+            cs1 = sanitize_cef_extension(&cs1_value),
         );
 
         // Cream un socket UDP efemer (port 0 = OS alege automat).
@@ -653,19 +732,14 @@ impl Alerter {
         // Pentru Lateral Movement si Distributed Scan, subject-ul si lista arata diferit.
         let (subject, item_count, list_display) = match alert.scan_type {
             ScanType::DistributedScan => {
-                let count = alert.unique_sources.len();
-                let list = alert
-                    .unique_sources
-                    .iter()
-                    .take(30)
-                    .map(|ip| ip.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let list = if count > 30 {
-                    format!("{} + {} more", list, count - 30)
+                let attacker_list =
+                    sorted_ip_list_with_primary(&alert.unique_sources, alert.source_ip);
+                let count = if attacker_list.is_empty() {
+                    0
                 } else {
-                    list
+                    attacker_list.split(',').count()
                 };
+                let list = comma_to_display_list(&attacker_list);
                 let target = alert
                     .dest_ip
                     .map(|ip| ip.to_string())
@@ -677,19 +751,9 @@ impl Alerter {
                 (subj, count, list)
             }
             ScanType::LateralMovement => {
+                let dest_list = sorted_ip_list(&alert.unique_dests);
                 let count = alert.unique_dests.len();
-                let list = alert
-                    .unique_dests
-                    .iter()
-                    .take(30)
-                    .map(|ip| ip.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let list = if count > 30 {
-                    format!("{} + {} more", list, count - 30)
-                } else {
-                    list
-                };
+                let list = comma_to_display_list(&dest_list);
                 let subj = format!(
                     "\u{1F534} [{}][MISCARE LATERALA] IDS-RS {} {} destinatii",
                     alert.scan_type, alert.source_ip, count
@@ -698,21 +762,12 @@ impl Alerter {
             }
             _ => {
                 let count = alert.unique_ports.len();
-                let list = if count <= 30 {
-                    alert
-                        .unique_ports
-                        .iter()
-                        .map(|p| p.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                } else {
-                    let first_30: String = alert.unique_ports[..30]
-                        .iter()
-                        .map(|p| p.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("{} + {} more", first_30, count - 30)
-                };
+                let list = alert
+                    .unique_ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let subj = format!(
                     "\u{1F534} [{}][SCANARE RETEA] IDS-RS {} {} porturi",
                     alert.scan_type, alert.source_ip, count
@@ -762,22 +817,26 @@ impl Alerter {
             _ => ("Porturi scanate", "Porturi detectate"),
         };
 
-        let html_body = build_html_body(
-            &alert.scan_type.to_string(),
+        let scan_type = alert.scan_type.to_string();
+        let source_ip = alert.source_ip.to_string();
+        let timestamp = timestamp.to_string();
+
+        let html_body = build_html_body(&HtmlAlertBody {
+            scan_type: &scan_type,
             severity,
-            &alert.source_ip.to_string(),
+            src_ip: &source_ip,
             src_hostname,
-            &src_location,
-            &dest_ip_display,
+            src_location: &src_location,
+            dst_ip: &dest_ip_display,
             dst_hostname,
-            &dst_location,
+            dst_location: &dst_location,
             item_count,
-            &timestamp.to_string(),
-            &list_display,
-            &cfg.email_footer,
+            timestamp: &timestamp,
+            items: &list_display,
+            footer: &cfg.email_footer,
             count_label,
             list_label,
-        );
+        });
 
         // Trimitem un email catre fiecare destinatar.
         //
@@ -816,33 +875,41 @@ impl Alerter {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_cef;
+    use super::{sanitize_cef_extension, sanitize_cef_header};
 
     #[test]
-    fn test_sanitize_newline() {
-        assert_eq!(sanitize_cef("text\nfals"), "text\\nfals");
+    fn test_sanitize_header_newline() {
+        assert_eq!(sanitize_cef_header("text\nfals"), "text\\nfals");
     }
 
     #[test]
-    fn test_sanitize_carriage_return() {
-        assert_eq!(sanitize_cef("text\rfals"), "text\\rfals");
+    fn test_sanitize_header_carriage_return() {
+        assert_eq!(sanitize_cef_header("text\rfals"), "text\\rfals");
     }
 
     #[test]
-    fn test_sanitize_pipe() {
-        assert_eq!(sanitize_cef("camp|fals"), "camp\\|fals");
+    fn test_sanitize_header_pipe() {
+        assert_eq!(sanitize_cef_header("camp|fals"), "camp\\|fals");
     }
 
     #[test]
-    fn test_sanitize_backslash() {
-        assert_eq!(sanitize_cef("c:\\path"), "c:\\\\path");
+    fn test_sanitize_header_backslash() {
+        assert_eq!(sanitize_cef_header("c:\\path"), "c:\\\\path");
     }
 
     #[test]
-    fn test_sanitize_combinat() {
+    fn test_sanitize_extension_value_separators() {
+        assert_eq!(
+            sanitize_cef_extension("host name key=value"),
+            "host\\ name\\ key\\=value"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_header_combinat() {
         // Atac complet: injectie linie syslog noua cu camp CEF fals
         let input = "evil\nFeb 18 00:00:00 ids-rs CEF:0|FAKE|Product|1.0|999|Fake|10|";
-        let output = sanitize_cef(input);
+        let output = sanitize_cef_header(input);
         // Nu trebuie sa contina newline neescape
         assert!(!output.contains('\n'));
         // Nu trebuie sa contina pipe neescape (in afara de cele din escape)
@@ -853,20 +920,20 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_string_curat() {
+    fn test_sanitize_header_string_curat() {
         // Textul normal nu trebuie modificat
         assert_eq!(
-            sanitize_cef("Fast Scan detectat: 20 porturi"),
+            sanitize_cef_header("Fast Scan detectat: 20 porturi"),
             "Fast Scan detectat: 20 porturi"
         );
     }
 
     #[test]
-    fn test_sanitize_backslash_inainte_de_pipe() {
+    fn test_sanitize_header_backslash_inainte_de_pipe() {
         // Backslash urmat de pipe: trebuie escapeat corect, nu dublu-escapeat
         // Input: "a\|b" => Output: "a\\\\\\|b"  (backslash si pipe ambele escapate)
         let input = "a\\|b";
-        let output = sanitize_cef(input);
+        let output = sanitize_cef_header(input);
         assert_eq!(output, "a\\\\\\|b");
     }
 }

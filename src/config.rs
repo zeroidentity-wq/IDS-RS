@@ -512,10 +512,12 @@ impl AppConfig {
     ///
     /// 2. OPERATORUL ? (Question Mark / Try)
     ///    `something()?` este echivalent cu:
-    ///      match something() {
-    ///          Ok(val) => val,
-    ///          Err(e)  => return Err(e.into()),
-    ///      }
+    /// ```text
+    /// match something() {
+    ///     Ok(val) => val,
+    ///     Err(e)  => return Err(e.into()),
+    /// }
+    /// ```
     ///    Propaga erorile automat in sus pe call stack. Functioneaza doar
     ///    in functii care returneaza Result sau Option.
     ///
@@ -571,7 +573,7 @@ impl AppConfig {
             ));
         }
         // Validare hostnames: cheile trebuie sa fie IP-uri valide.
-        for (ip_str, _hostname) in &self.network.hostnames {
+        for ip_str in self.network.hostnames.keys() {
             if ip_str.parse::<std::net::IpAddr>().is_err() {
                 errors.push(format!(
                     "network.hostnames: cheia \"{}\" nu este un IP valid",
@@ -581,7 +583,7 @@ impl AppConfig {
         }
 
         // Validare subnets: cheile trebuie sa fie CIDR valide.
-        for (cidr_str, _label) in &self.network.subnets {
+        for cidr_str in self.network.subnets.keys() {
             if SubnetEntry::parse(cidr_str).is_none() {
                 errors.push(format!(
                     "network.subnets: cheia \"{}\" nu este un CIDR valid (ex: \"10.10.1.0/24\")",

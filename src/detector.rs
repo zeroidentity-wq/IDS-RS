@@ -218,6 +218,15 @@ impl std::fmt::Display for ScanType {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Alert {
     pub scan_type: ScanType,
+    /// IP-ul sursa al alertei.
+    ///
+    /// SEMANTICA DIFERA PE TIP DE SCAN:
+    ///   - Fast / Slow / Accept / LateralMovement: atacatorul real (1 sursa → N).
+    ///   - DistributedScan: doar ULTIMUL atacator care a declansat alerta — nu
+    ///     toata lista. Atacatorii reali, semantic relevanti, se gasesc in
+    ///     `unique_sources` (care include si acest `source_ip`).
+    ///     Consumatorii (SIEM, web dashboard) trebuie sa folosesca
+    ///     `unique_sources` pentru DistributedScan, nu doar `source_ip`.
     pub source_ip: IpAddr,
     /// IP-ul tinta al scanarii — din campul `dst` al log-ului care a
     /// declansat alerta. Option<> deoarece unele log-uri nu au dst valid.
@@ -271,28 +280,27 @@ struct PortHit {
 // Detector - Motorul de detectie
 // =============================================================================
 
-/// Motorul de detectie a scanarilor de retea.
-///
-/// NOTA RUST - SAFETY fara overhead:
-///
-/// `Detector` poate fi partajat intre task-uri async prin `Arc<Detector>`.
-/// `Arc` (Atomic Reference Counting) este un smart pointer care:
-///   - Numara cate referinte exista catre aceeasi valoare
-///   - Cand ultimul Arc este dropat, valoarea este dealocata
-///   - Este thread-safe (numararea este atomica)
-///   - Cost: un contor atomic per clone/drop (~1 instructiune CPU)
-///
-/// DashMap ofera interior mutability: putem modifica datele prin &self.
-/// Aceasta combina:
-///   Arc<Detector> (shared ownership) + DashMap (interior mutability)
-/// = acces concurent thread-safe fara a avea nevoie de &mut.
-///
-/// COMPARATIE cu alte limbaje:
-///   - Java: ConcurrentHashMap (similar, dar cu garbage collector)
-///   - Go:   sync.Map (similar, dar fara garantii compile-time)
-///   - C++:  Nu exista echivalent standard - trebuie implementat manual
-///   - Rust: DashMap cu garantii COMPILE-TIME de thread safety
-///
+// Motorul de detectie a scanarilor de retea.
+//
+// NOTA RUST - SAFETY fara overhead:
+//
+// `Detector` poate fi partajat intre task-uri async prin `Arc<Detector>`.
+// `Arc` (Atomic Reference Counting) este un smart pointer care:
+//   - Numara cate referinte exista catre aceeasi valoare
+//   - Cand ultimul Arc este dropat, valoarea este dealocata
+//   - Este thread-safe (numararea este atomica)
+//   - Cost: un contor atomic per clone/drop (~1 instructiune CPU)
+//
+// DashMap ofera interior mutability: putem modifica datele prin &self.
+// Aceasta combina:
+//   Arc<Detector> (shared ownership) + DashMap (interior mutability)
+// = acces concurent thread-safe fara a avea nevoie de &mut.
+//
+// COMPARATIE cu alte limbaje:
+//   - Java: ConcurrentHashMap (similar, dar cu garbage collector)
+//   - Go:   sync.Map (similar, dar fara garantii compile-time)
+//   - C++:  Nu exista echivalent standard - trebuie implementat manual
+//   - Rust: DashMap cu garantii COMPILE-TIME de thread safety
 // =============================================================================
 // EWMA Baseline — Praguri dinamice (#35)
 // =============================================================================
@@ -379,6 +387,17 @@ fn effective_threshold_value(
     let floor = (static_threshold as f64 * dt.min_threshold_ratio).ceil() as usize;
     let ceiling = (static_threshold as f64 * dt.max_threshold_ratio).floor() as usize;
     (dynamic.ceil() as usize).clamp(floor.max(1), ceiling.max(1))
+}
+
+fn count_unique_ports_in_hits(hits: &[PortHit], window: Duration, now: Instant) -> usize {
+    let mut ports: Vec<u16> = hits
+        .iter()
+        .filter(|h| now.saturating_duration_since(h.seen_at) <= window)
+        .map(|h| h.port)
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports.len()
 }
 
 /// Exceptii de detectie parsate (IP-uri ca IpAddr, porturi ca HashSet pentru O(1) lookup).
@@ -850,6 +869,30 @@ impl Detector {
                 } else
                 // Inregistram hit-ul in distributed_hits pentru IP-ul destinatie.
                 {
+                    // --- Cap pe numarul de tinte urmarite ---
+                    //
+                    // `distributed_hits` este indexat dupa dest_ip, deci LRU-ul
+                    // global pe `last_seen` (source-keyed) nu afecteaza aceasta
+                    // tabela. Pentru a preveni cresterea nelimitata a numarului
+                    // de chei (#bug-8), aplicam o limita explicita = `max_tracked_ips`
+                    // si eviciem LRU-ul cand atingem capacitatea.
+                    //
+                    // LRU criteriu: ultima intrare (cea mai recenta) din vector-ul
+                    // de hits per dest. Vectorul fiind populat append-only,
+                    // `.last()` da `seen_at` cel mai recent O(1).
+                    let is_new_dest = !self.distributed_hits.contains_key(&dest_ip);
+                    if is_new_dest && self.distributed_hits.len() >= cfg.max_tracked_ips {
+                        let lru_dest: Option<IpAddr> = self
+                            .distributed_hits
+                            .iter()
+                            .min_by_key(|e| e.value().last().map(|h| h.seen_at).unwrap_or(now))
+                            .map(|e| *e.key());
+                        if let Some(old) = lru_dest {
+                            self.distributed_hits.remove(&old);
+                            self.distributed_cooldowns.remove(&old);
+                        }
+                    }
+
                     let mut hits = self.distributed_hits.entry(dest_ip).or_default();
                     hits.push(DistributedHit {
                         source_ip: ip,
@@ -958,7 +1001,11 @@ impl Detector {
         let hits = self.lateral_hits.get(&ip)?;
         let mut seen: std::collections::HashSet<IpAddr> = std::collections::HashSet::new();
         for hit in hits.iter() {
-            if now.duration_since(hit.seen_at) <= window {
+            // `saturating_duration_since` pentru uniformitate cu restul codului
+            // (in `unique_ports_in_window`, `unique_sources_in_window`, etc.).
+            // Cu `Instant` monotonic nu poate aparea panic in practica, dar
+            // `saturating_*` este defensiv si consistent.
+            if now.saturating_duration_since(hit.seen_at) <= window {
                 seen.insert(hit.dest_ip);
             }
         }
@@ -1035,6 +1082,25 @@ impl Detector {
         // Acest "maxim" reprezinta cel mai zgomotos IP legitim din retea.
         // Trebuie facut inainte de prune-ul datelor vechi, altfel pierdem datele
         // necesare pentru calculul baseline-ului.
+        //
+        // COMPROMIS — DE CE `max` SI NU PERCENTIL:
+        //
+        // Folosim `max` peste toate IP-urile per scan type. Implicatie: un singur
+        // IP intern foarte zgomotos (scanner autorizat, backup orchestrator,
+        // monitoring activ) ridica EWMA-ul si trage pragul dinamic in sus pentru
+        // TOATE IP-urile. La extrem, daca acel IP genereaza constant N >> static
+        // porturi, pragul dinamic se loveste de `max_threshold_ratio` si poate
+        // masca scanari reale facute de alte IP-uri.
+        //
+        // Mitigari deja prezente:
+        //   - Clamp [min_ratio * static, max_ratio * static] previne valori absurde.
+        //   - Whitelist + `authorized_scanners` exclud sursele cunoscute zgomotoase
+        //     din detectie complet, deci nu contribuie la baseline-ul lor propriu.
+        //   - `min_samples` evita activarea pragurilor dinamice in primele ~10 cicluri.
+        //
+        // Imbunatatire viitoare (out of scope MVP): inlocuieste `max` cu p95
+        // (percentil) sau filtreaza top-K outlier-i inainte de update — costul
+        // este o sortare partiala O(n log k) per ciclu de cleanup. Vezi #35 follow-up.
         {
             let cfg = self.config.load();
             if cfg.dynamic_threshold.enabled {
@@ -1049,27 +1115,15 @@ impl Detector {
 
                 // Iteram port_hits: esantionam fast_max si slow_max.
                 for entry in self.port_hits.iter() {
-                    let ip = *entry.key();
-                    if let Some(ports) =
-                        self.unique_ports_in_window(&self.port_hits, ip, fast_w, now)
-                    {
-                        fast_max = fast_max.max(ports.len());
-                    }
-                    if let Some(ports) =
-                        self.unique_ports_in_window(&self.port_hits, ip, slow_w, now)
-                    {
-                        slow_max = slow_max.max(ports.len());
-                    }
+                    let hits = entry.value();
+                    fast_max = fast_max.max(count_unique_ports_in_hits(hits, fast_w, now));
+                    slow_max = slow_max.max(count_unique_ports_in_hits(hits, slow_w, now));
                 }
 
                 // Iteram accept_hits: esantionam accept_max.
                 for entry in self.accept_hits.iter() {
-                    let ip = *entry.key();
-                    if let Some(ports) =
-                        self.unique_ports_in_window(&self.accept_hits, ip, accept_w, now)
-                    {
-                        accept_max = accept_max.max(ports.len());
-                    }
+                    accept_max =
+                        accept_max.max(count_unique_ports_in_hits(entry.value(), accept_w, now));
                 }
 
                 let mut bl = self.baseline.lock().unwrap_or_else(|e| e.into_inner());

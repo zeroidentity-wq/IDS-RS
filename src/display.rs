@@ -251,20 +251,20 @@ pub fn log_error(message: &str) {
 }
 
 // ---------------------------------------------------------------------------
-/// Functiile de alerta - cel mai inalt nivel de vizibilitate
-///
-/// Alertele sunt cele mai importante mesaje - trebuie sa fie
-/// imediat vizibile in stream-ul de log. Folosim:
-///   - ROSU cu fundal pentru Fast Scan (urgenta ridicata)
-///   - GALBEN cu fundal pentru Slow Scan (urgenta medie)
-///   - MAGENTA cu fundal pentru Accept Scan (urgenta medie-mica)
-///   - Separatoare colorate si simboluri ▶▶▶ pentru vizibilitate maxima
-///   - Lista de porturi (trunchiate la 25 pentru lizibilitate)
-///
-/// NOTA RUST - PATTERN MATCHING cu `match`:
-/// Match pe enum este exhaustiv - daca adaugi o noua varianta
-/// la ScanType, compilatorul te obliga sa o tratezi AICI.
-/// Nu poti "uita" un caz - eroare la compilare, nu la runtime.
+// Functiile de alerta - cel mai inalt nivel de vizibilitate.
+//
+// Alertele sunt cele mai importante mesaje - trebuie sa fie
+// imediat vizibile in stream-ul de log. Folosim:
+//   - ROSU cu fundal pentru Fast Scan (urgenta ridicata)
+//   - GALBEN cu fundal pentru Slow Scan (urgenta medie)
+//   - MAGENTA cu fundal pentru Accept Scan (urgenta medie-mica)
+//   - Separatoare colorate si simboluri ▶▶▶ pentru vizibilitate maxima
+//   - Lista de porturi (trunchiate la 25 pentru lizibilitate)
+//
+// NOTA RUST - PATTERN MATCHING cu `match`:
+// Match pe enum este exhaustiv - daca adaugi o noua varianta
+// la ScanType, compilatorul te obliga sa o tratezi AICI.
+// Nu poti "uita" un caz - eroare la compilare, nu la runtime.
 // ---------------------------------------------------------------------------
 
 /// Afiseaza o alerta de securitate cu formatare vizual distincta.
