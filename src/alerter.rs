@@ -557,6 +557,18 @@ impl Alerter {
                 ),
                 7u8,
             ),
+            ScanType::Beaconing => (
+                "1006",
+                "Beaconing C2 Callback Detected",
+                format!(
+                    "Beaconing C2 detectat: {} calluri pe portul {}, interval mediu {:.1}s, CV {:.3}",
+                    alert.event_count.unwrap_or(0),
+                    alert.beacon_port.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
+                    alert.mean_interval_secs.unwrap_or(0.0),
+                    alert.cv.unwrap_or(0.0),
+                ),
+                9u8,
+            ),
         };
 
         // Pentru Lateral Movement, campul cs1 contine destinatiile unice (IP-uri).
@@ -576,6 +588,16 @@ impl Alerter {
                     src_list.split(',').count()
                 };
                 ("AttackingSources", src_list, source_count)
+            }
+            ScanType::Beaconing => {
+                // cs1 = mean_interval (secunde, 3 zecimale) pentru SIEM.
+                let mean = alert.mean_interval_secs.unwrap_or(0.0);
+                let cnt = alert.event_count.unwrap_or(0);
+                (
+                    "MeanIntervalSecs",
+                    format!("{:.3}", mean),
+                    cnt,
+                )
             }
             _ => {
                 let port_list = alert
@@ -665,13 +687,30 @@ impl Alerter {
             _ => String::new(),
         };
 
+        // Pentru Beaconing C2: campuri suplimentare (CV, event count, dest port).
+        // cs5 = CV (3 zecimale), cs6 = event_count, dpt = port destinatie.
+        let beaconing_extra_field = if matches!(alert.scan_type, ScanType::Beaconing) {
+            let cv = alert.cv.unwrap_or(0.0);
+            let count = alert.event_count.unwrap_or(0);
+            let dpt = alert
+                .beacon_port
+                .map(|p| format!(" dpt={}", p))
+                .unwrap_or_default();
+            format!(
+                " cs5Label=CV cs5={:.3} cs6Label=EventCount cs6={}{}",
+                cv, count, dpt
+            )
+        } else {
+            String::new()
+        };
+
         let syslog_ts = alert.timestamp.format("%b %e %H:%M:%S");
         let rt_ms = alert.timestamp.timestamp_millis();
 
         let message = format!(
             "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
              |{sig_id}|{event_name}|{sev}\
-             |rt={rt_ms} src={src}{shost}{src_loc}{dst}{dhost}{dst_loc}{distributed_target} cnt={cnt} act=alert \
+             |rt={rt_ms} src={src}{shost}{src_loc}{dst}{dhost}{dst_loc}{distributed_target}{beaconing_extra} cnt={cnt} act=alert \
              msg={msg} cs1Label={cs1label} cs1={cs1}",
             sev = cef_severity,
             syslog_ts = syslog_ts,
@@ -685,6 +724,7 @@ impl Alerter {
             dhost = dhost_field,
             dst_loc = dst_location_field,
             distributed_target = distributed_target_field,
+            beaconing_extra = beaconing_extra_field,
             cnt = cnt,
             msg = sanitize_cef_extension(&msg_text),
             cs1label = cs1_label,
@@ -760,6 +800,29 @@ impl Alerter {
                 );
                 (subj, count, list)
             }
+            ScanType::Beaconing => {
+                // Pentru Beaconing, "lista" arata flow-ul + statisticile.
+                let count = alert.event_count.unwrap_or(0);
+                let mean = alert.mean_interval_secs.unwrap_or(0.0);
+                let cv = alert.cv.unwrap_or(0.0);
+                let dst_str = alert
+                    .dest_ip
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "N/A".to_string());
+                let port_str = alert
+                    .beacon_port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let list = format!(
+                    "Flow: {} → {}:{} | calluri: {} | interval mediu: {:.1}s | CV: {:.3}",
+                    alert.source_ip, dst_str, port_str, count, mean, cv
+                );
+                let subj = format!(
+                    "\u{1F534} [{}][BEACON C2] IDS-RS {} → {}:{} ({} calluri)",
+                    alert.scan_type, alert.source_ip, dst_str, port_str, count
+                );
+                (subj, count, list)
+            }
             _ => {
                 let count = alert.unique_ports.len();
                 let list = alert
@@ -784,6 +847,7 @@ impl Alerter {
             ScanType::AcceptScan => "MEDIE-MICA",
             ScanType::LateralMovement => "CRITICA",
             ScanType::DistributedScan => "RIDICATA",
+            ScanType::Beaconing => "CRITICA",
         };
 
         let dest_ip_display = match alert.dest_ip {
@@ -814,6 +878,7 @@ impl Alerter {
         let (count_label, list_label) = match alert.scan_type {
             ScanType::LateralMovement => ("Destinatii contactate", "Destinatii detectate"),
             ScanType::DistributedScan => ("Surse atacatoare", "Surse detectate"),
+            ScanType::Beaconing => ("Calluri C2", "Detalii beacon"),
             _ => ("Porturi scanate", "Porturi detectate"),
         };
 

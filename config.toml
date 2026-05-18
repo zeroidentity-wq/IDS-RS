@@ -98,6 +98,20 @@ ignore_distributed_target_ports = [
     # 80,      # HTTP
     # 443,     # HTTPS
 ]
+# Porturi cu trafic periodic legitim ignorate la detectia Beaconing C2.
+# NTP, Kerberos, LDAP heartbeat etc. sunt prin natura lor periodice.
+ignore_beaconing_ports = [
+    # 123,     # NTP
+    # 88,      # Kerberos
+    # 389,     # LDAP
+    # 636,     # LDAPS
+]
+# Surse autorizate sa faca polling/monitoring periodic legitim.
+# NU declanseaza alerte Beaconing (Nagios, Zabbix, agenti SCCM etc.).
+authorized_beaconing_sources = [
+    # "10.0.1.50",     # Nagios server
+    # "10.0.1.51",     # Zabbix server
+]
 
 [detection.fast_scan]
 # Numar de porturi unice care declanseaza alerta de Fast Scan.
@@ -145,6 +159,28 @@ enabled = false
 unique_sources_threshold = 5
 # Fereastra de timp in secunde in care se numara sursele.
 time_window_secs = 60
+
+[detection.beaconing]
+# Detectie Beaconing C2 (#24): trafic periodic catre un host C2 / staging pivot.
+# Algoritm: Coefficient of Variation (CV) pe intervalele intre conexiuni
+# acceptate dintr-un flow (src_ip, dest_ip, dest_port).
+# Un beacon "curat" are intervale aproape constante (CV mic);
+# traficul uman/bursty are CV mare.
+# Intr-o retea izolata, beaconing-ul indica un compromis lateral confirmat
+# — un host intern face callback periodic la alt host intern (pivot).
+enabled = false
+# Numarul minim de conexiuni in fereastra inainte de a calcula CV.
+min_events = 8
+# Fereastra de timp (secunde) in care se acumuleaza timestamp-urile flow-ului.
+time_window_secs = 3600
+# Prag CV maxim. CV <= cv_threshold + mean in [min,max] => beaconing.
+# 0.15 = strict (Cobalt Strike default 60s jitter 0%); 0.30 = echilibrat
+# (jitter ~30%); 0.50 = larg (Meterpreter sleep mare cu jitter).
+cv_threshold = 0.30
+# Interval mediu minim acceptat (secunde). Mai mic = bursty, nu beacon.
+min_interval_secs = 10
+# Interval mediu maxim acceptat (secunde).
+max_interval_secs = 3600
 
 [detection.dynamic_threshold]
 # Praguri dinamice bazate pe baseline-ul traficului observat (#35).

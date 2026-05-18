@@ -53,6 +53,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Subnet mapping static (`[network.subnets]`) — CIDR→locatie (etaj, cladire, zona) in CLI, SIEM (cs2/cs3) si email
 - [x] Lateral Movement detection — comportament N destinatii unice, SigID 1004, severitate CEF 8
 - [x] Distributed Scan detection — N surse unice catre aceeasi tinta, SigID 1005, severitate CEF 7
+- [x] Beaconing C2 detection (#24) — flow periodic (CV pe intervale), SigID 1006, severitate CEF 9
 - [x] Web Dashboard (#25) — server HTTP embedded cu graf D3.js force-directed, API JSON, auto-refresh 5s
 - [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
 - [x] Teste unitare: 66 passed (parseri, detector, alerter, whitelist, lateral movement, distributed scan)
@@ -64,7 +65,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Hot reload config la SIGHUP
 - [x] Lateral Movement detection (#22)
 - [x] Distributed Scan detection (#23)
-- [ ] Beaconing C2 detection (#24)
+- [x] Beaconing C2 detection (#24)
 
 ### Posibile implementari
 
@@ -2134,6 +2135,8 @@ Aceasta permite ierarhii: `/16` pentru cladire, `/24` pentru etaj.
 | #17 | Cleanup task sleep-first (nu interval tick imediat) |
 | #16 | SIGHUP config reload — reincarca `config.toml` fara restart, fara pierdere context (ArcSwap atomic) |
 | #22 | Lateral Movement — 1 IP → N destinatii unice pe conexiuni acceptate (orice port), SignatureID 1004, CLI bright_red, severitate CEF 8 (Critical) |
+| #23 | Distributed Scan — N surse → aceeasi tinta, perspectiva inversata, SignatureID 1005, CLI cyan, severitate CEF 7 (High) |
+| #24 | Beaconing C2 — flow periodic (src, dst, dport) detectat prin Coefficient of Variation (CV) pe inter-arrival times. SignatureID 1006, CLI red, severitate CEF 9 (Critical). Praguri default: min_events=8, time_window=1h, cv_threshold=0.30 |
 | — | Graceful shutdown SIGTERM — handler `tokio::signal::unix::signal(SignalKind::terminate())` in `select!`; alerta in curs de `.await` se finalizeaza complet inainte de iesire |
 | #21 | Hostname resolve — mapping static `[network.hostnames]`, afisare in CLI/SIEM/email |
 | — | Subnet mapping — `[network.subnets]` CIDR→locatie, afisare in CLI `[Etaj 1]`, SIEM (cs2/cs3), email. Longest prefix match, hot-reload SIGHUP, validare CIDR |

@@ -1289,6 +1289,7 @@ body {
     <span class="filter-label">Filtre:</span>
     <span class="sev-group">
       <span class="sev-label" style="background:#f85149" data-sev="Critical" onclick="toggleSevFilter(this, event)">CRITICAL</span>
+      <button class="filter-btn" data-scan="Beaconing C2" onclick="toggleScanFilter(this, event)"><span class="fdot" style="background:#ff6b6b"></span> Beacon</button>
       <button class="filter-btn" data-scan="Lateral Movement" onclick="toggleScanFilter(this, event)"><span class="fdot" style="background:#d18616"></span> Lateral</button>
     </span>
     <span class="filter-sep"></span>
@@ -1449,6 +1450,7 @@ const SCAN_COLORS = {
   "Accept Scan":      "#bc8cff",
   "Lateral Movement": "#d18616",
   "Distributed Scan": "#39d353",
+  "Beaconing C2":     "#ff6b6b",
 };
 
 function scanColor(type) {
@@ -1476,6 +1478,7 @@ let prevAlertCount = 0;
 let audioCtx = null;
 
 const SEVERITY_MAP = {
+  "Beaconing C2":     { level: "Critical", color: "#ff6b6b", value: 9 },
   "Lateral Movement": { level: "Critical", color: "#f85149", value: 8 },
   "Fast Scan":        { level: "High",     color: "#d18616", value: 7 },
   "Distributed Scan": { level: "High",     color: "#d18616", value: 7 },
@@ -1483,7 +1486,7 @@ const SEVERITY_MAP = {
   "Accept Scan":      { level: "Medium",   color: "#d29922", value: 5 },
 };
 const SEV_TO_TYPES = {
-  Critical: ["Lateral Movement"],
+  Critical: ["Beaconing C2", "Lateral Movement"],
   High: ["Fast Scan", "Distributed Scan"],
   Medium: ["Slow Scan", "Accept Scan"],
 };
@@ -1973,12 +1976,13 @@ function reapplyFilters() {
 
 // ==== Saved Views + URL state (Tier 2 #7) ====
 const VIEWS = {
-  all:         new Set(["Lateral Movement", "Fast Scan", "Slow Scan", "Accept Scan", "Distributed Scan"]),
-  criticals:   new Set(["Lateral Movement"]),
-  high:        new Set(["Lateral Movement", "Fast Scan", "Distributed Scan"]),
+  all:         new Set(["Beaconing C2", "Lateral Movement", "Fast Scan", "Slow Scan", "Accept Scan", "Distributed Scan"]),
+  criticals:   new Set(["Beaconing C2", "Lateral Movement"]),
+  high:        new Set(["Beaconing C2", "Lateral Movement", "Fast Scan", "Distributed Scan"]),
   scans:       new Set(["Fast Scan", "Slow Scan", "Accept Scan", "Distributed Scan"]),
   lateral:     new Set(["Lateral Movement"]),
   distributed: new Set(["Distributed Scan"]),
+  beaconing:   new Set(["Beaconing C2"]),
 };
 
 function setsEqual(a, b) {
@@ -2713,6 +2717,13 @@ function updateTable(alerts) {
 }
 
 function alertDetail(a) {
+  if (a.scan_type === "Beaconing C2") {
+    const port = a.beacon_port != null ? `:${a.beacon_port}` : "";
+    const mean = a.mean_interval_secs != null ? a.mean_interval_secs.toFixed(1) : "?";
+    const cv = a.cv != null ? a.cv.toFixed(3) : "?";
+    const count = a.event_count != null ? a.event_count : "?";
+    return `\u21bb ${a.dest_ip || "?"}${port} | ${count} calluri | mean ${mean}s | CV ${cv}`;
+  }
   if (a.scan_type === "Lateral Movement" && a.unique_dests && a.unique_dests.length > 0) {
     const ips = a.unique_dests.slice(0, 8).join(", ");
     const extra = a.unique_dests.length > 8 ? ` +${a.unique_dests.length - 8}` : "";
@@ -3020,6 +3031,7 @@ const MITRE_MAP = {
   "Accept Scan":      { id: "T1046",     name: "Network Service Discovery (passive)" },
   "Distributed Scan": { id: "T1595.001", name: "Active Scanning: Scanning IP Blocks" },
   "Lateral Movement": { id: "T1021",     name: "Remote Services" },
+  "Beaconing C2":     { id: "T1071",     name: "Application Layer Protocol (C2)" },
 };
 
 function mitreBadgeHtml(scanType, small) {

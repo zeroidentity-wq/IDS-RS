@@ -159,6 +159,11 @@ pub struct DetectionConfig {
     /// Retrocompatibil: daca lipseste din config.toml, pragurile raman statice.
     #[serde(default = "default_dynamic_threshold")]
     pub dynamic_threshold: DynamicThresholdConfig,
+
+    /// Configurare detectie Beaconing C2 (#24).
+    /// Retrocompatibil: daca lipseste din config.toml, detectia e dezactivata.
+    #[serde(default = "default_beaconing")]
+    pub beaconing: BeaconingConfig,
 }
 
 fn default_max_hits_per_ip() -> usize {
@@ -192,6 +197,16 @@ pub struct DetectionExceptions {
     /// Porturi ignorate la contorizarea Distributed Scan (din perspectiva tintei).
     #[serde(default)]
     pub ignore_distributed_target_ports: Vec<u16>,
+
+    /// Porturi ignorate la detectia Beaconing C2 (trafic periodic legitim:
+    /// NTP 123, Kerberos 88, LDAP heartbeat 389 etc.).
+    #[serde(default)]
+    pub ignore_beaconing_ports: Vec<u16>,
+
+    /// Surse autorizate sa faca polling/monitoring periodic legitim
+    /// (Nagios, Zabbix, agenti SCCM). NU declanseaza Beaconing C2.
+    #[serde(default)]
+    pub authorized_beaconing_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -324,6 +339,69 @@ fn default_distributed_scan() -> DistributedScanConfig {
         enabled: false,
         unique_sources_threshold: default_distributed_sources_threshold(),
         time_window_secs: default_distributed_time_window(),
+    }
+}
+
+/// Configurare detectie Beaconing C2 (#24) — trafic periodic catre un host C2.
+///
+/// Algoritm: Coefficient of Variation (CV) pe intervalele intre conexiuni
+/// dintr-un flow `(src_ip, dest_ip, dest_port)`. Un beacon "curat" are
+/// CV apropiat de 0 (intervale aproape identice); traficul uman/bursty are CV mare.
+///
+/// Valori implicite: dezactivat (retrocompatibil cu config-uri vechi).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BeaconingConfig {
+    /// Activare/dezactivare detectie. Implicit: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Numarul minim de conexiuni in fereastra inainte de a calcula CV.
+    /// Sub acest prag, esantionul e prea mic pentru o decizie statistica.
+    #[serde(default = "default_beaconing_min_events")]
+    pub min_events: usize,
+
+    /// Fereastra de timp (secunde) in care se acumuleaza timestamp-urile flow-ului.
+    #[serde(default = "default_beaconing_time_window")]
+    pub time_window_secs: u64,
+
+    /// Prag CV maxim. Daca CV calculat <= cv_threshold → beaconing.
+    /// Valori tipice: 0.15 (strict), 0.30 (echilibrat), 0.50 (larg).
+    #[serde(default = "default_beaconing_cv_threshold")]
+    pub cv_threshold: f64,
+
+    /// Interval minim mediu acceptat (secunde). Mai mic = bursty, nu beacon.
+    #[serde(default = "default_beaconing_min_interval")]
+    pub min_interval_secs: u64,
+
+    /// Interval maxim mediu acceptat (secunde). Mai mare = trafic prea rar pentru a fi util.
+    #[serde(default = "default_beaconing_max_interval")]
+    pub max_interval_secs: u64,
+}
+
+fn default_beaconing_min_events() -> usize {
+    8
+}
+fn default_beaconing_time_window() -> u64 {
+    3600
+}
+fn default_beaconing_cv_threshold() -> f64 {
+    0.30
+}
+fn default_beaconing_min_interval() -> u64 {
+    10
+}
+fn default_beaconing_max_interval() -> u64 {
+    3600
+}
+
+fn default_beaconing() -> BeaconingConfig {
+    BeaconingConfig {
+        enabled: false,
+        min_events: default_beaconing_min_events(),
+        time_window_secs: default_beaconing_time_window(),
+        cv_threshold: default_beaconing_cv_threshold(),
+        min_interval_secs: default_beaconing_min_interval(),
+        max_interval_secs: default_beaconing_max_interval(),
     }
 }
 
@@ -742,6 +820,40 @@ impl AppConfig {
                     "detection.distributed_scan.time_window_secs = 0: fereastra de timp zero face detectia imposibila"
                         .to_string(),
                 );
+            }
+        }
+
+        // Validare Beaconing C2 (doar daca e activat).
+        if self.detection.beaconing.enabled {
+            let b = &self.detection.beaconing;
+            if b.min_events < 3 {
+                errors.push(format!(
+                    "detection.beaconing.min_events = {} este prea mic: minim 3 pentru un calcul statistic relevant",
+                    b.min_events
+                ));
+            }
+            if b.time_window_secs == 0 {
+                errors.push(
+                    "detection.beaconing.time_window_secs = 0: fereastra zero face detectia imposibila"
+                        .to_string(),
+                );
+            }
+            if b.cv_threshold <= 0.0 || b.cv_threshold > 1.0 {
+                errors.push(format!(
+                    "detection.beaconing.cv_threshold = {} este invalid: trebuie in (0.0, 1.0]",
+                    b.cv_threshold
+                ));
+            }
+            if b.min_interval_secs == 0 {
+                errors.push(
+                    "detection.beaconing.min_interval_secs = 0: trebuie > 0".to_string(),
+                );
+            }
+            if b.max_interval_secs <= b.min_interval_secs {
+                errors.push(format!(
+                    "detection.beaconing.max_interval_secs ({}) trebuie sa fie > min_interval_secs ({})",
+                    b.max_interval_secs, b.min_interval_secs
+                ));
             }
         }
 

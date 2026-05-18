@@ -406,6 +406,37 @@ pub fn log_alert(alert: &Alert, hostnames: &HashMap<IpAddr, String>, subnets: &[
             println!("{}", "─".repeat(SEPARATOR_WIDTH).cyan());
             println!();
         }
+        // Beaconing C2: rosu intens — cel mai sever (sev 9). Compromis confirmat.
+        // Afisam flow-ul (src → dst:port), mean interval, CV si event count.
+        ScanType::Beaconing => {
+            let target_display = match alert.dest_ip {
+                Some(ip) => format_ip(&ip, hostnames, subnets),
+                None => "N/A".to_string(),
+            };
+            let port_str = alert
+                .beacon_port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let mean = alert.mean_interval_secs.unwrap_or(0.0);
+            let cv = alert.cv.unwrap_or(0.0);
+            let count = alert.event_count.unwrap_or(0);
+            println!();
+            println!("{}", "─".repeat(SEPARATOR_WIDTH).red());
+            println!(
+                "{} {} {} [BEACONING C2] {} → {}:{} | {} calluri, mean {:.1}s, CV {:.3}",
+                ts.bold().white(),
+                arrows.red().bold(),
+                " ALERT ".on_red().white().bold(),
+                format!("[IP: {}]", src_display).red().bold(),
+                target_display.red().bold(),
+                port_str.red().bold(),
+                count.to_string().red().bold(),
+                mean,
+                cv
+            );
+            println!("{}", "─".repeat(SEPARATOR_WIDTH).red());
+            println!();
+        }
     }
 }
 

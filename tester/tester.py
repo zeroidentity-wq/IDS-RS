@@ -468,6 +468,65 @@ def simulate_distributed_scan(
     print(f"    Asigura-te ca [detection.distributed_scan] enabled = true in config.toml")
 
 
+def simulate_beaconing_c2(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    source_ip: str,
+    target_ip: str,
+    target_port: int,
+    interval: float,
+    jitter_pct: float,
+    count: int,
+    fmt: str,
+) -> None:
+    """
+    Simuleaza Beaconing C2 (#24): conexiuni periodice de la source_ip catre
+    target_ip:target_port cu intervale aproape constante (interval +/- jitter_pct%).
+
+    Pattern simulat: host compromis (source_ip) face callback periodic la un
+    pivot intern (target_ip) — caracteristic pentru Cobalt Strike, Meterpreter,
+    si beacons custom. IDS-RS detecteaza prin Coefficient of Variation (CV)
+    pe intervalele inter-arrival.
+
+    NOTA: scenariul comprima timpul pentru testare rapida. In productie un
+    beacon real ar avea interval = 60s reali, dar aici --interval 0.5 (sau
+    mai mic) imita comportamentul fara a astepta 8 minute.
+
+    Pragurile default din config.toml:
+      min_events=8, time_window=3600s, cv_threshold=0.30, min_interval=10s.
+    Pentru testul comprimat seteaza in config.toml min_interval_secs = 0
+    sau scade --interval suficient incat sa ramana > min_interval.
+
+    Exemplu:
+      python tester.py beaconing-c2 --count 10 --interval 0.5 --jitter 5
+      python tester.py beaconing-c2 --count 12 --interval 60 --target 10.0.1.50 --target-port 443
+    """
+    print(f"[*] Simulare BEACONING C2 (format: {fmt.upper()})")
+    print(f"    Flow: {source_ip} -> {target_ip}:{target_port}")
+    print(f"    Calluri: {count} | Interval: {interval}s +/- {jitter_pct}% | IDS: {host}:{port}")
+    print()
+
+    sent_count = 0
+    for i in range(count):
+        log_line = generate_log(fmt, source_ip, target_port, "accept", dest_ip=target_ip)
+        send_udp(sock, host, port, log_line)
+        sent_count += 1
+        print(f"  [{sent_count:>3}/{count}] {source_ip} -> {target_ip}:{target_port} | accept")
+
+        if i < count - 1:
+            # Jitter aplicat ca procent din interval, simetric (+/-).
+            jitter_abs = interval * (jitter_pct / 100.0)
+            sleep_s = interval + random.uniform(-jitter_abs, jitter_abs)
+            sleep_s = max(0.0, sleep_s)
+            time.sleep(sleep_s)
+
+    print()
+    print(f"[+] Beaconing C2 complet: {sent_count} log-uri trimise ({fmt.upper()})")
+    print(f"    Asigura-te ca [detection.beaconing] enabled = true in config.toml")
+    print(f"    Pentru detectie in timp comprimat seteaza min_interval_secs = 0")
+
+
 def simulate_normal(
     sock: socket.socket,
     host: str,
@@ -1460,6 +1519,42 @@ def main() -> None:
         help="Delay intre log-uri in secunde (default: 0.1)",
     )
 
+    # --- beaconing-c2 (generare dinamica, #24) ---
+    beacon_parser = subparsers.add_parser(
+        "beaconing-c2",
+        help="Simuleaza Beaconing C2: callback-uri periodice de la 1 sursa la 1 destinatie (flow fix)",
+    )
+    add_common_scan_args(beacon_parser)
+    beacon_parser.add_argument(
+        "--target",
+        default="10.0.1.50",
+        help="IP-ul tinta (controllerul intern / pivot C2). Default: 10.0.1.50",
+    )
+    beacon_parser.add_argument(
+        "--target-port",
+        type=int,
+        default=443,
+        help="Portul tinta al callback-ului (default: 443)",
+    )
+    beacon_parser.add_argument(
+        "--count",
+        type=int,
+        default=10,
+        help="Numar de calluri (default: 10). Trebuie >= min_events din config (default 8).",
+    )
+    beacon_parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.5,
+        help="Interval mediu intre calluri in secunde (default: 0.5 pentru test rapid)",
+    )
+    beacon_parser.add_argument(
+        "--jitter",
+        type=float,
+        default=5.0,
+        help="Jitter ca procent din interval (default: 5%%). Sub cv_threshold ar trebui sa declanseze alerta.",
+    )
+
     # --- replay ---
     replay_parser = subparsers.add_parser(
         "replay",
@@ -1586,6 +1681,19 @@ def main() -> None:
                 num_sources=args.sources,
                 target_port=args.target_port,
                 delay=args.delay,
+                fmt=args.format,
+            )
+        elif args.command == "beaconing-c2":
+            simulate_beaconing_c2(
+                sock=sock,
+                host=args.host,
+                port=args.port,
+                source_ip=args.source,
+                target_ip=args.target,
+                target_port=args.target_port,
+                interval=args.interval,
+                jitter_pct=args.jitter,
+                count=args.count,
                 fmt=args.format,
             )
         elif args.command == "replay":

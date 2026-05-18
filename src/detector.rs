@@ -188,6 +188,20 @@ pub enum ScanType {
     ///
     /// SignatureID SIEM: 1005. Severitate: 7 (High) — atac coordonat.
     DistributedScan,
+
+    /// Beaconing C2 (#24) — trafic periodic catre un host C2 / staging pivot.
+    ///
+    /// Detecteaza un flow `(src_ip, dest_ip, dest_port)` cu intervale aproape
+    /// constante intre conexiuni acceptate, indicator clasic de malware
+    /// (Cobalt Strike, Meterpreter, custom beacons) care face callback periodic
+    /// la un controller. Intr-o retea interna izolata, "controller-ul" e tot
+    /// un host intern (pivot) — beaconing aici = compromis lateral confirmat.
+    ///
+    /// Algoritm: Coefficient of Variation (CV) pe intervalele inter-arrival;
+    /// `cv = stddev(intervals) / mean(intervals)`. CV <= prag → beacon.
+    ///
+    /// SignatureID SIEM: 1006. Severitate: 9 (Critical).
+    Beaconing,
 }
 
 /// Implementarea trait-ului Display pentru ScanType.
@@ -206,6 +220,7 @@ impl std::fmt::Display for ScanType {
             ScanType::AcceptScan => write!(f, "Accept Scan"),
             ScanType::LateralMovement => write!(f, "Lateral Movement"),
             ScanType::DistributedScan => write!(f, "Distributed Scan"),
+            ScanType::Beaconing => write!(f, "Beaconing C2"),
         }
     }
 }
@@ -241,6 +256,19 @@ pub struct Alert {
     /// Gol pentru celelalte tipuri de scan.
     pub unique_sources: Vec<IpAddr>,
     pub timestamp: DateTime<Local>,
+
+    /// Pentru Beaconing C2: portul tinta al flow-ului. None pentru celelalte tipuri.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub beacon_port: Option<u16>,
+    /// Pentru Beaconing C2: intervalul mediu (secunde) intre conexiuni. None pentru celelalte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_interval_secs: Option<f64>,
+    /// Pentru Beaconing C2: coeficientul de variatie (stddev / mean). None pentru celelalte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cv: Option<f64>,
+    /// Pentru Beaconing C2: numarul de evenimente in fereastra. None pentru celelalte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_count: Option<usize>,
 }
 
 /// Inregistrarea unei conexiuni catre o destinatie (Lateral Movement #22).
@@ -273,6 +301,16 @@ struct DistributedHit {
 /// dar este eficient si sigur pentru masuratori in-process.
 struct PortHit {
     port: u16,
+    seen_at: Instant,
+}
+
+/// Timestamp-ul unei conexiuni dintr-un flow Beaconing (#24).
+///
+/// Cheia DashMap-ului `beacon_hits` este `(src_ip, dest_ip, dest_port)`,
+/// deci toate campurile flow-ului sunt deja codificate in cheie. Tinem
+/// doar momentul cand a aparut conexiunea — diferentele consecutive
+/// dintre `seen_at`-uri sunt intervalele pe care le analizam statistic.
+struct BeaconHit {
     seen_at: Instant,
 }
 
@@ -406,6 +444,8 @@ struct ParsedExceptions {
     authorized_scanners: HashSet<IpAddr>,
     ignore_lateral_ports: HashSet<u16>,
     ignore_distributed_target_ports: HashSet<u16>,
+    ignore_beaconing_ports: HashSet<u16>,
+    authorized_beaconing_sources: HashSet<IpAddr>,
 }
 
 impl ParsedExceptions {
@@ -421,6 +461,12 @@ impl ParsedExceptions {
                 .ignore_distributed_target_ports
                 .iter()
                 .copied()
+                .collect(),
+            ignore_beaconing_ports: exc.ignore_beaconing_ports.iter().copied().collect(),
+            authorized_beaconing_sources: exc
+                .authorized_beaconing_sources
+                .iter()
+                .filter_map(|s| s.parse::<IpAddr>().ok())
                 .collect(),
         }
     }
@@ -477,6 +523,14 @@ pub struct Detector {
     /// Indexat dupa dest_ip — cooldown-ul este al tintei, nu al atacatorului.
     distributed_cooldowns: DashMap<IpAddr, Instant>,
 
+    /// Evidenta conexiunilor per flow Beaconing C2 (#24).
+    /// Cheia este `(src_ip, dest_ip, dest_port)`; flow-urile diferite pe acelasi
+    /// port sau intre aceleasi hosturi nu se amesteca. Valorile sunt timestamp-uri.
+    beacon_hits: DashMap<(IpAddr, IpAddr, u16), Vec<BeaconHit>>,
+
+    /// Cooldown alerte Beaconing per flow (src, dst, dport).
+    beacon_cooldowns: DashMap<(IpAddr, IpAddr, u16), Instant>,
+
     /// IP-uri si subretele excluse din detectie (parsate din config la constructie).
     /// Wrapat in ArcSwap pentru hot reload atomic la SIGHUP (#16).
     whitelist: ArcSwap<Vec<WhitelistEntry>>,
@@ -522,6 +576,8 @@ impl Detector {
             lateral_cooldowns: DashMap::new(),
             distributed_hits: DashMap::new(),
             distributed_cooldowns: DashMap::new(),
+            beacon_hits: DashMap::new(),
+            beacon_cooldowns: DashMap::new(),
             last_seen: DashMap::new(),
             whitelist: ArcSwap::from_pointee(whitelist),
             config: ArcSwap::from_pointee(config),
@@ -734,6 +790,10 @@ impl Detector {
                     unique_dests: Vec::new(),
                     unique_sources: Vec::new(),
                     timestamp: Local::now(),
+                    beacon_port: None,
+                    mean_interval_secs: None,
+                    cv: None,
+                    event_count: None,
                 });
             }
         }
@@ -751,6 +811,10 @@ impl Detector {
                     unique_dests: Vec::new(),
                     unique_sources: Vec::new(),
                     timestamp: Local::now(),
+                    beacon_port: None,
+                    mean_interval_secs: None,
+                    cv: None,
+                    event_count: None,
                 });
             }
         }
@@ -779,6 +843,10 @@ impl Detector {
                     unique_dests: Vec::new(),
                     unique_sources: Vec::new(),
                     timestamp: Local::now(),
+                    beacon_port: None,
+                    mean_interval_secs: None,
+                    cv: None,
+                    event_count: None,
                 });
             }
         }
@@ -836,6 +904,10 @@ impl Detector {
                                 unique_dests,
                                 unique_sources: Vec::new(),
                                 timestamp: Local::now(),
+                                beacon_port: None,
+                                mean_interval_secs: None,
+                                cv: None,
+                                event_count: None,
                             });
                         }
                     }
@@ -924,13 +996,149 @@ impl Detector {
                             unique_dests: Vec::new(),
                             unique_sources: unique_srcs,
                             timestamp: Local::now(),
+                            beacon_port: None,
+                            mean_interval_secs: None,
+                            cv: None,
+                            event_count: None,
                         });
                     }
                 }
             }
         }
 
+        // --- 8. Verificam Beaconing C2 (#24) ---
+        //
+        // Conditii:
+        //   a) Beaconing activat in config
+        //   b) dest_ip prezent
+        //   c) action == "accept" (callback C2 e o conexiune reusita; drop-urile
+        //      reflecta un firewall care taie traficul → nu mai e beacon viabil)
+        //   d) Portul destinatie nu e in ignore_beaconing_ports
+        //   e) Sursa nu e in authorized_beaconing_sources
+        //
+        // Algoritm: pe cheia (src, dst, dport) acumulam timestamp-uri. Cand
+        // avem >= min_events in fereastra, calculam CV pe intervalele intre
+        // timestamp-uri consecutive. CV mic + mean in [min_interval, max_interval]
+        // => beaconing.
+        let bc_cfg = &cfg.beaconing;
+        if bc_cfg.enabled && event.action == "accept" {
+            if let Some(dest_ip) = event.dest_ip {
+                let dport = event.dest_port;
+                let flow_key = (ip, dest_ip, dport);
+
+                if !exc.ignore_beaconing_ports.contains(&dport)
+                    && !exc.authorized_beaconing_sources.contains(&ip)
+                {
+                    // --- Cap pe numarul de flow-uri urmarite (LRU pe ultimul seen_at) ---
+                    let is_new_flow = !self.beacon_hits.contains_key(&flow_key);
+                    if is_new_flow && self.beacon_hits.len() >= cfg.max_tracked_ips {
+                        let lru_key: Option<(IpAddr, IpAddr, u16)> = self
+                            .beacon_hits
+                            .iter()
+                            .min_by_key(|e| e.value().last().map(|h| h.seen_at).unwrap_or(now))
+                            .map(|e| *e.key());
+                        if let Some(old) = lru_key {
+                            self.beacon_hits.remove(&old);
+                            self.beacon_cooldowns.remove(&old);
+                        }
+                    }
+
+                    // Inregistram timestamp-ul. Cap memorie per flow: min_events * 4.
+                    let cap = bc_cfg.min_events.saturating_mul(4).max(bc_cfg.min_events + 4);
+                    {
+                        let mut hits = self.beacon_hits.entry(flow_key).or_default();
+                        hits.push(BeaconHit { seen_at: now });
+                        if hits.len() > cap {
+                            let overflow = hits.len() - cap;
+                            hits.drain(..overflow);
+                        }
+                    }
+
+                    // Calcul CV pe fereastra activa.
+                    let window = Duration::from_secs(bc_cfg.time_window_secs);
+                    if let Some((mean_secs, cv, count)) =
+                        self.beacon_stats(&flow_key, window, now)
+                    {
+                        let mean_ok = mean_secs >= bc_cfg.min_interval_secs as f64
+                            && mean_secs <= bc_cfg.max_interval_secs as f64;
+                        if count >= bc_cfg.min_events
+                            && mean_ok
+                            && cv <= bc_cfg.cv_threshold
+                            && !self.in_cooldown_tuple(&self.beacon_cooldowns, &flow_key)
+                        {
+                            self.beacon_cooldowns.insert(flow_key, now);
+                            alerts.push(Alert {
+                                scan_type: ScanType::Beaconing,
+                                source_ip: ip,
+                                dest_ip: Some(dest_ip),
+                                unique_ports: Vec::new(),
+                                unique_dests: Vec::new(),
+                                unique_sources: Vec::new(),
+                                timestamp: Local::now(),
+                                beacon_port: Some(dport),
+                                mean_interval_secs: Some(mean_secs),
+                                cv: Some(cv),
+                                event_count: Some(count),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         alerts
+    }
+
+    /// Calculeaza statisticile (mean_interval_secs, CV, count) pentru un flow Beaconing.
+    ///
+    /// Returneaza None daca avem < 2 intrari in fereastra (nu putem calcula intervale)
+    /// sau daca media intervalelor este 0 (toate timestamp-urile identice → divide by zero).
+    fn beacon_stats(
+        &self,
+        flow_key: &(IpAddr, IpAddr, u16),
+        window: Duration,
+        now: Instant,
+    ) -> Option<(f64, f64, usize)> {
+        let hits = self.beacon_hits.get(flow_key)?;
+        // Selectam doar timestamp-urile din fereastra de timp, in ordine cronologica.
+        let timestamps: Vec<Instant> = hits
+            .iter()
+            .filter(|h| now.saturating_duration_since(h.seen_at) <= window)
+            .map(|h| h.seen_at)
+            .collect();
+        drop(hits);
+
+        if timestamps.len() < 2 {
+            return None;
+        }
+        // Intervalele consecutive (in secunde, f64 pentru precizie).
+        let intervals: Vec<f64> = timestamps
+            .windows(2)
+            .map(|w| w[1].saturating_duration_since(w[0]).as_secs_f64())
+            .collect();
+        let n = intervals.len() as f64;
+        let mean = intervals.iter().sum::<f64>() / n;
+        if mean <= 0.0 {
+            return None;
+        }
+        let variance = intervals.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let cv = variance.sqrt() / mean;
+        Some((mean, cv, timestamps.len()))
+    }
+
+    /// Cooldown check pentru chei compozite (tuplu). Acelasi pattern ca `in_cooldown`,
+    /// dar parametrizat pe cheia DashMap-ului — necesar pentru beacon_cooldowns
+    /// (cheie = `(IpAddr, IpAddr, u16)`, nu `IpAddr`).
+    fn in_cooldown_tuple<K>(&self, cooldowns: &DashMap<K, Instant>, key: &K) -> bool
+    where
+        K: std::cmp::Eq + std::hash::Hash + Clone,
+    {
+        if let Some(entry) = cooldowns.get(key) {
+            let cooldown = Duration::from_secs(self.config.load().alert_cooldown_secs);
+            Instant::now().saturating_duration_since(*entry.value()) < cooldown
+        } else {
+            false
+        }
     }
 
     /// Returneaza lista porturilor unice accesate de un IP in fereastra de timp.
@@ -1196,6 +1404,22 @@ impl Detector {
             self.distributed_hits.remove(ip);
         }
 
+        // --- Curatam beacon_hits (Beaconing C2 #24) ---
+        // Cheia este (src, dst, dport); cleanup-ul nu intersecteaza last_seen
+        // (care e indexat pe IpAddr unic, dar src apare oricum si in port/accept_hits).
+        let mut beacon_empty: Vec<(IpAddr, IpAddr, u16)> = Vec::new();
+        for mut entry in self.beacon_hits.iter_mut() {
+            entry
+                .value_mut()
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
+            if entry.value().is_empty() {
+                beacon_empty.push(*entry.key());
+            }
+        }
+        for key in &beacon_empty {
+            self.beacon_hits.remove(key);
+        }
+
         // --- Sincronizam last_seen ---
         //
         // Eliminam din last_seen IP-urile care nu mai au date in NICIUN map.
@@ -1226,6 +1450,8 @@ impl Detector {
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
         self.distributed_cooldowns
             .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
+        self.beacon_cooldowns
+            .retain(|_, instant| now.saturating_duration_since(*instant) <= cooldown_dur);
     }
 
     /// Returneaza numarul total de IP-uri urmarite in memorie (drop + accept).
@@ -1242,8 +1468,8 @@ impl Detector {
 mod tests {
     use super::*;
     use crate::config::{
-        AcceptScanConfig, DetectionConfig, DistributedScanConfig, DynamicThresholdConfig,
-        FastScanConfig, LateralMovementConfig, SlowScanConfig,
+        AcceptScanConfig, BeaconingConfig, DetectionConfig, DistributedScanConfig,
+        DynamicThresholdConfig, FastScanConfig, LateralMovementConfig, SlowScanConfig,
     };
 
     /// Creeaza o configuratie de test cu praguri mici pentru teste rapide.
@@ -1289,6 +1515,14 @@ mod tests {
                 min_threshold_ratio: 0.5,
                 max_threshold_ratio: 3.0,
             },
+            beaconing: BeaconingConfig {
+                enabled: false,
+                min_events: 5,
+                time_window_secs: 60,
+                cv_threshold: 0.30,
+                min_interval_secs: 1,
+                max_interval_secs: 60,
+            },
         }
     }
 
@@ -1329,6 +1563,14 @@ mod tests {
                 min_samples: 10,
                 min_threshold_ratio: 0.5,
                 max_threshold_ratio: 3.0,
+            },
+            beaconing: BeaconingConfig {
+                enabled: false,
+                min_events: 5,
+                time_window_secs: 60,
+                cv_threshold: 0.30,
+                min_interval_secs: 1,
+                max_interval_secs: 60,
             },
         }
     }
@@ -1652,6 +1894,14 @@ mod tests {
                 min_threshold_ratio: 0.5,
                 max_threshold_ratio: 3.0,
             },
+            beaconing: BeaconingConfig {
+                enabled: false,
+                min_events: 5,
+                time_window_secs: 60,
+                cv_threshold: 0.30,
+                min_interval_secs: 1,
+                max_interval_secs: 60,
+            },
         }
     }
 
@@ -1966,6 +2216,14 @@ mod tests {
                 min_threshold_ratio: 0.5,
                 max_threshold_ratio: 3.0,
             },
+            beaconing: BeaconingConfig {
+                enabled: false,
+                min_events: 5,
+                time_window_secs: 60,
+                cv_threshold: 0.30,
+                min_interval_secs: 1,
+                max_interval_secs: 60,
+            },
         }
     }
 
@@ -2164,5 +2422,310 @@ mod tests {
                 "Evenimentele drop nu trebuie sa declanseze Lateral Movement"
             );
         }
+    }
+
+    // =========================================================================
+    // Teste Beaconing C2 (#24)
+    // =========================================================================
+
+    /// Config Beaconing activat: min_events=5, fereastra 60s, CV<=0.30, interval [1,60]s.
+    fn beaconing_config() -> DetectionConfig {
+        let mut cfg = test_config();
+        // Dezactivam celelalte detectii ca sa nu interfereze.
+        cfg.fast_scan.port_threshold = 1000;
+        cfg.slow_scan.port_threshold = 1000;
+        cfg.accept_scan.port_threshold = 1000;
+        cfg.lateral_movement.enabled = false;
+        cfg.distributed_scan.enabled = false;
+        cfg.beaconing = BeaconingConfig {
+            enabled: true,
+            min_events: 5,
+            time_window_secs: 60,
+            cv_threshold: 0.30,
+            min_interval_secs: 1,
+            max_interval_secs: 60,
+        };
+        cfg
+    }
+
+    fn make_beacon_accept(src: &str, dst: &str, port: u16) -> LogEvent {
+        LogEvent {
+            source_ip: src.parse().unwrap(),
+            dest_ip: Some(dst.parse().unwrap()),
+            dest_port: port,
+            protocol: "tcp".to_string(),
+            action: "accept".to_string(),
+            raw_log: String::new(),
+        }
+    }
+
+    /// Injecteaza un istoric de timestamp-uri intr-un flow beacon, simuland
+    /// intervale spatiate la `interval_secs +/- jitter_secs` in trecut.
+    fn inject_beacon_history(
+        detector: &Detector,
+        flow_key: (IpAddr, IpAddr, u16),
+        count: usize,
+        interval_secs: u64,
+        jitter_secs: f64,
+    ) {
+        let now = Instant::now();
+        let mut hits = Vec::with_capacity(count);
+        // Asezam timestamp-urile in ordine cronologica: cel mai vechi inapoi in timp.
+        for i in 0..count {
+            // Cel mai recent hit este la `now - interval_secs` (lasam loc unui
+            // eveniment "live" emis ulterior la `now`). Cel mai vechi este la
+            // `now - count*interval_secs`.
+            let steps_back = (count - i) as u64;
+            let base_offset = steps_back * interval_secs;
+            // Jitter deterministic alternand semne pentru stabilitatea testului.
+            let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let offset_f = base_offset as f64 + sign * jitter_secs;
+            let offset = Duration::from_secs_f64(offset_f.max(0.0));
+            hits.push(BeaconHit {
+                seen_at: now.checked_sub(offset).unwrap_or(now),
+            });
+        }
+        detector.beacon_hits.insert(flow_key, hits);
+    }
+
+    #[test]
+    fn test_beacon_stats_uniform_intervals() {
+        // Intervale perfect uniforme: CV ar trebui sa fie aproape 0.
+        let detector = Detector::new(beaconing_config());
+        let src: IpAddr = "10.0.1.5".parse().unwrap();
+        let dst: IpAddr = "10.0.1.50".parse().unwrap();
+        let key = (src, dst, 443);
+
+        inject_beacon_history(&detector, key, 10, 5, 0.0);
+        let (mean, cv, count) = detector
+            .beacon_stats(&key, Duration::from_secs(60), Instant::now())
+            .expect("ar trebui sa avem statistici");
+
+        assert_eq!(count, 10);
+        assert!(
+            (mean - 5.0).abs() < 0.5,
+            "mean asteptat ~5s, primit {}",
+            mean
+        );
+        assert!(cv < 0.05, "CV asteptat <0.05 pentru intervale uniforme, primit {}", cv);
+    }
+
+    #[test]
+    fn test_beacon_stats_high_variance() {
+        // Intervale cu jitter mare (50% din interval) → CV mare.
+        let detector = Detector::new(beaconing_config());
+        let src: IpAddr = "10.0.1.5".parse().unwrap();
+        let dst: IpAddr = "10.0.1.50".parse().unwrap();
+        let key = (src, dst, 443);
+
+        // 6 timestamp-uri amplasate haotic: 0, 1, 6, 7, 20, 21 secunde in urma.
+        let now = Instant::now();
+        let offsets = [21u64, 20, 7, 6, 1, 0];
+        let hits: Vec<BeaconHit> = offsets
+            .iter()
+            .map(|s| BeaconHit {
+                seen_at: now.checked_sub(Duration::from_secs(*s)).unwrap_or(now),
+            })
+            .collect();
+        detector.beacon_hits.insert(key, hits);
+
+        let (_, cv, _) = detector
+            .beacon_stats(&key, Duration::from_secs(60), now)
+            .expect("ar trebui sa avem statistici");
+        assert!(
+            cv > 0.5,
+            "CV asteptat > 0.5 pentru intervale haotice, primit {}",
+            cv
+        );
+    }
+
+    #[test]
+    fn test_beacon_stats_below_min_events() {
+        // Sub min_events → process_event nu trebuie sa emita alerta.
+        let detector = Detector::new(beaconing_config());
+        let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
+        assert!(
+            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            "1 eveniment singular nu trebuie sa declanseze Beaconing"
+        );
+    }
+
+    #[test]
+    fn test_beaconing_emits_alert_for_periodic_flow() {
+        // Cu istoric uniform suficient pre-injectat, urmatorul accept declanseaza alerta.
+        let detector = Detector::new(beaconing_config());
+        let src: IpAddr = "10.0.1.5".parse().unwrap();
+        let dst: IpAddr = "10.0.1.50".parse().unwrap();
+        let port = 443;
+        let key = (src, dst, port);
+
+        // 5 evenimente uniforme la 5s interval (jitter 0).
+        inject_beacon_history(&detector, key, 5, 5, 0.0);
+
+        // Urmatorul accept reincarca calculul.
+        let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", port));
+        let beacon: Vec<_> = alerts
+            .iter()
+            .filter(|a| matches!(a.scan_type, ScanType::Beaconing))
+            .collect();
+        assert_eq!(beacon.len(), 1, "ar trebui exact 1 alerta Beaconing");
+        let a = beacon[0];
+        assert_eq!(a.beacon_port, Some(port));
+        assert!(a.event_count.unwrap() >= 5);
+        assert!(a.cv.unwrap() < 0.30, "CV ar trebui sub prag, primit {:?}", a.cv);
+    }
+
+    #[test]
+    fn test_beaconing_disabled_in_config() {
+        let mut cfg = beaconing_config();
+        cfg.beaconing.enabled = false;
+        let detector = Detector::new(cfg);
+        let src: IpAddr = "10.0.1.5".parse().unwrap();
+        let dst: IpAddr = "10.0.1.50".parse().unwrap();
+        let key = (src, dst, 443);
+
+        inject_beacon_history(&detector, key, 5, 5, 0.0);
+        let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
+        assert!(
+            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            "Beaconing dezactivat in config nu trebuie sa emita alerte"
+        );
+    }
+
+    #[test]
+    fn test_beaconing_mean_outside_range() {
+        // Intervale uniforme dar prea mari → mean > max_interval_secs → no alert.
+        let mut cfg = beaconing_config();
+        cfg.beaconing.max_interval_secs = 3; // interval real va fi 5s, > 3
+        let detector = Detector::new(cfg);
+        let src: IpAddr = "10.0.1.5".parse().unwrap();
+        let dst: IpAddr = "10.0.1.50".parse().unwrap();
+        let key = (src, dst, 443);
+
+        inject_beacon_history(&detector, key, 6, 5, 0.0);
+        let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
+        assert!(
+            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            "Mean > max_interval_secs nu trebuie sa declanseze Beaconing"
+        );
+    }
+
+    #[test]
+    fn test_beaconing_high_cv_no_alert() {
+        // Intervale neregulate: CV mare → fara alerta chiar daca count >= min_events.
+        let detector = Detector::new(beaconing_config());
+        let src: IpAddr = "10.0.1.5".parse().unwrap();
+        let dst: IpAddr = "10.0.1.50".parse().unwrap();
+        let key = (src, dst, 443);
+
+        // Spatiu chaos: 30, 25, 10, 8, 2, 0 secunde in urma → CV >> 0.30.
+        let now = Instant::now();
+        let offsets = [30u64, 25, 10, 8, 2, 0];
+        let hits: Vec<BeaconHit> = offsets
+            .iter()
+            .map(|s| BeaconHit {
+                seen_at: now.checked_sub(Duration::from_secs(*s)).unwrap_or(now),
+            })
+            .collect();
+        detector.beacon_hits.insert(key, hits);
+
+        let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
+        assert!(
+            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            "CV mare nu trebuie sa declanseze Beaconing"
+        );
+    }
+
+    #[test]
+    fn test_beaconing_ignore_port() {
+        // Port in ignore_beaconing_ports: nici inregistrare, nici alerta.
+        let mut cfg = beaconing_config();
+        cfg.exceptions.ignore_beaconing_ports = vec![123]; // NTP
+        let detector = Detector::new(cfg);
+
+        let src: IpAddr = "10.0.1.5".parse().unwrap();
+        let dst: IpAddr = "10.0.1.50".parse().unwrap();
+        let key_ntp = (src, dst, 123);
+
+        // Pre-injectam un istoric "curat" — daca process_event ar evalua flow-ul,
+        // ar emite alerta. Asteptarea: e ocolit complet.
+        inject_beacon_history(&detector, key_ntp, 6, 5, 0.0);
+        let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 123));
+        assert!(
+            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            "Port in ignore_beaconing_ports nu trebuie sa declanseze Beaconing"
+        );
+    }
+
+    #[test]
+    fn test_beaconing_authorized_source() {
+        // Sursa in authorized_beaconing_sources: nu declanseaza Beaconing.
+        let mut cfg = beaconing_config();
+        cfg.exceptions.authorized_beaconing_sources = vec!["10.0.1.5".to_string()];
+        let detector = Detector::new(cfg);
+
+        let src: IpAddr = "10.0.1.5".parse().unwrap();
+        let dst: IpAddr = "10.0.1.50".parse().unwrap();
+        let key = (src, dst, 443);
+        inject_beacon_history(&detector, key, 6, 5, 0.0);
+
+        let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
+        assert!(
+            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            "Sursa autorizata nu trebuie sa declanseze Beaconing"
+        );
+    }
+
+    #[test]
+    fn test_beaconing_cooldown_prevents_duplicate() {
+        // Dupa o alerta emisa, urmatorul accept in cooldown nu mai emite alta.
+        let detector = Detector::new(beaconing_config());
+        let src: IpAddr = "10.0.1.5".parse().unwrap();
+        let dst: IpAddr = "10.0.1.50".parse().unwrap();
+        let key = (src, dst, 443);
+
+        inject_beacon_history(&detector, key, 5, 5, 0.0);
+        let first = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
+        assert!(
+            first
+                .iter()
+                .any(|a| matches!(a.scan_type, ScanType::Beaconing)),
+            "Prima alerta Beaconing ar trebui emisa"
+        );
+
+        // Al doilea eveniment imediat: cooldown activ.
+        let second = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
+        assert!(
+            second
+                .iter()
+                .all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            "Cooldown trebuie sa previna a doua alerta Beaconing"
+        );
+    }
+
+    #[test]
+    fn test_beaconing_drop_action_ignored() {
+        // Evenimentele "drop" nu se inregistreaza ca beacon hits.
+        let detector = Detector::new(beaconing_config());
+        let drop_event = LogEvent {
+            source_ip: "10.0.1.5".parse().unwrap(),
+            dest_ip: Some("10.0.1.50".parse().unwrap()),
+            dest_port: 443,
+            protocol: "tcp".to_string(),
+            action: "drop".to_string(),
+            raw_log: String::new(),
+        };
+        for _ in 0..10 {
+            let _ = detector.process_event(&drop_event);
+        }
+        let key = (
+            "10.0.1.5".parse::<IpAddr>().unwrap(),
+            "10.0.1.50".parse::<IpAddr>().unwrap(),
+            443,
+        );
+        assert!(
+            detector.beacon_hits.get(&key).is_none(),
+            "Drop-urile nu trebuie sa populeze beacon_hits"
+        );
     }
 }
