@@ -845,9 +845,7 @@ impl AppConfig {
                 ));
             }
             if b.min_interval_secs == 0 {
-                errors.push(
-                    "detection.beaconing.min_interval_secs = 0: trebuie > 0".to_string(),
-                );
+                errors.push("detection.beaconing.min_interval_secs = 0: trebuie > 0".to_string());
             }
             if b.max_interval_secs <= b.min_interval_secs {
                 errors.push(format!(

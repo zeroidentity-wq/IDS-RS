@@ -571,15 +571,15 @@ impl Alerter {
             ),
         };
 
-        // Pentru Lateral Movement, campul cs1 contine destinatiile unice (IP-uri).
-        // Pentru DistributedScan, cs1 contine TOATE sursele atacatoare, deduplicate
-        // si sortate. `alert.source_ip` este inclus explicit ca fallback defensiv,
-        // chiar daca detectorul il include deja in `unique_sources`.
+        // `cs1` retine mereu metrica principala numerica a detectiei (count), pentru
+        // filtrare simpla in ArcSight (>=, <=, etc.). Listele mari merg in sample-uri
+        // limitate pe cs4/cs6, in functie de tipul alertei.
         let (cs1_label, cs1_value, cnt) = match alert.scan_type {
-            ScanType::LateralMovement => {
-                let dest_list = sorted_ip_list(&alert.unique_dests);
-                ("ContactedHosts", dest_list, alert.unique_dests.len())
-            }
+            ScanType::LateralMovement => (
+                "ContactedHostCount",
+                alert.unique_dests.len().to_string(),
+                alert.unique_dests.len(),
+            ),
             ScanType::DistributedScan => {
                 let src_list = sorted_ip_list_with_primary(&alert.unique_sources, alert.source_ip);
                 let source_count = if src_list.is_empty() {
@@ -587,52 +587,25 @@ impl Alerter {
                 } else {
                     src_list.split(',').count()
                 };
-                ("AttackingSources", src_list, source_count)
-            }
-            ScanType::Beaconing => {
-                // cs1 = mean_interval (secunde, 3 zecimale) pentru SIEM.
-                let mean = alert.mean_interval_secs.unwrap_or(0.0);
-                let cnt = alert.event_count.unwrap_or(0);
                 (
-                    "MeanIntervalSecs",
-                    format!("{:.3}", mean),
-                    cnt,
+                    "AttackingSourceCount",
+                    source_count.to_string(),
+                    source_count,
                 )
             }
-            _ => {
-                let port_list = alert
-                    .unique_ports
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                ("ScannedPorts", port_list, alert.unique_ports.len())
+            ScanType::Beaconing => {
+                let cnt = alert.event_count.unwrap_or(0);
+                ("BeaconEventCount", cnt.to_string(), cnt)
             }
+            _ => (
+                "ScannedPortCount",
+                alert.unique_ports.len().to_string(),
+                alert.unique_ports.len(),
+            ),
         };
 
-        // Lista pentru campul msg — trunchiem la 512 caractere pentru
-        // compatibilitate cu syslog RFC 3164 si vizibilitate in ArcSight.
-        //
-        // NOTA UTF-8: `cs1_value` contine IP-uri si numere (ASCII), deci taiatul
-        // la byte 512 nu poate cadea in mijlocul unui caracter multi-byte in
-        // practica. Totusi, daca pe viitor adaugam hostname-uri / etichete cu
-        // diacritice in `cs1_value`, slice direct `cs1_value[..512]` ar putea
-        // panica. Cautam ultimul boundary UTF-8 valid <= 512 pentru defensiva.
-        let cs1_msg = if cs1_value.len() <= 512 {
-            cs1_value.clone()
-        } else {
-            // Cautam pozitia maxima <= 512 care e boundary UTF-8 valid.
-            let mut safe_end = 512;
-            while safe_end > 0 && !cs1_value.is_char_boundary(safe_end) {
-                safe_end -= 1;
-            }
-            let truncated = &cs1_value[..safe_end];
-            let cut = truncated.rfind(',').unwrap_or(safe_end);
-            format!("{}...", &cs1_value[..cut])
-        };
-
-        // Mesajul campului msg: descriere + lista valori (porturi sau IP-uri).
-        let msg_text = format!("{} | {}: {}", scan_label, cs1_label.to_lowercase(), cs1_msg);
+        // `msg` ramane scurt pentru toate tipurile; detaliile sunt in campuri dedicate.
+        let msg_text = scan_label.clone();
 
         // Sanitizare anti-injection pentru event_name (camp header CEF, separator '|').
         let event_name_safe = sanitize_cef_header(event_name);
@@ -679,29 +652,124 @@ impl Alerter {
             },
             None => String::new(),
         };
-        let distributed_target_field = match (alert.scan_type.clone(), alert.dest_ip) {
-            (ScanType::DistributedScan, Some(ip)) => format!(
-                " cs4Label=TargetAddress cs4={}",
-                sanitize_cef_extension(&ip.to_string())
-            ),
-            _ => String::new(),
-        };
-
-        // Pentru Beaconing C2: campuri suplimentare (CV, event count, dest port).
-        // cs5 = CV (3 zecimale), cs6 = event_count, dpt = port destinatie.
-        let beaconing_extra_field = if matches!(alert.scan_type, ScanType::Beaconing) {
-            let cv = alert.cv.unwrap_or(0.0);
-            let count = alert.event_count.unwrap_or(0);
-            let dpt = alert
-                .beacon_port
-                .map(|p| format!(" dpt={}", p))
-                .unwrap_or_default();
-            format!(
-                " cs5Label=CV cs5={:.3} cs6Label=EventCount cs6={}{}",
-                cv, count, dpt
-            )
-        } else {
-            String::new()
+        let extra_fields = match alert.scan_type {
+            ScanType::Fast => {
+                let sample = alert
+                    .unique_ports
+                    .iter()
+                    .take(20)
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sample_field = if sample.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " cs4Label=PortSample cs4={}",
+                        sanitize_cef_extension(&sample)
+                    )
+                };
+                format!(
+                    "{} cs5Label=DetectionWindowSecs cs5={}",
+                    sample_field, det.fast_scan.time_window_secs
+                )
+            }
+            ScanType::Slow => {
+                let sample = alert
+                    .unique_ports
+                    .iter()
+                    .take(20)
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sample_field = if sample.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " cs4Label=PortSample cs4={}",
+                        sanitize_cef_extension(&sample)
+                    )
+                };
+                format!(
+                    "{} cs5Label=DetectionWindowMins cs5={}",
+                    sample_field, det.slow_scan.time_window_mins
+                )
+            }
+            ScanType::AcceptScan => {
+                let sample = alert
+                    .unique_ports
+                    .iter()
+                    .take(20)
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sample_field = if sample.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " cs4Label=PortSample cs4={}",
+                        sanitize_cef_extension(&sample)
+                    )
+                };
+                format!(
+                    "{} cs5Label=DetectionWindowSecs cs5={}",
+                    sample_field, det.accept_scan.time_window_secs
+                )
+            }
+            ScanType::LateralMovement => {
+                let sample = sorted_ip_list(&alert.unique_dests)
+                    .split(',')
+                    .take(10)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sample_field = if sample.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " cs4Label=ContactedHostSample cs4={}",
+                        sanitize_cef_extension(&sample)
+                    )
+                };
+                format!(
+                    "{} cs5Label=DetectionWindowSecs cs5={}",
+                    sample_field, det.lateral_movement.time_window_secs
+                )
+            }
+            ScanType::DistributedScan => {
+                let target_field = match alert.dest_ip {
+                    Some(ip) => format!(
+                        " cs4Label=TargetAddress cs4={}",
+                        sanitize_cef_extension(&ip.to_string())
+                    ),
+                    None => String::new(),
+                };
+                let sources = sorted_ip_list_with_primary(&alert.unique_sources, alert.source_ip);
+                let sample = sources.split(',').take(10).collect::<Vec<_>>().join(",");
+                let sample_field = if sample.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " cs6Label=AttackingSourceSample cs6={}",
+                        sanitize_cef_extension(&sample)
+                    )
+                };
+                format!(
+                    "{} cs5Label=DetectionWindowSecs cs5={}{}",
+                    target_field, det.distributed_scan.time_window_secs, sample_field
+                )
+            }
+            ScanType::Beaconing => {
+                let mean = alert.mean_interval_secs.unwrap_or(0.0);
+                let cv = alert.cv.unwrap_or(0.0);
+                let dpt = alert
+                    .beacon_port
+                    .map(|p| format!(" dpt={}", p))
+                    .unwrap_or_default();
+                format!(
+                    " cs4Label=MeanIntervalSecs cs4={:.3} cs5Label=CV cs5={:.3}{}",
+                    mean, cv, dpt
+                )
+            }
         };
 
         let syslog_ts = alert.timestamp.format("%b %e %H:%M:%S");
@@ -710,7 +778,7 @@ impl Alerter {
         let message = format!(
             "<38>{syslog_ts} ids-rs CEF:0|IDS-RS|Network Scanner Detector|1.0\
              |{sig_id}|{event_name}|{sev}\
-             |rt={rt_ms} src={src}{shost}{src_loc}{dst}{dhost}{dst_loc}{distributed_target}{beaconing_extra} cnt={cnt} act=alert \
+             |rt={rt_ms} src={src}{shost}{src_loc}{dst}{dhost}{dst_loc}{extra} cnt={cnt} act=alert \
              msg={msg} cs1Label={cs1label} cs1={cs1}",
             sev = cef_severity,
             syslog_ts = syslog_ts,
@@ -723,8 +791,7 @@ impl Alerter {
             dst = dst_field,
             dhost = dhost_field,
             dst_loc = dst_location_field,
-            distributed_target = distributed_target_field,
-            beaconing_extra = beaconing_extra_field,
+            extra = extra_fields,
             cnt = cnt,
             msg = sanitize_cef_extension(&msg_text),
             cs1label = cs1_label,
@@ -854,6 +921,7 @@ impl Alerter {
             Some(ip) => ip.to_string(),
             None => "N/A".to_string(),
         };
+        let source_ip_display = alert.source_ip.to_string();
 
         // Hostname-uri din mapping-ul static.
         let hn = self.hostnames.load();
@@ -876,25 +944,67 @@ impl Alerter {
         // Etichete dinamice in email: adapteaza "Porturi scanate" / "Porturi detectate"
         // la tipul de alerta. Lateral Movement arata destinatii, Distributed arata surse.
         let (count_label, list_label) = match alert.scan_type {
-            ScanType::LateralMovement => ("Destinatii contactate", "Destinatii detectate"),
-            ScanType::DistributedScan => ("Surse atacatoare", "Surse detectate"),
+            ScanType::LateralMovement => (
+                "Destinatii contactate",
+                "Destinatii detectate (set complet)",
+            ),
+            ScanType::DistributedScan => ("Surse atacatoare", "Surse detectate (set complet)"),
             ScanType::Beaconing => ("Calluri C2", "Detalii beacon"),
             _ => ("Porturi scanate", "Porturi detectate"),
         };
 
         let scan_type = alert.scan_type.to_string();
-        let source_ip = alert.source_ip.to_string();
+        let (
+            source_ip,
+            dst_ip,
+            src_hostname_display,
+            src_location_display,
+            dst_hostname_display,
+            dst_location_display,
+        ) = match alert.scan_type {
+            // Pentru Distributed, `source_ip` din alerta este doar IP-ul care a
+            // declansat pragul; semnalam explicit acest lucru in email.
+            ScanType::DistributedScan => (
+                format!("MULTIPLE (trigger: {})", source_ip_display),
+                dest_ip_display.clone(),
+                String::new(),
+                String::new(),
+                dst_hostname.to_string(),
+                dst_location.clone(),
+            ),
+            // Pentru Lateral, `dest_ip` din alerta este doar destinatia din
+            // evenimentul trigger; setul complet este in `Destinatii detectate`.
+            ScanType::LateralMovement => (
+                source_ip_display.clone(),
+                match alert.dest_ip {
+                    Some(ip) => format!("MULTIPLE (trigger: {})", ip),
+                    None => "MULTIPLE".to_string(),
+                },
+                src_hostname.to_string(),
+                src_location.clone(),
+                String::new(),
+                String::new(),
+            ),
+            _ => (
+                source_ip_display.clone(),
+                dest_ip_display.clone(),
+                src_hostname.to_string(),
+                src_location.clone(),
+                dst_hostname.to_string(),
+                dst_location.clone(),
+            ),
+        };
         let timestamp = timestamp.to_string();
 
         let html_body = build_html_body(&HtmlAlertBody {
             scan_type: &scan_type,
             severity,
             src_ip: &source_ip,
-            src_hostname,
-            src_location: &src_location,
-            dst_ip: &dest_ip_display,
-            dst_hostname,
-            dst_location: &dst_location,
+            src_hostname: &src_hostname_display,
+            src_location: &src_location_display,
+            dst_ip: &dst_ip,
+            dst_hostname: &dst_hostname_display,
+            dst_location: &dst_location_display,
             item_count,
             timestamp: &timestamp,
             items: &list_display,

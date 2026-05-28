@@ -18,14 +18,15 @@ Replay / sample (fisier la alegere):
   python tester.py sample tester/sample2_gaia.log raw-gaia
 
 Generare dinamica (avansat):
-  python tester.py fast-scan --format gaia --ports 20 --delay 0.1
+  python tester.py fast-scan --format gaia --ports 20 --delay 0.1 --target 10.0.0.50
   python tester.py fast-scan --format gaia_cef --ports 20 --delay 0.1
-  python tester.py slow-scan --format gaia --ports 40
-  python tester.py accept-scan --format gaia --ports 10 --delay 0.1
+  python tester.py slow-scan --format gaia --ports 40 --target 10.0.0.50
+  python tester.py accept-scan --format gaia --ports 10 --delay 0.1 --target 10.0.0.50
   python tester.py lateral-movement --dests 10 --lateral-port 445 --delay 0.1
   python tester.py lateral-movement --dests 10 --lateral-port 3389 --format cef
   python tester.py distributed-scan --sources 8 --target 10.0.0.100 --delay 0.1
   python tester.py distributed-scan --sources 8 --target 10.0.0.100 --format cef
+  python tester.py presentation-wave --format gaia_cef --intensity 2
 """
 
 import argparse
@@ -96,6 +97,13 @@ def generate_log(fmt: str, source_ip: str, dst_port: int, action: str = "drop", 
     if fmt == "gaia_cef":
         return generate_gaia_cef_log(source_ip, dst_port, action, dest_ip or "192.168.1.1")
     return generate_gaia_log(source_ip, dst_port, action, dest_ip or "10.0.0.1")
+
+
+def default_target_for_format(fmt: str) -> str:
+    """Returneaza IP-ul destinatie implicit pentru formatul de log ales."""
+    if fmt in ("cef", "gaia_cef"):
+        return "192.168.1.1"
+    return "10.0.0.1"
 
 
 # =============================================================================
@@ -195,6 +203,7 @@ def simulate_fast_scan(
     delay: float,
     batch_size: int,
     fmt: str,
+    target_ip: Optional[str] = None,
 ) -> None:
     """
     Simuleaza un Fast Scan: trimite log-uri de tip 'drop' cu porturi unice
@@ -202,8 +211,10 @@ def simulate_fast_scan(
 
     Pragul default din config.toml: >15 porturi in 10 secunde.
     """
+    resolved_target = target_ip or default_target_for_format(fmt)
     print(f"[*] Simulare FAST SCAN de la {source_ip} (format: {fmt.upper()})")
     print(f"    Porturi: {num_ports} | Delay: {delay}s | Batch: {batch_size}")
+    print(f"    Tinta scanata (dst): {resolved_target}")
     print(f"    Destinatie: {host}:{port}")
     print()
 
@@ -213,7 +224,7 @@ def simulate_fast_scan(
     sent_count = 0
 
     for i, dst_port in enumerate(ports):
-        log_line = generate_log(fmt, source_ip, dst_port, "drop")
+        log_line = generate_log(fmt, source_ip, dst_port, "drop", dest_ip=resolved_target)
         batch_buffer.append(log_line)
 
         if len(batch_buffer) >= batch_size or i == len(ports) - 1:
@@ -246,6 +257,7 @@ def simulate_slow_scan(
     delay: float,
     batch_size: int,
     fmt: str,
+    target_ip: Optional[str] = None,
 ) -> None:
     """
     Simuleaza un Slow Scan: trimite log-uri de tip 'drop' distribuite
@@ -254,9 +266,11 @@ def simulate_slow_scan(
     Pragul default din config.toml: >30 porturi in 5 minute.
     """
     total_time_est = num_ports * delay / max(batch_size, 1)
+    resolved_target = target_ip or default_target_for_format(fmt)
     print(f"[*] Simulare SLOW SCAN de la {source_ip} (format: {fmt.upper()})")
     print(f"    Porturi: {num_ports} | Delay: {delay}s | Batch: {batch_size}")
     print(f"    Timp estimat: ~{total_time_est:.0f}s ({total_time_est / 60:.1f} min)")
+    print(f"    Tinta scanata (dst): {resolved_target}")
     print(f"    Destinatie: {host}:{port}")
     print()
 
@@ -267,7 +281,7 @@ def simulate_slow_scan(
     start_time = time.time()
 
     for i, dst_port in enumerate(ports):
-        log_line = generate_log(fmt, source_ip, dst_port, "drop")
+        log_line = generate_log(fmt, source_ip, dst_port, "drop", dest_ip=resolved_target)
         batch_buffer.append(log_line)
 
         if len(batch_buffer) >= batch_size or i == len(ports) - 1:
@@ -302,6 +316,7 @@ def simulate_accept_scan(
     delay: float,
     batch_size: int,
     fmt: str,
+    target_ip: Optional[str] = None,
 ) -> None:
     """
     Simuleaza un Accept Scan: trimite log-uri de tip 'accept' cu porturi unice
@@ -313,8 +328,10 @@ def simulate_accept_scan(
 
     Pragul default din config.toml: >5 porturi acceptate in 30 secunde.
     """
+    resolved_target = target_ip or default_target_for_format(fmt)
     print(f"[*] Simulare ACCEPT SCAN de la {source_ip} (format: {fmt.upper()})")
     print(f"    Porturi: {num_ports} | Delay: {delay}s | Batch: {batch_size}")
+    print(f"    Tinta scanata (dst): {resolved_target}")
     print(f"    Destinatie: {host}:{port}")
     print()
 
@@ -327,7 +344,7 @@ def simulate_accept_scan(
         # Diferenta cheie fata de Fast/Slow Scan: action="accept" in loc de "drop".
         # IDS-RS va ruta aceste evenimente catre accept_hits DashMap,
         # nu catre port_hits, deci nu vor declansa Fast/Slow Scan.
-        log_line = generate_log(fmt, source_ip, dst_port, "accept")
+        log_line = generate_log(fmt, source_ip, dst_port, "accept", dest_ip=resolved_target)
         batch_buffer.append(log_line)
 
         if len(batch_buffer) >= batch_size or i == len(ports) - 1:
@@ -525,6 +542,149 @@ def simulate_beaconing_c2(
     print(f"[+] Beaconing C2 complet: {sent_count} log-uri trimise ({fmt.upper()})")
     print(f"    Asigura-te ca [detection.beaconing] enabled = true in config.toml")
     print(f"    Pentru detectie in timp comprimat seteaza min_interval_secs = 0")
+
+
+def simulate_presentation_wave(
+    sock: socket.socket,
+    host: str,
+    port: int,
+    source_ip: str,
+    fmt: str,
+    intensity: int,
+    phase_pause: float,
+) -> None:
+    """
+    Preset rapid de prezentare:
+      - declanseaza toate tipurile de alerte (Fast/Slow/Accept/Lateral/Distributed/Beaconing)
+      - adauga valuri suplimentare pentru volum in SIEM + WebDashboard
+
+    Recomandare config IDS-RS pentru demo complet:
+      - detection.lateral_movement.enabled = true
+      - detection.distributed_scan.enabled = true
+      - detection.beaconing.enabled = true
+      - detection.beaconing.min_interval_secs = 0 (pentru intervale comprimate)
+    """
+    intensity = max(1, intensity)
+    print("[*] PRESENTATION WAVE MODE")
+    print(f"    Format: {fmt.upper()} | Intensitate: {intensity} | IDS-RS: {host}:{port}")
+    print()
+
+    try:
+        src_addr = ipaddress.ip_address(source_ip)
+    except ValueError:
+        src_addr = ipaddress.ip_address("192.168.11.7")
+    if not isinstance(src_addr, ipaddress.IPv4Address):
+        src_addr = ipaddress.ip_address("192.168.11.7")
+    src_oct = str(src_addr).split(".")
+    src_prefix = ".".join(src_oct[:3])
+    src_last = int(src_oct[3])
+
+    for wave in range(1, intensity + 1):
+        base_ip = f"{src_prefix}.{((src_last + wave - 1) % 254) + 1}"
+        target_ip = f"10.0.{wave}.100"
+        print("=" * 60)
+        print(f"[WAVE {wave}/{intensity}] sursa baza: {base_ip}  tinta: {target_ip}")
+        print("=" * 60)
+
+        simulate_fast_scan(
+            sock=sock,
+            host=host,
+            port=port,
+            source_ip=base_ip,
+            num_ports=22 + wave * 2,
+            delay=0.01,
+            batch_size=4,
+            fmt=fmt,
+        )
+        time.sleep(phase_pause)
+
+        simulate_slow_scan(
+            sock=sock,
+            host=host,
+            port=port,
+            source_ip=f"{src_prefix}.{((src_last + wave + 19) % 254) + 1}",
+            num_ports=36 + wave * 2,
+            delay=0.03,
+            batch_size=4,
+            fmt=fmt,
+        )
+        time.sleep(phase_pause)
+
+        simulate_accept_scan(
+            sock=sock,
+            host=host,
+            port=port,
+            source_ip=f"{src_prefix}.{((src_last + wave + 39) % 254) + 1}",
+            num_ports=10 + wave,
+            delay=0.01,
+            batch_size=3,
+            fmt=fmt,
+        )
+        time.sleep(phase_pause)
+
+        simulate_lateral_movement(
+            sock=sock,
+            host=host,
+            port=port,
+            source_ip=f"{src_prefix}.{((src_last + wave + 59) % 254) + 1}",
+            num_dests=8 + wave,
+            lateral_port=445 if wave % 2 == 1 else 3389,
+            delay=0.01,
+            fmt=fmt,
+        )
+        time.sleep(phase_pause)
+
+        simulate_distributed_scan(
+            sock=sock,
+            host=host,
+            port=port,
+            target_ip=target_ip,
+            num_sources=9 + wave,
+            target_port=80 if wave % 2 == 1 else 443,
+            delay=0.01,
+            fmt=fmt,
+        )
+        time.sleep(phase_pause)
+
+        simulate_beaconing_c2(
+            sock=sock,
+            host=host,
+            port=port,
+            source_ip=f"{src_prefix}.{((src_last + wave + 79) % 254) + 1}",
+            target_ip=f"10.0.{wave}.50",
+            target_port=443,
+            interval=0.2,
+            jitter_pct=3.0,
+            count=10 + wave,
+            fmt=fmt,
+        )
+        time.sleep(phase_pause)
+
+        # Val suplimentar mixt pentru "burst" vizibil in SIEM + Dashboard.
+        simulate_fast_scan(
+            sock=sock,
+            host=host,
+            port=port,
+            source_ip=f"172.16.{wave}.200",
+            num_ports=18 + wave,
+            delay=0.0,
+            batch_size=8,
+            fmt=fmt,
+        )
+        simulate_distributed_scan(
+            sock=sock,
+            host=host,
+            port=port,
+            target_ip=target_ip,
+            num_sources=7 + wave,
+            target_port=8080,
+            delay=0.0,
+            fmt=fmt,
+        )
+
+    print()
+    print("[+] Presentation wave complet.")
+    print("    Verifica SIEM + WebDashboard pentru valuri agregate de alerte.")
 
 
 def simulate_normal(
@@ -1061,13 +1221,15 @@ def run_interactive_menu() -> None:
             print("  3) Accept Scan          (porturi deschise accesate)")
             print("  4) Lateral Movement     (1 sursa -> N destinatii)")
             print("  5) Distributed Scan     (N surse -> 1 tinta)")
-            print("  6) Trafic Normal        (fara alerta)")
-            print("  7) Replay fisier        (trimite log-uri dintr-un fisier)")
-            print("  8) Random               (generare aleatorie cu IP custom)")
+            print("  6) Beaconing C2         (flow periodic src->dst:port)")
+            print("  7) Presentation Wave    (toate scanarile, demo rapid)")
+            print("  8) Trafic Normal        (fara alerta)")
+            print("  9) Replay fisier        (trimite log-uri dintr-un fisier)")
+            print(" 10) Random               (generare aleatorie cu IP custom)")
             print("  0) Iesire")
             print()
 
-            choice = _prompt_choice(["0", "1", "2", "3", "4", "5", "6", "7", "8"])
+            choice = _prompt_choice(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"])
 
             if choice == "0":
                 print("\nIesire.")
@@ -1080,11 +1242,13 @@ def run_interactive_menu() -> None:
                     num_ports = _prompt_int("Numar porturi", 20)
                     delay = _prompt_float("Delay intre pachete (s)", 0.1)
                     source = _prompt("IP sursa simulat", "192.168.11.7")
+                    target = _prompt("IP destinatie scanata (dst)", default_target_for_format(fmt))
                     _print_summary([
                         ("Scenariu", "Fast Scan"),
                         ("Format", fmt.upper()),
                         ("Host:Port", f"{host}:{port}"),
                         ("IP sursa", source),
+                        ("IP tinta", target),
                         ("Porturi", num_ports),
                         ("Delay", f"{delay}s"),
                     ])
@@ -1093,7 +1257,7 @@ def run_interactive_menu() -> None:
                     simulate_fast_scan(
                         sock=sock, host=host, port=port,
                         source_ip=source, num_ports=num_ports,
-                        delay=delay, batch_size=1, fmt=fmt,
+                        delay=delay, batch_size=1, fmt=fmt, target_ip=target,
                     )
 
                 elif choice == "2":
@@ -1102,11 +1266,13 @@ def run_interactive_menu() -> None:
                     num_ports = _prompt_int("Numar porturi", 40)
                     delay = _prompt_float("Delay intre pachete (s)", 7.0)
                     source = _prompt("IP sursa simulat", "192.168.11.7")
+                    target = _prompt("IP destinatie scanata (dst)", default_target_for_format(fmt))
                     _print_summary([
                         ("Scenariu", "Slow Scan"),
                         ("Format", fmt.upper()),
                         ("Host:Port", f"{host}:{port}"),
                         ("IP sursa", source),
+                        ("IP tinta", target),
                         ("Porturi", num_ports),
                         ("Delay", f"{delay}s"),
                     ])
@@ -1115,7 +1281,7 @@ def run_interactive_menu() -> None:
                     simulate_slow_scan(
                         sock=sock, host=host, port=port,
                         source_ip=source, num_ports=num_ports,
-                        delay=delay, batch_size=1, fmt=fmt,
+                        delay=delay, batch_size=1, fmt=fmt, target_ip=target,
                     )
 
                 elif choice == "3":
@@ -1124,11 +1290,13 @@ def run_interactive_menu() -> None:
                     num_ports = _prompt_int("Numar porturi", 10)
                     delay = _prompt_float("Delay intre pachete (s)", 0.1)
                     source = _prompt("IP sursa simulat", "192.168.11.7")
+                    target = _prompt("IP destinatie scanata (dst)", default_target_for_format(fmt))
                     _print_summary([
                         ("Scenariu", "Accept Scan"),
                         ("Format", fmt.upper()),
                         ("Host:Port", f"{host}:{port}"),
                         ("IP sursa", source),
+                        ("IP tinta", target),
                         ("Porturi", num_ports),
                         ("Delay", f"{delay}s"),
                     ])
@@ -1137,7 +1305,7 @@ def run_interactive_menu() -> None:
                     simulate_accept_scan(
                         sock=sock, host=host, port=port,
                         source_ip=source, num_ports=num_ports,
-                        delay=delay, batch_size=1, fmt=fmt,
+                        delay=delay, batch_size=1, fmt=fmt, target_ip=target,
                     )
 
                 elif choice == "4":
@@ -1190,6 +1358,54 @@ def run_interactive_menu() -> None:
                 elif choice == "6":
                     fmt = _ask_format()
                     host, port = _prompt_host_port()
+                    source = _prompt("IP sursa beacon", "192.168.11.7")
+                    target = _prompt("IP destinatie beacon (dst)", "10.0.1.50")
+                    target_port = _prompt_int("Port destinatie beacon", 443)
+                    count = _prompt_int("Numar calluri", 10)
+                    interval = _prompt_float("Interval mediu intre calluri (s)", 0.5)
+                    jitter = _prompt_float("Jitter (%)", 5.0)
+                    _print_summary([
+                        ("Scenariu", "Beaconing C2"),
+                        ("Format", fmt.upper()),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("Flow", f"{source} -> {target}:{target_port}"),
+                        ("Calluri", count),
+                        ("Interval", f"{interval}s"),
+                        ("Jitter", f"{jitter}%"),
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+                    simulate_beaconing_c2(
+                        sock=sock, host=host, port=port,
+                        source_ip=source, target_ip=target, target_port=target_port,
+                        interval=interval, jitter_pct=jitter, count=count, fmt=fmt,
+                    )
+
+                elif choice == "7":
+                    fmt = _ask_format()
+                    host, port = _prompt_host_port()
+                    source = _prompt("IP sursa baza", "192.168.11.7")
+                    intensity = _prompt_int("Intensitate (numar valuri)", 1)
+                    phase_pause = _prompt_float("Pauza intre faze (s)", 0.2)
+                    _print_summary([
+                        ("Scenariu", "Presentation Wave"),
+                        ("Format", fmt.upper()),
+                        ("Host:Port", f"{host}:{port}"),
+                        ("IP baza", source),
+                        ("Valuri", intensity),
+                        ("Pauza faze", f"{phase_pause}s"),
+                    ])
+                    input("  Apasa Enter pentru a incepe sau Ctrl+C pentru anulare...")
+                    print()
+                    simulate_presentation_wave(
+                        sock=sock, host=host, port=port,
+                        source_ip=source, fmt=fmt,
+                        intensity=intensity, phase_pause=phase_pause,
+                    )
+
+                elif choice == "8":
+                    fmt = _ask_format()
+                    host, port = _prompt_host_port()
                     count = _prompt_int("Numar log-uri", 10)
                     source = _prompt("IP sursa simulat", "192.168.11.7")
                     _print_summary([
@@ -1206,7 +1422,7 @@ def run_interactive_menu() -> None:
                         source_ip=source, count=count, fmt=fmt,
                     )
 
-                elif choice == "7":
+                elif choice == "9":
                     host, port = _prompt_host_port()
                     file_path = _prompt("Cale fisier")
                     delay = _prompt_float("Delay intre pachete (s)", 0.1)
@@ -1223,7 +1439,7 @@ def run_interactive_menu() -> None:
                         file_path=file_path, delay=delay, batch_size=1,
                     )
 
-                elif choice == "8":
+                elif choice == "10":
                     ips = _prompt_ip_source()
 
                     print()
@@ -1242,7 +1458,8 @@ def run_interactive_menu() -> None:
                         default_delay = 0.1 if scan_choice == "1" else (7.0 if scan_choice == "2" else 0.1)
                         num_ports = _prompt_int("Numar porturi", default_ports)
                         delay = _prompt_float("Delay intre pachete (s)", default_delay)
-                        extra_items = [("Porturi", num_ports), ("Delay", f"{delay}s")]
+                        target = _prompt("IP destinatie scanata (dst)", default_target_for_format(fmt))
+                        extra_items = [("IP tinta", target), ("Porturi", num_ports), ("Delay", f"{delay}s")]
                     else:
                         count = _prompt_int("Numar log-uri", 10)
                         extra_items = [("Log-uri", count)]
@@ -1266,19 +1483,19 @@ def run_interactive_menu() -> None:
                             simulate_fast_scan(
                                 sock=sock, host=host, port=port,
                                 source_ip=ip, num_ports=num_ports,
-                                delay=delay, batch_size=1, fmt=fmt,
+                                delay=delay, batch_size=1, fmt=fmt, target_ip=target,
                             )
                         elif scan_choice == "2":
                             simulate_slow_scan(
                                 sock=sock, host=host, port=port,
                                 source_ip=ip, num_ports=num_ports,
-                                delay=delay, batch_size=1, fmt=fmt,
+                                delay=delay, batch_size=1, fmt=fmt, target_ip=target,
                             )
                         elif scan_choice == "3":
                             simulate_accept_scan(
                                 sock=sock, host=host, port=port,
                                 source_ip=ip, num_ports=num_ports,
-                                delay=delay, batch_size=1, fmt=fmt,
+                                delay=delay, batch_size=1, fmt=fmt, target_ip=target,
                             )
                         else:
                             simulate_normal(
@@ -1353,11 +1570,12 @@ def main() -> None:
             "  python tester.py sample tester/sample2_gaia.log raw-gaia\n"
             "\n"
             "Generare dinamica (avansat):\n"
-            "  python tester.py fast-scan --format gaia --ports 20 --delay 0.1\n"
-            "  python tester.py slow-scan --format gaia --ports 40\n"
-            "  python tester.py accept-scan --format gaia --ports 10 --delay 0.1\n"
+            "  python tester.py fast-scan --format gaia --ports 20 --delay 0.1 --target 10.0.0.50\n"
+            "  python tester.py slow-scan --format gaia --ports 40 --target 10.0.0.50\n"
+            "  python tester.py accept-scan --format gaia --ports 10 --delay 0.1 --target 10.0.0.50\n"
             "  python tester.py lateral-movement --dests 10 --lateral-port 445\n"
             "  python tester.py distributed-scan --sources 8 --target 10.0.0.100\n"
+            "  python tester.py presentation-wave --format gaia_cef --intensity 2\n"
         ),
     )
 
@@ -1425,6 +1643,11 @@ def main() -> None:
         default=0.1,
         help="Delay intre batch-uri in secunde (default: 0.1)",
     )
+    fast_parser.add_argument(
+        "--target",
+        default=None,
+        help="IP destinatie scanata (dst). Implicit: 10.0.0.1 pentru GAIA, 192.168.1.1 pentru CEF/GAIA-CEF",
+    )
 
     # --- slow-scan (generare dinamica) ---
     slow_parser = subparsers.add_parser(
@@ -1444,6 +1667,11 @@ def main() -> None:
         default=7.0,
         help="Delay intre batch-uri in secunde (default: 7.0)",
     )
+    slow_parser.add_argument(
+        "--target",
+        default=None,
+        help="IP destinatie scanata (dst). Implicit: 10.0.0.1 pentru GAIA, 192.168.1.1 pentru CEF/GAIA-CEF",
+    )
 
     # --- accept-scan (generare dinamica) ---
     accept_parser = subparsers.add_parser(
@@ -1462,6 +1690,11 @@ def main() -> None:
         type=float,
         default=0.1,
         help="Delay intre batch-uri in secunde (default: 0.1)",
+    )
+    accept_parser.add_argument(
+        "--target",
+        default=None,
+        help="IP destinatie scanata (dst). Implicit: 10.0.0.1 pentru GAIA, 192.168.1.1 pentru CEF/GAIA-CEF",
     )
 
     # --- lateral-movement (generare dinamica) ---
@@ -1555,6 +1788,25 @@ def main() -> None:
         help="Jitter ca procent din interval (default: 5%%). Sub cv_threshold ar trebui sa declanseze alerta.",
     )
 
+    # --- presentation-wave (preset demo complet) ---
+    wave_parser = subparsers.add_parser(
+        "presentation-wave",
+        help="Preset demo rapid: trimite toate tipurile de alerte + valuri suplimentare",
+    )
+    add_common_scan_args(wave_parser)
+    wave_parser.add_argument(
+        "--intensity",
+        type=int,
+        default=1,
+        help="Numar de valuri complete (default: 1)",
+    )
+    wave_parser.add_argument(
+        "--phase-pause",
+        type=float,
+        default=0.2,
+        help="Pauza intre faze in secunde (default: 0.2)",
+    )
+
     # --- replay ---
     replay_parser = subparsers.add_parser(
         "replay",
@@ -1638,6 +1890,7 @@ def main() -> None:
                 delay=args.delay,
                 batch_size=args.batch,
                 fmt=args.format,
+                target_ip=args.target,
             )
         elif args.command == "slow-scan":
             simulate_slow_scan(
@@ -1649,6 +1902,7 @@ def main() -> None:
                 delay=args.delay,
                 batch_size=args.batch,
                 fmt=args.format,
+                target_ip=args.target,
             )
         elif args.command == "accept-scan":
             simulate_accept_scan(
@@ -1660,6 +1914,7 @@ def main() -> None:
                 delay=args.delay,
                 batch_size=args.batch,
                 fmt=args.format,
+                target_ip=args.target,
             )
         elif args.command == "lateral-movement":
             simulate_lateral_movement(
@@ -1695,6 +1950,16 @@ def main() -> None:
                 jitter_pct=args.jitter,
                 count=args.count,
                 fmt=args.format,
+            )
+        elif args.command == "presentation-wave":
+            simulate_presentation_wave(
+                sock=sock,
+                host=args.host,
+                port=args.port,
+                source_ip=args.source,
+                fmt=args.format,
+                intensity=args.intensity,
+                phase_pause=args.phase_pause,
             )
         elif args.command == "replay":
             replay_file(

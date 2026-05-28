@@ -189,6 +189,10 @@ body {
   border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  transition: height .18s ease;
+}
+.table-area.collapsed {
+  height: 40px;
 }
 .table-toolbar {
   display: flex;
@@ -233,6 +237,23 @@ body {
 .table-scroll {
   flex: 1;
   overflow-y: auto;
+}
+.table-area.collapsed .table-scroll {
+  display: none;
+}
+.table-toggle-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  padding: 4px 9px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+}
+.table-toggle-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
 }
 .table-area table {
   width: 100%;
@@ -1372,6 +1393,7 @@ body {
         </span>
       </span>
       <div style="display:flex;align-items:center;gap:8px">
+        <button id="table-toggle" class="table-toggle-btn" title="Ascunde/Arata tabel alerte">&#9660; Tabel</button>
         <label class="hide-dismissed-toggle" title="Ascunde alertele marcate Dismiss">
           <input type="checkbox" id="hide-dismissed" checked>
           <span>Ascunde Dismissed</span>
@@ -2655,6 +2677,16 @@ function initReplay() {
 function updateTable(alerts) {
   const tbody = document.getElementById("alert-tbody");
 
+  if (!Array.isArray(alerts) || alerts.length === 0) {
+    const total = Array.isArray(rawAlertData) ? rawAlertData.length : 0;
+    const msg = total > 0
+      ? "Nicio alerta vizibila pentru filtrele curente. Verifica filtrele active si optiunea \"Ascunde Dismissed\"."
+      : "Nu exista alerte in buffer.";
+    tbody.innerHTML = `<tr><td colspan="6" style="color:var(--text-dim);padding:12px">${msg}</td></tr>`;
+    updateTriageSummary(alerts || []);
+    return;
+  }
+
   // Clustering: grupam alertele consecutive cu acelasi (scan_type + source_ip).
   const clusters = [];
   let currentCluster = null;
@@ -2808,11 +2840,12 @@ async function refresh() {
     updateSparkline(alerts);
     updateHeatmap(alerts);
     processCriticalToasts(alerts);
+    const filteredAlerts = applyAlertFilters(alerts);
     const cnt = document.getElementById("alert-count");
-    if (cnt) cnt.textContent = Array.isArray(alerts) ? alerts.length : 0;
+    if (cnt) cnt.textContent = Array.isArray(filteredAlerts) ? filteredAlerts.length : 0;
 
     updateGraph(applyGraphFilters(graph));
-    updateTable(applyAlertFilters(alerts));
+    updateTable(filteredAlerts);
 
     const area = document.getElementById("graph-area");
     if (graph.nodes.length === 0 && !document.querySelector(".empty-state")) {
@@ -3229,6 +3262,35 @@ function initDensity() {
   });
 }
 
+// ==== Table collapse ====
+let tableCollapsed = false;
+
+function setTableCollapsed(collapsed) {
+  tableCollapsed = !!collapsed;
+  const area = document.getElementById("table-area");
+  const btn = document.getElementById("table-toggle");
+  if (!area || !btn) return;
+  area.classList.toggle("collapsed", tableCollapsed);
+  btn.innerHTML = tableCollapsed ? "&#9654; Tabel" : "&#9660; Tabel";
+  try { localStorage.setItem("ids-table-collapsed", String(tableCollapsed)); } catch {}
+  // Resize logic canvas dupa schimbare de layout (spatiu graf).
+  window.dispatchEvent(new Event("resize"));
+}
+
+function initTableCollapse() {
+  try {
+    const raw = localStorage.getItem("ids-table-collapsed");
+    tableCollapsed = raw === null ? true : raw === "true";
+  } catch {
+    tableCollapsed = true;
+  }
+  const btn = document.getElementById("table-toggle");
+  if (btn) {
+    btn.addEventListener("click", () => setTableCollapsed(!tableCollapsed));
+  }
+  setTableCollapsed(tableCollapsed);
+}
+
 // ==== Toasts Critical (Tier 1 #3) ====
 const SEEN_CRITICALS = new Set();
 let seenCriticalsInit = false;
@@ -3579,6 +3641,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("keydown", handleKeyboard);
 
   initDensity();
+  initTableCollapse();
   initTriage();
   initMitreClicks();
   initWorkspace();

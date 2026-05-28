@@ -314,6 +314,9 @@ struct BeaconHit {
     seen_at: Instant,
 }
 
+/// Cheie de corelare pentru detectiile Fast/Slow/Accept: perechea (sursa, destinatie).
+type ScanPairKey = (IpAddr, IpAddr);
+
 // =============================================================================
 // Detector - Motorul de detectie
 // =============================================================================
@@ -473,28 +476,28 @@ impl ParsedExceptions {
 }
 
 pub struct Detector {
-    /// Evidenta porturilor BLOCATE (drop) accesate per IP sursa.
+    /// Evidenta porturilor BLOCATE (drop) accesate per pereche (IP sursa, IP destinatie).
     /// Alimenteaza detectia Fast Scan si Slow Scan.
-    /// Key: IP-ul sursa | Value: lista de (port, timestamp)
-    port_hits: DashMap<IpAddr, Vec<PortHit>>,
+    /// Key: (IP sursa, IP destinatie) | Value: lista de (port, timestamp)
+    port_hits: DashMap<ScanPairKey, Vec<PortHit>>,
 
-    /// Evidenta porturilor ACCEPTATE (accept) accesate per IP sursa.
+    /// Evidenta porturilor ACCEPTATE (accept) accesate per pereche (IP sursa, IP destinatie).
     /// Alimenteaza detectia Accept Scan (porturi deschise).
     ///
     /// NOTA: Separat de port_hits intentionat — amestecarea drop-urilor cu
     /// accept-urile ar contamina detectia. Un Fast Scan poate aparea simultan
     /// cu un Accept Scan de la acelasi IP, si vrem sa le detectam independent.
-    accept_hits: DashMap<IpAddr, Vec<PortHit>>,
+    accept_hits: DashMap<ScanPairKey, Vec<PortHit>>,
 
-    /// Cooldown alerte Fast Scan per IP.
-    /// Previne re-alertarea pentru acelasi IP inainte de expirarea cooldown-ului.
-    fast_cooldowns: DashMap<IpAddr, Instant>,
+    /// Cooldown alerte Fast Scan per pereche (src, dst).
+    /// Previne re-alertarea pentru aceeasi pereche inainte de expirarea cooldown-ului.
+    fast_cooldowns: DashMap<ScanPairKey, Instant>,
 
-    /// Cooldown alerte Slow Scan per IP.
-    slow_cooldowns: DashMap<IpAddr, Instant>,
+    /// Cooldown alerte Slow Scan per pereche (src, dst).
+    slow_cooldowns: DashMap<ScanPairKey, Instant>,
 
-    /// Cooldown alerte Accept Scan per IP.
-    accept_cooldowns: DashMap<IpAddr, Instant>,
+    /// Cooldown alerte Accept Scan per pereche (src, dst).
+    accept_cooldowns: DashMap<ScanPairKey, Instant>,
 
     /// Ultimul moment cand fiecare IP a fost vazut (drop SAU accept).
     /// Folosit pentru LRU eviction: cand numarul de IP-uri urmarite ajunge
@@ -710,13 +713,13 @@ impl Detector {
 
             if let Some(old_ip) = lru_ip {
                 // Eliminam IP-ul LRU din TOATE structurile.
-                self.port_hits.remove(&old_ip);
-                self.accept_hits.remove(&old_ip);
+                self.port_hits.retain(|(src, _), _| *src != old_ip);
+                self.accept_hits.retain(|(src, _), _| *src != old_ip);
                 self.lateral_hits.remove(&old_ip);
                 self.last_seen.remove(&old_ip);
-                self.fast_cooldowns.remove(&old_ip);
-                self.slow_cooldowns.remove(&old_ip);
-                self.accept_cooldowns.remove(&old_ip);
+                self.fast_cooldowns.retain(|(src, _), _| *src != old_ip);
+                self.slow_cooldowns.retain(|(src, _), _| *src != old_ip);
+                self.accept_cooldowns.retain(|(src, _), _| *src != old_ip);
                 self.lateral_cooldowns.remove(&old_ip);
             }
         }
@@ -749,14 +752,15 @@ impl Detector {
         // `.drain(..N)` sterge primele N elemente (cele mai vechi, oldest-first).
         // Aplica aceeasi limita (max_hits_per_ip) la ambele map-uri.
         //
-        let hits_map: &DashMap<IpAddr, Vec<PortHit>> = if event.action == "drop" {
+        let hits_map: &DashMap<ScanPairKey, Vec<PortHit>> = if event.action == "drop" {
             &self.port_hits
         } else {
             // "accept" si orice alta actiune filtrata de parser → accept_hits.
             &self.accept_hits
         };
-        {
-            let mut hits = hits_map.entry(ip).or_default();
+        let scan_pair = event.dest_ip.map(|dst| (ip, dst));
+        if let Some(key) = scan_pair {
+            let mut hits = hits_map.entry(key).or_default();
             hits.push(PortHit {
                 port: event.dest_port,
                 seen_at: now,
@@ -779,43 +783,53 @@ impl Detector {
         // direct (hardcodat). Acum poate lucra cu orice DashMap de tip corect,
         // ceea ce ne permite sa o refolosim pentru Accept Scan (pasul 5) cu `accept_hits`.
         let fast_window = Duration::from_secs(cfg.fast_scan.time_window_secs);
-        if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, fast_window, now) {
-            if ports.len() >= fast_threshold && !self.in_cooldown(&self.fast_cooldowns, ip) {
-                self.fast_cooldowns.insert(ip, now);
-                alerts.push(Alert {
-                    scan_type: ScanType::Fast,
-                    source_ip: ip,
-                    dest_ip: event.dest_ip,
-                    unique_ports: ports,
-                    unique_dests: Vec::new(),
-                    unique_sources: Vec::new(),
-                    timestamp: Local::now(),
-                    beacon_port: None,
-                    mean_interval_secs: None,
-                    cv: None,
-                    event_count: None,
-                });
+        if let Some(key) = scan_pair {
+            if let Some(ports) = self.unique_ports_in_window(&self.port_hits, key, fast_window, now)
+            {
+                if ports.len() >= fast_threshold
+                    && !self.in_cooldown_tuple(&self.fast_cooldowns, &key)
+                {
+                    self.fast_cooldowns.insert(key, now);
+                    alerts.push(Alert {
+                        scan_type: ScanType::Fast,
+                        source_ip: ip,
+                        dest_ip: Some(key.1),
+                        unique_ports: ports,
+                        unique_dests: Vec::new(),
+                        unique_sources: Vec::new(),
+                        timestamp: Local::now(),
+                        beacon_port: None,
+                        mean_interval_secs: None,
+                        cv: None,
+                        event_count: None,
+                    });
+                }
             }
         }
 
         // --- 4. Verificam Slow Scan (pe port_hits — drop-uri) ---
         let slow_window = Duration::from_secs(cfg.slow_scan.time_window_mins * 60);
-        if let Some(ports) = self.unique_ports_in_window(&self.port_hits, ip, slow_window, now) {
-            if ports.len() >= slow_threshold && !self.in_cooldown(&self.slow_cooldowns, ip) {
-                self.slow_cooldowns.insert(ip, now);
-                alerts.push(Alert {
-                    scan_type: ScanType::Slow,
-                    source_ip: ip,
-                    dest_ip: event.dest_ip,
-                    unique_ports: ports,
-                    unique_dests: Vec::new(),
-                    unique_sources: Vec::new(),
-                    timestamp: Local::now(),
-                    beacon_port: None,
-                    mean_interval_secs: None,
-                    cv: None,
-                    event_count: None,
-                });
+        if let Some(key) = scan_pair {
+            if let Some(ports) = self.unique_ports_in_window(&self.port_hits, key, slow_window, now)
+            {
+                if ports.len() >= slow_threshold
+                    && !self.in_cooldown_tuple(&self.slow_cooldowns, &key)
+                {
+                    self.slow_cooldowns.insert(key, now);
+                    alerts.push(Alert {
+                        scan_type: ScanType::Slow,
+                        source_ip: ip,
+                        dest_ip: Some(key.1),
+                        unique_ports: ports,
+                        unique_dests: Vec::new(),
+                        unique_sources: Vec::new(),
+                        timestamp: Local::now(),
+                        beacon_port: None,
+                        mean_interval_secs: None,
+                        cv: None,
+                        event_count: None,
+                    });
+                }
             }
         }
 
@@ -831,23 +845,28 @@ impl Detector {
         // simultan o alerta Fast Scan (din drop-uri) SI o alerta Accept Scan (din
         // accept-uri) — si amandoua vor fi trimise la SIEM si email, independent.
         let accept_window = Duration::from_secs(cfg.accept_scan.time_window_secs);
-        if let Some(ports) = self.unique_ports_in_window(&self.accept_hits, ip, accept_window, now)
-        {
-            if ports.len() >= accept_threshold && !self.in_cooldown(&self.accept_cooldowns, ip) {
-                self.accept_cooldowns.insert(ip, now);
-                alerts.push(Alert {
-                    scan_type: ScanType::AcceptScan,
-                    source_ip: ip,
-                    dest_ip: event.dest_ip,
-                    unique_ports: ports,
-                    unique_dests: Vec::new(),
-                    unique_sources: Vec::new(),
-                    timestamp: Local::now(),
-                    beacon_port: None,
-                    mean_interval_secs: None,
-                    cv: None,
-                    event_count: None,
-                });
+        if let Some(key) = scan_pair {
+            if let Some(ports) =
+                self.unique_ports_in_window(&self.accept_hits, key, accept_window, now)
+            {
+                if ports.len() >= accept_threshold
+                    && !self.in_cooldown_tuple(&self.accept_cooldowns, &key)
+                {
+                    self.accept_cooldowns.insert(key, now);
+                    alerts.push(Alert {
+                        scan_type: ScanType::AcceptScan,
+                        source_ip: ip,
+                        dest_ip: Some(key.1),
+                        unique_ports: ports,
+                        unique_dests: Vec::new(),
+                        unique_sources: Vec::new(),
+                        timestamp: Local::now(),
+                        beacon_port: None,
+                        mean_interval_secs: None,
+                        cv: None,
+                        event_count: None,
+                    });
+                }
             }
         }
 
@@ -1044,7 +1063,10 @@ impl Detector {
                     }
 
                     // Inregistram timestamp-ul. Cap memorie per flow: min_events * 4.
-                    let cap = bc_cfg.min_events.saturating_mul(4).max(bc_cfg.min_events + 4);
+                    let cap = bc_cfg
+                        .min_events
+                        .saturating_mul(4)
+                        .max(bc_cfg.min_events + 4);
                     {
                         let mut hits = self.beacon_hits.entry(flow_key).or_default();
                         hits.push(BeaconHit { seen_at: now });
@@ -1056,8 +1078,7 @@ impl Detector {
 
                     // Calcul CV pe fereastra activa.
                     let window = Duration::from_secs(bc_cfg.time_window_secs);
-                    if let Some((mean_secs, cv, count)) =
-                        self.beacon_stats(&flow_key, window, now)
+                    if let Some((mean_secs, cv, count)) = self.beacon_stats(&flow_key, window, now)
                     {
                         let mean_ok = mean_secs >= bc_cfg.min_interval_secs as f64
                             && mean_secs <= bc_cfg.max_interval_secs as f64;
@@ -1148,13 +1169,13 @@ impl Detector {
     /// Inainte de #10, functia accesa `self.port_hits` direct (hardcodat).
     /// Problema: nu o puteam refolosi pentru Accept Scan (care foloseste `accept_hits`).
     ///
-    /// Solutia: injectam map-ul ca referinta `&DashMap<IpAddr, Vec<PortHit>>`.
+    /// Solutia: injectam map-ul ca referinta `&DashMap<ScanPairKey, Vec<PortHit>>`.
     /// Aceasta este "dependency injection" la nivel de functie — un principiu
     /// fundamental in design-ul de software testabil si extensibil.
     ///
     /// Apeluri:
-    ///   self.unique_ports_in_window(&self.port_hits, ip, window, now)   → Fast/Slow Scan
-    ///   self.unique_ports_in_window(&self.accept_hits, ip, window, now) → Accept Scan
+    ///   self.unique_ports_in_window(&self.port_hits, (src,dst), window, now)   → Fast/Slow
+    ///   self.unique_ports_in_window(&self.accept_hits, (src,dst), window, now) → Accept
     ///
     /// NOTA RUST - ITERATORS (zero-cost abstractions):
     /// .iter() → lazy, .filter() → lazy, .map() → lazy, .collect() → EXECUTA.
@@ -1165,12 +1186,12 @@ impl Detector {
     /// Tine lock-ul de citire cat timp exista — dropat automat la finalul scope-ului (RAII).
     fn unique_ports_in_window(
         &self,
-        hits_map: &DashMap<IpAddr, Vec<PortHit>>,
-        ip: IpAddr,
+        hits_map: &DashMap<ScanPairKey, Vec<PortHit>>,
+        key: ScanPairKey,
         window: Duration,
         now: Instant,
     ) -> Option<Vec<u16>> {
-        let entry = hits_map.get(&ip)?;
+        let entry = hits_map.get(&key)?;
         let hits = entry.value();
 
         let mut unique_ports: Vec<u16> = hits
@@ -1345,7 +1366,7 @@ impl Detector {
         //
         // NOTA RUST: Nu putem sterge din DashMap in timpul iteratiei (ar invalida
         // iteratorul). De aceea colectam cheile goale si le stergem separat.
-        let mut drop_empty: Vec<IpAddr> = Vec::new();
+        let mut drop_empty: Vec<ScanPairKey> = Vec::new();
         for mut entry in self.port_hits.iter_mut() {
             entry
                 .value_mut()
@@ -1362,7 +1383,7 @@ impl Detector {
         //
         // Aceeasi logica ca pentru port_hits, dar pe map-ul separat al Accept Scan.
         // Datele vechi de accept sunt la fel de costisitoare in memorie ca cele de drop.
-        let mut accept_empty: Vec<IpAddr> = Vec::new();
+        let mut accept_empty: Vec<ScanPairKey> = Vec::new();
         for mut entry in self.accept_hits.iter_mut() {
             entry
                 .value_mut()
@@ -1432,11 +1453,17 @@ impl Detector {
         //   - Fiecare are propriile sale shard-uri si lock-uri
         //   - Nu exista overlapping borrows sau deadlock potential
         //   - Garantat de Rust la compile-time prin tipurile Send + Sync ale DashMap
-        self.last_seen.retain(|ip, _| {
-            self.port_hits.contains_key(ip)
-                || self.accept_hits.contains_key(ip)
-                || self.lateral_hits.contains_key(ip)
-        });
+        let mut active_sources: HashSet<IpAddr> = HashSet::new();
+        for entry in self.port_hits.iter() {
+            active_sources.insert(entry.key().0);
+        }
+        for entry in self.accept_hits.iter() {
+            active_sources.insert(entry.key().0);
+        }
+        for entry in self.lateral_hits.iter() {
+            active_sources.insert(*entry.key());
+        }
+        self.last_seen.retain(|ip, _| active_sources.contains(ip));
 
         // --- Curatam cooldown-urile expirate (toate patru tipuri) ---
         let cooldown_dur = Duration::from_secs(self.config.load().alert_cooldown_secs);
@@ -1586,6 +1613,18 @@ mod tests {
         }
     }
 
+    /// Creeaza un eveniment drop cu destinatie explicita (pentru corelare src,dst).
+    fn make_event_with_dest(src_ip: &str, dest_ip: &str, port: u16) -> LogEvent {
+        LogEvent {
+            source_ip: src_ip.parse().unwrap(),
+            dest_ip: Some(dest_ip.parse().unwrap()),
+            dest_port: port,
+            protocol: "tcp".to_string(),
+            action: "drop".to_string(),
+            raw_log: String::new(),
+        }
+    }
+
     /// Creeaza un eveniment accept cu IP destinatie explicit (pentru Lateral Movement).
     fn make_lateral_event(src_ip: &str, dest_ip: &str, port: u16) -> LogEvent {
         LogEvent {
@@ -1657,6 +1696,37 @@ mod tests {
     }
 
     #[test]
+    fn test_fast_scan_isolated_per_src_dst_pair() {
+        let detector = Detector::new(test_config());
+
+        let events = [
+            make_event_with_dest("10.9.0.1", "10.0.0.10", 22),
+            make_event_with_dest("10.9.0.1", "10.0.0.10", 80),
+            make_event_with_dest("10.9.0.1", "10.0.0.20", 443),
+            make_event_with_dest("10.9.0.1", "10.0.0.20", 8080),
+        ];
+        for event in events {
+            let alerts = detector.process_event(&event);
+            assert!(
+                alerts
+                    .iter()
+                    .all(|a| !matches!(a.scan_type, ScanType::Fast)),
+                "Nu trebuie alerta Fast cand niciuna dintre destinatii nu atinge pragul"
+            );
+        }
+
+        // Destinatia 10.0.0.10 ajunge la 3 porturi unice -> alerta Fast doar pentru ea.
+        let alerts = detector.process_event(&make_event_with_dest("10.9.0.1", "10.0.0.10", 443));
+        assert!(
+            alerts.iter().any(|a| {
+                matches!(a.scan_type, ScanType::Fast)
+                    && a.dest_ip == Some("10.0.0.10".parse().unwrap())
+            }),
+            "Trebuie alerta Fast cand perechea (src,dst) atinge pragul"
+        );
+    }
+
+    #[test]
     fn test_cleanup_removes_old_entries() {
         let detector = Detector::new(test_config());
 
@@ -1686,7 +1756,8 @@ mod tests {
 
         // Vec-ul nu trebuie sa depaseasca limita de 5.
         let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
-        let entry = detector.port_hits.get(&ip).unwrap();
+        let dst: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let entry = detector.port_hits.get(&(ip, dst)).unwrap();
         assert!(
             entry.len() <= 5,
             "Vec-ul a depasit max_hits_per_ip: are {} intrari",
@@ -1830,15 +1901,16 @@ mod tests {
 
         // IP-ul 10.0.0.1 a fost cel mai vechi → trebuie evictat.
         let ip1: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let dst: std::net::IpAddr = "10.0.0.1".parse().unwrap();
         assert!(
-            !detector.port_hits.contains_key(&ip1),
+            !detector.port_hits.contains_key(&(ip1, dst)),
             "IP-ul cel mai vechi (10.0.0.1) trebuia evictat"
         );
 
         // IP-ul 10.0.0.3 (cel mai recent) trebuie sa fie prezent.
         let ip3: std::net::IpAddr = "10.0.0.3".parse().unwrap();
         assert!(
-            detector.port_hits.contains_key(&ip3),
+            detector.port_hits.contains_key(&(ip3, dst)),
             "IP-ul cel mai recent (10.0.0.3) trebuie sa fie prezent"
         );
     }
@@ -2507,7 +2579,11 @@ mod tests {
             "mean asteptat ~5s, primit {}",
             mean
         );
-        assert!(cv < 0.05, "CV asteptat <0.05 pentru intervale uniforme, primit {}", cv);
+        assert!(
+            cv < 0.05,
+            "CV asteptat <0.05 pentru intervale uniforme, primit {}",
+            cv
+        );
     }
 
     #[test]
@@ -2545,7 +2621,9 @@ mod tests {
         let detector = Detector::new(beaconing_config());
         let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
         assert!(
-            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            alerts
+                .iter()
+                .all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
             "1 eveniment singular nu trebuie sa declanseze Beaconing"
         );
     }
@@ -2572,7 +2650,11 @@ mod tests {
         let a = beacon[0];
         assert_eq!(a.beacon_port, Some(port));
         assert!(a.event_count.unwrap() >= 5);
-        assert!(a.cv.unwrap() < 0.30, "CV ar trebui sub prag, primit {:?}", a.cv);
+        assert!(
+            a.cv.unwrap() < 0.30,
+            "CV ar trebui sub prag, primit {:?}",
+            a.cv
+        );
     }
 
     #[test]
@@ -2587,7 +2669,9 @@ mod tests {
         inject_beacon_history(&detector, key, 5, 5, 0.0);
         let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
         assert!(
-            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            alerts
+                .iter()
+                .all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
             "Beaconing dezactivat in config nu trebuie sa emita alerte"
         );
     }
@@ -2605,7 +2689,9 @@ mod tests {
         inject_beacon_history(&detector, key, 6, 5, 0.0);
         let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
         assert!(
-            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            alerts
+                .iter()
+                .all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
             "Mean > max_interval_secs nu trebuie sa declanseze Beaconing"
         );
     }
@@ -2631,7 +2717,9 @@ mod tests {
 
         let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
         assert!(
-            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            alerts
+                .iter()
+                .all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
             "CV mare nu trebuie sa declanseze Beaconing"
         );
     }
@@ -2652,7 +2740,9 @@ mod tests {
         inject_beacon_history(&detector, key_ntp, 6, 5, 0.0);
         let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 123));
         assert!(
-            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            alerts
+                .iter()
+                .all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
             "Port in ignore_beaconing_ports nu trebuie sa declanseze Beaconing"
         );
     }
@@ -2671,7 +2761,9 @@ mod tests {
 
         let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "10.0.1.50", 443));
         assert!(
-            alerts.iter().all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
+            alerts
+                .iter()
+                .all(|a| !matches!(a.scan_type, ScanType::Beaconing)),
             "Sursa autorizata nu trebuie sa declanseze Beaconing"
         );
     }

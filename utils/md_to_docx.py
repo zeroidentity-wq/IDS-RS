@@ -13,6 +13,62 @@ import sys
 import os
 from datetime import datetime
 
+def _bootstrap_local_docx_deps() -> None:
+    """
+    Permite rularea scriptului fara instalare globala.
+
+    Repo-ul include wheel-uri in utils/docx_packages pentru:
+      - python-docx (modul `docx`)
+      - typing-extensions
+
+    Le adaugam in sys.path daca importurile lipsesc.
+    """
+    try:
+        import docx  # noqa: F401
+        import typing_extensions  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+
+    import tempfile
+    import zipfile
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    wheels_dir = os.path.join(here, "docx_packages")
+    wheel_names = [
+        "python_docx-1.2.0-py3-none-any.whl",
+        "typing_extensions-4.15.0-py3-none-any.whl",
+    ]
+
+    target_dir = os.path.join(tempfile.gettempdir(), "idsrs_docx_deps")
+    os.makedirs(target_dir, exist_ok=True)
+
+    # Nu putem importa python-docx direct din wheel zip:
+    # foloseste template-uri (default.docx) ca fisiere pe disk.
+    # De aceea extragem wheel-urile in /tmp si punem acel folder in sys.path.
+    for name in wheel_names:
+        wheel_path = os.path.join(wheels_dir, name)
+        if not os.path.exists(wheel_path):
+            continue
+
+        marker = os.path.join(target_dir, f".extracted_{name}")
+        if os.path.exists(marker):
+            continue
+
+        with zipfile.ZipFile(wheel_path, "r") as zf:
+            zf.extractall(target_dir)
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("ok\n")
+
+    sys.path.insert(0, target_dir)
+
+    # Re-try imports to fail early with a clear error if something is still missing.
+    import docx  # noqa: F401
+    import typing_extensions  # noqa: F401
+
+
+_bootstrap_local_docx_deps()
+
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor, Emu
 from docx.enum.text import WD_ALIGN_PARAGRAPH
