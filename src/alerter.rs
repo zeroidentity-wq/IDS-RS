@@ -147,6 +147,8 @@ struct HtmlAlertBody<'a> {
     footer: &'a str,
     count_label: &'a str,
     list_label: &'a str,
+    cmd_src_ip: &'a str,
+    cmd_dst_ip: &'a str,
 }
 
 /// Construieste body-ul HTML al email-ului de alerta.
@@ -268,17 +270,17 @@ fn build_html_body(data: &HtmlAlertBody<'_>) -> String {
     <div class="sec-title">Comenzi rapide &mdash;</div>
     <div class="cmd-box">
       <span class="cmd-comment"># Conexiuni active de la/catre acest IP:</span>
-      <span class="cmd-line">ss -tnp | grep __SRC_IP__</span>
+      <span class="cmd-line">ss -tnp | grep __CMD_SRC_IP__</span>
       <span class="cmd-comment"># Cautare in log-urile de securitate si sistem:</span>
-      <span class="cmd-line">grep __SRC_IP__ /var/log/secure /var/log/messages 2>/dev/null</span>
+      <span class="cmd-line">grep __CMD_SRC_IP__ /var/log/secure /var/log/messages 2>/dev/null</span>
       <span class="cmd-comment"># Cautare in journal (ultimele 200 linii):</span>
-      <span class="cmd-line">journalctl -n 200 --no-pager | grep __SRC_IP__</span>
+      <span class="cmd-line">journalctl -n 200 --no-pager | grep -E '__CMD_SRC_IP__|__CMD_DST_IP__'</span>
       <span class="cmd-comment"># Captura live trafic de la acest IP (primele 30 pachete):</span>
-      <span class="cmd-line">tcpdump -i any host __SRC_IP__ -n -c 30</span>
+      <span class="cmd-line">tcpdump -i any host __CMD_SRC_IP__ -n -c 30</span>
       <span class="cmd-comment"># Blocare imediata cu firewalld (persistenta):</span>
-      <span class="cmd-line">firewall-cmd --add-rich-rule='rule family="ipv4" source address="__SRC_IP__" drop' --permanent &amp;&amp; firewall-cmd --reload</span>
+      <span class="cmd-line">firewall-cmd --add-rich-rule='rule family="ipv4" source address="__CMD_SRC_IP__" drop' --permanent &amp;&amp; firewall-cmd --reload</span>
       <span class="cmd-comment"># Verificare daca IP-ul este activ in retea (ARP):</span>
-      <span class="cmd-line">ip neigh show | grep __SRC_IP__</span>
+      <span class="cmd-line">ip neigh show | grep __CMD_SRC_IP__</span>
     </div>
   </div>
 
@@ -323,6 +325,8 @@ fn build_html_body(data: &HtmlAlertBody<'_>) -> String {
         .replace("__PORTS__", data.items)
         .replace("__COUNT_LABEL__", data.count_label)
         .replace("__LIST_LABEL__", data.list_label)
+        .replace("__CMD_SRC_IP__", data.cmd_src_ip)
+        .replace("__CMD_DST_IP__", data.cmd_dst_ip)
         .replace("__FOOTER__", &footer_safe)
 }
 
@@ -604,8 +608,40 @@ impl Alerter {
             ),
         };
 
-        // `msg` ramane scurt pentru toate tipurile; detaliile sunt in campuri dedicate.
-        let msg_text = scan_label.clone();
+        // Includem listele complete in `msg` ca fallback daca operatorul nu are
+        // coloanele cs6 afisate in Active Channel.
+        let msg_text = match alert.scan_type {
+            ScanType::DistributedScan => {
+                let sources = sorted_ip_list_with_primary(&alert.unique_sources, alert.source_ip);
+                if sources.is_empty() {
+                    scan_label.clone()
+                } else {
+                    format!("{} | attacking_sources: {}", scan_label, sources)
+                }
+            }
+            ScanType::LateralMovement => {
+                let hosts = sorted_ip_list(&alert.unique_dests);
+                if hosts.is_empty() {
+                    scan_label.clone()
+                } else {
+                    format!("{} | contacted_hosts: {}", scan_label, hosts)
+                }
+            }
+            ScanType::Fast | ScanType::Slow | ScanType::AcceptScan => {
+                let ports = alert
+                    .unique_ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if ports.is_empty() {
+                    scan_label.clone()
+                } else {
+                    format!("{} | scanned_ports: {}", scan_label, ports)
+                }
+            }
+            ScanType::Beaconing => scan_label.clone(),
+        };
 
         // Sanitizare anti-injection pentru event_name (camp header CEF, separator '|').
         let event_name_safe = sanitize_cef_header(event_name);
@@ -669,9 +705,23 @@ impl Alerter {
                         sanitize_cef_extension(&sample)
                     )
                 };
+                let full_list = alert
+                    .unique_ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let full_list_field = if full_list.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " cs6Label=ScannedPortList cs6={}",
+                        sanitize_cef_extension(&full_list)
+                    )
+                };
                 format!(
-                    "{} cs5Label=DetectionWindowSecs cs5={}",
-                    sample_field, det.fast_scan.time_window_secs
+                    "{} cs5Label=DetectionWindowSecs cs5={}{}",
+                    sample_field, det.fast_scan.time_window_secs, full_list_field
                 )
             }
             ScanType::Slow => {
@@ -690,9 +740,23 @@ impl Alerter {
                         sanitize_cef_extension(&sample)
                     )
                 };
+                let full_list = alert
+                    .unique_ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let full_list_field = if full_list.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " cs6Label=ScannedPortList cs6={}",
+                        sanitize_cef_extension(&full_list)
+                    )
+                };
                 format!(
-                    "{} cs5Label=DetectionWindowMins cs5={}",
-                    sample_field, det.slow_scan.time_window_mins
+                    "{} cs5Label=DetectionWindowMins cs5={}{}",
+                    sample_field, det.slow_scan.time_window_mins, full_list_field
                 )
             }
             ScanType::AcceptScan => {
@@ -711,9 +775,23 @@ impl Alerter {
                         sanitize_cef_extension(&sample)
                     )
                 };
+                let full_list = alert
+                    .unique_ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let full_list_field = if full_list.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " cs6Label=ScannedPortList cs6={}",
+                        sanitize_cef_extension(&full_list)
+                    )
+                };
                 format!(
-                    "{} cs5Label=DetectionWindowSecs cs5={}",
-                    sample_field, det.accept_scan.time_window_secs
+                    "{} cs5Label=DetectionWindowSecs cs5={}{}",
+                    sample_field, det.accept_scan.time_window_secs, full_list_field
                 )
             }
             ScanType::LateralMovement => {
@@ -730,9 +808,18 @@ impl Alerter {
                         sanitize_cef_extension(&sample)
                     )
                 };
+                let full_list = sorted_ip_list(&alert.unique_dests);
+                let full_list_field = if full_list.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " cs6Label=ContactedHostList cs6={}",
+                        sanitize_cef_extension(&full_list)
+                    )
+                };
                 format!(
-                    "{} cs5Label=DetectionWindowSecs cs5={}",
-                    sample_field, det.lateral_movement.time_window_secs
+                    "{} cs5Label=DetectionWindowSecs cs5={}{}",
+                    sample_field, det.lateral_movement.time_window_secs, full_list_field
                 )
             }
             ScanType::DistributedScan => {
@@ -744,18 +831,17 @@ impl Alerter {
                     None => String::new(),
                 };
                 let sources = sorted_ip_list_with_primary(&alert.unique_sources, alert.source_ip);
-                let sample = sources.split(',').take(10).collect::<Vec<_>>().join(",");
-                let sample_field = if sample.is_empty() {
+                let source_list_field = if sources.is_empty() {
                     String::new()
                 } else {
                     format!(
-                        " cs6Label=AttackingSourceSample cs6={}",
-                        sanitize_cef_extension(&sample)
+                        " cs6Label=AttackingSourceList cs6={}",
+                        sanitize_cef_extension(&sources)
                     )
                 };
                 format!(
                     "{} cs5Label=DetectionWindowSecs cs5={}{}",
-                    target_field, det.distributed_scan.time_window_secs, sample_field
+                    target_field, det.distributed_scan.time_window_secs, source_list_field
                 )
             }
             ScanType::Beaconing => {
@@ -994,6 +1080,8 @@ impl Alerter {
                 dst_location.clone(),
             ),
         };
+        let cmd_src_ip = source_ip_display;
+        let cmd_dst_ip = dest_ip_display;
         let timestamp = timestamp.to_string();
 
         let html_body = build_html_body(&HtmlAlertBody {
@@ -1011,6 +1099,8 @@ impl Alerter {
             footer: &cfg.email_footer,
             count_label,
             list_label,
+            cmd_src_ip: &cmd_src_ip,
+            cmd_dst_ip: &cmd_dst_ip,
         });
 
         // Trimitem un email catre fiecare destinatar.
