@@ -22,14 +22,17 @@ use crate::config::WebDashboardConfig;
 use crate::detector::{Alert, ScanType};
 use crate::display;
 use axum::{
-    extract::{Query, State},
-    response::Html,
+    extract::{Query, Request, State},
+    http::{header, HeaderValue, StatusCode},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Buffer circular de alerte partajat intre detection loop si web server.
 ///
@@ -42,6 +45,14 @@ pub type AlertBuffer = Arc<Mutex<VecDeque<Alert>>>;
 #[derive(Clone)]
 struct AppState {
     alerts: AlertBuffer,
+    auth_token: Arc<str>,
+    request_slots: Arc<tokio::sync::Semaphore>,
+    snapshot_cache: Arc<Mutex<SnapshotCache>>,
+}
+
+struct SnapshotCache {
+    refreshed_at: Instant,
+    alerts: Arc<Vec<Alert>>,
 }
 
 // =============================================================================
@@ -53,14 +64,27 @@ pub async fn start_web_server(
     config: &WebDashboardConfig,
     alerts: AlertBuffer,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    let state = AppState { alerts };
+    let state = AppState {
+        alerts,
+        auth_token: Arc::from(config.auth_token.as_str()),
+        request_slots: Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_requests)),
+        snapshot_cache: Arc::new(Mutex::new(SnapshotCache {
+            refreshed_at: Instant::now() - Duration::from_secs(1),
+            alerts: Arc::new(Vec::new()),
+        })),
+    };
 
-    let app = Router::new()
-        .route("/", get(get_dashboard))
-        .route("/static/d3.min.js", get(get_d3_js))
+    let api = Router::new()
         .route("/api/alerts", get(get_alerts))
         .route("/api/graph", get(get_graph))
         .route("/api/ip/{ip}", get(get_ip_dossier))
+        .route_layer(middleware::from_fn_with_state(state.clone(), api_guard));
+    let app = Router::new()
+        .route("/", get(get_dashboard))
+        .route("/health", get(get_health))
+        .route("/static/d3.min.js", get(get_d3_js))
+        .merge(api)
+        .layer(middleware::from_fn(security_headers))
         .with_state(state);
 
     let bind_addr = format!("{}:{}", config.bind, config.port);
@@ -77,6 +101,66 @@ pub async fn start_web_server(
     });
 
     Ok(handle)
+}
+
+async fn get_health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        difference |= left.get(index).copied().unwrap_or(0) as usize
+            ^ right.get(index).copied().unwrap_or(0) as usize;
+    }
+    difference == 0
+}
+
+async fn api_guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if !state.auth_token.is_empty() {
+        let supplied = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .unwrap_or_default();
+        if !constant_time_eq(supplied.as_bytes(), state.auth_token.as_bytes()) {
+            return (StatusCode::UNAUTHORIZED, "API token invalid sau lipsa").into_response();
+        }
+    }
+
+    let Ok(permit) = Arc::clone(&state.request_slots).try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Prea multe cereri simultane",
+        )
+            .into_response();
+    };
+    let response = next.run(request).await;
+    drop(permit);
+    response
+}
+
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'",
+        ),
+    );
+    response
 }
 
 // =============================================================================
@@ -123,9 +207,25 @@ struct AlertQuery {
 ///
 /// Pretul snapshot-ului: o clona a VecDeque (~1000 Alert-uri default ~ cateva KB),
 /// platit o singura data per request. Lock-ul este tinut microsecunde, nu milisecunde.
-fn snapshot_alerts(buffer: &Mutex<VecDeque<Alert>>) -> Vec<Alert> {
-    let guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
-    guard.iter().cloned().collect()
+fn snapshot_alerts(state: &AppState) -> Arc<Vec<Alert>> {
+    let mut cache = state
+        .snapshot_cache
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if cache.refreshed_at.elapsed() <= Duration::from_millis(250) {
+        return Arc::clone(&cache.alerts);
+    }
+
+    let alerts = state
+        .alerts
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    cache.refreshed_at = Instant::now();
+    cache.alerts = Arc::new(alerts);
+    Arc::clone(&cache.alerts)
 }
 
 /// Verifica daca o alerta implica un IP dat (sursa, destinatie, lateral dest, distributed source).
@@ -152,7 +252,7 @@ async fn get_alerts(
     Query(params): Query<AlertQuery>,
 ) -> Json<serde_json::Value> {
     // Snapshot rapid sub lock; eliberam lock-ul inainte de filter/serializare.
-    let alerts_snapshot = snapshot_alerts(&state.alerts);
+    let alerts_snapshot = snapshot_alerts(&state);
 
     let filter_ip: Option<IpAddr> = params.ip.as_deref().and_then(|s| s.parse::<IpAddr>().ok());
 
@@ -225,7 +325,7 @@ async fn get_graph(
     Query(params): Query<AlertQuery>,
 ) -> Json<GraphResponse> {
     // Snapshot rapid sub lock; eliberam lock-ul inainte de constructia grafului.
-    let buffer = snapshot_alerts(&state.alerts);
+    let buffer = snapshot_alerts(&state);
     let filter_ip: Option<IpAddr> = params.ip.as_deref().and_then(|s| s.parse::<IpAddr>().ok());
 
     let mut attackers: HashMap<IpAddr, NodeAccum> = HashMap::new();
@@ -399,7 +499,7 @@ async fn get_ip_dossier(
     };
 
     // Snapshot rapid sub lock; eliberam lock-ul inainte de constructia dosarului.
-    let buffer = snapshot_alerts(&state.alerts);
+    let buffer = snapshot_alerts(&state);
 
     let mut as_attacker: usize = 0;
     let mut as_target: usize = 0;
@@ -515,3 +615,15 @@ async fn get_ip_dossier(
 ///
 /// D3.js v7 e servit separat ca asset static la `/static/d3.min.js` via `get_d3_js`.
 const DASHBOARD_HTML: &str = include_str!("../static/dashboard.html");
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn token_comparison_handles_equal_and_different_lengths() {
+        assert!(constant_time_eq(b"0123456789abcdef", b"0123456789abcdef"));
+        assert!(!constant_time_eq(b"0123456789abcdef", b"0123456789abcdeg"));
+        assert!(!constant_time_eq(b"short", b"longer"));
+    }
+}

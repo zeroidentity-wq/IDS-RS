@@ -19,6 +19,17 @@ parser = "gaia_cef"
 # udp_burst_size = capacitate burst (permite varfuri scurte legitime).
 udp_rate_limit = 10000
 udp_burst_size = 20000
+# Per-sender throttling prevents one trusted firewall from consuming the global budget.
+udp_per_sender_rate_limit = 2500
+udp_per_sender_burst_size = 5000
+# Replace/add the real firewall or syslog relay IPs before deployment.
+# A non-loopback listener refuses to start when this list is empty.
+trusted_senders = ["127.0.0.1"]
+# Defensive framing limits for datagrams containing multiple newline-delimited logs.
+max_lines_per_datagram = 256
+max_line_length = 16384
+# Per-event terminal output is synchronous; enable only for low-volume diagnostics.
+log_events = false
 
 # Mapping static IP → hostname (optional).
 # Folosit pentru afisare in alerte CLI, email si SIEM (shost=/dhost= in CEF).
@@ -60,6 +71,9 @@ max_hits_per_ip = 10000
 # ar putea umple RAM-ul serverului. Cand se atinge limita, IP-ul cel mai vechi
 # (LRU — Least Recently Used) este eliminat pentru a face loc celui nou.
 max_tracked_ips = 100000
+# Global and per-source limits for (source,destination) scan-flow keys.
+max_tracked_flows = 200000
+max_flows_per_source = 4096
 
 # IP-uri si subretele excluse din detectie (trafic legitim cunoscut).
 # Accepta IP-uri individuale si CIDR. Aceste IP-uri nu genereaza alerte.
@@ -206,6 +220,13 @@ max_threshold_ratio = 3.0
 # Configurare alerte
 # -----------------------------------------------------------------------------
 
+# Independent delivery workers use these retry and durable-spool settings.
+[alerting]
+queue_capacity = 1024
+retry_initial_secs = 1
+retry_max_secs = 60
+spool_directory = "spool"
+
 [alerting.siem]
 # Trimite alerte catre SIEM (ArcSight) prin UDP syslog.
 enabled = true
@@ -258,3 +279,5 @@ port = 8080
 bind = "127.0.0.1"
 # Numarul maxim de alerte pastrate in buffer-ul circular.
 max_alerts = 1000
+auth_token = ""
+max_concurrent_requests = 32

@@ -2,6 +2,7 @@
 name = "ids-rs"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "Intrusion Detection System - Network Scan Detector"
 
 # ============================================================================
@@ -44,7 +45,7 @@ dashmap = "6"
 
 # Client SMTP async pentru trimiterea email-urilor de alerta.
 # "tokio1-native-tls" = transport async cu TLS prin libraria nativa a OS-ului.
-lettre = { version = "0.11", features = ["tokio1-native-tls"] }
+lettre = { version = "0.11.22", features = ["tokio1-native-tls"] }
 
 # Lucru cu date si ore - Local::now(), formatare timestamps.
 # "serde" = permite serializarea DateTime in JSON (necesar pt web dashboard).

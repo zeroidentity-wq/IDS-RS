@@ -40,7 +40,7 @@
 //
 // =============================================================================
 
-use super::{LogEvent, LogParser};
+use super::{split_cef_fields, LogEvent, LogParser};
 use std::net::IpAddr;
 
 /// Parser pentru blob-uri LEA de la Checkpoint Gaia (via ArcSight).
@@ -53,6 +53,12 @@ use std::net::IpAddr;
 /// Ordinea de parsare: CEF Name → CEF extensie (rawEvent/cs6) → raw LEA direct.
 /// Prima metoda care gaseste action="Drop"/"Accept" castiga.
 pub struct GaiaCefParser;
+
+impl Default for GaiaCefParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl GaiaCefParser {
     pub fn new() -> Self {
@@ -117,9 +123,9 @@ impl GaiaCefParser {
     /// 1. Daca contine "CEF:" → extrage din Name field (index 5)
     /// 2. Daca contine "CEF:" dar Name nu are action → cauta rawEvent=/cs6= in extensii
     /// 3. Daca NU contine "CEF:" → trateaza toata linia ca blob LEA raw
-    fn find_lea_blob<'a>(line: &'a str) -> Option<LeaSource<'a>> {
+    fn find_lea_blob(line: &str) -> Option<LeaSource<'_>> {
         if let Some(cef_start) = line.find("CEF:") {
-            let parts: Vec<&str> = line[cef_start..].splitn(8, '|').collect();
+            let parts = split_cef_fields(&line[cef_start..])?;
 
             // Strategia 1: blob LEA in Name field (index 5)
             if parts.len() >= 6 {

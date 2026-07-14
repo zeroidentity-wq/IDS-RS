@@ -48,6 +48,27 @@ pub mod gaia_cef;
 
 use std::net::IpAddr;
 
+/// Split the eight CEF fields while respecting escaped header delimiters
+/// (`\|`). `str::splitn('|')` corrupts valid CEF headers containing a pipe.
+pub(crate) fn split_cef_fields(input: &str) -> Option<Vec<&str>> {
+    let mut fields = Vec::with_capacity(8);
+    let mut start = 0;
+    let mut escaped = false;
+    for (index, character) in input.char_indices() {
+        if character == '|' && !escaped && fields.len() < 7 {
+            fields.push(&input[start..index]);
+            start = index + character.len_utf8();
+        }
+        if character == '\\' {
+            escaped = !escaped;
+        } else {
+            escaped = false;
+        }
+    }
+    fields.push(&input[start..]);
+    (fields.len() == 8).then_some(fields)
+}
+
 /// Eveniment de log parsabil - structura comuna pentru toate formatele.
 ///
 /// NOTA RUST: #[derive(Debug, Clone)]

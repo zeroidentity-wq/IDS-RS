@@ -1475,6 +1475,22 @@ const SCAN_COLORS = {
   "Beaconing C2":     "#ff6b6b",
 };
 
+async function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  const token = sessionStorage.getItem("ids-api-token");
+  if (token) headers.set("Authorization", "Bearer " + token);
+  let response = await fetch(url, { ...options, headers });
+  if (response.status === 401) {
+    const supplied = window.prompt("IDS-RS API token:");
+    if (supplied) {
+      sessionStorage.setItem("ids-api-token", supplied);
+      headers.set("Authorization", "Bearer " + supplied);
+      response = await fetch(url, { ...options, headers });
+    }
+  }
+  return response;
+}
+
 function scanColor(type) {
   return SCAN_COLORS[type] || "#8b949e";
 }
@@ -2285,7 +2301,7 @@ async function openDossier(ip) {
   panel.classList.add("open");
 
   try {
-    const res = await fetch("/api/ip/" + encodeURIComponent(ip));
+    const res = await apiFetch("/api/ip/" + encodeURIComponent(ip));
     const d = await res.json();
     if (d.error) { body.innerHTML = `<div style="color:var(--red)">${d.error}</div>`; return; }
 
@@ -2821,8 +2837,8 @@ async function refresh() {
   try {
     const ipParam = activeSearchIp ? "?ip=" + encodeURIComponent(activeSearchIp) : "";
     const [graphRes, alertsRes] = await Promise.all([
-      fetch("/api/graph" + ipParam),
-      fetch("/api/alerts" + ipParam),
+      apiFetch("/api/graph" + ipParam),
+      apiFetch("/api/alerts" + ipParam),
     ]);
     const graph = await graphRes.json();
     const alerts = await alertsRes.json();

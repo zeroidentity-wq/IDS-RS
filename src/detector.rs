@@ -137,7 +137,7 @@ impl WhitelistEntry {
 ///       Move { x: i32, y: i32 },    // cu struct inline
 ///       Write(String),              // cu un singur camp
 ///   }
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ScanType {
     // Nota: LateralMovement adaugat ca varianta noua (#22).
     // Match-urile existente in alerter.rs si display.rs sunt exhaustive —
@@ -230,7 +230,7 @@ impl std::fmt::Display for ScanType {
 /// NOTA RUST: Aceasta structura este OWNED - cand este creata, toate
 /// datele sunt copiate/mutate in ea. Poate fi transmisa liber intre
 /// functii si thread-uri fara grija ca datele originale se schimba.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Alert {
     pub scan_type: ScanType,
     /// IP-ul sursa al alertei.
@@ -555,6 +555,91 @@ pub struct Detector {
 }
 
 impl Detector {
+    fn remove_scan_flow(&self, is_drop: bool, key: ScanPairKey) {
+        if is_drop {
+            self.port_hits.remove(&key);
+            self.fast_cooldowns.remove(&key);
+            self.slow_cooldowns.remove(&key);
+        } else {
+            self.accept_hits.remove(&key);
+            self.accept_cooldowns.remove(&key);
+        }
+    }
+
+    fn oldest_scan_flow(&self, source: Option<IpAddr>) -> Option<(bool, ScanPairKey, Instant)> {
+        let drop_candidate = self
+            .port_hits
+            .iter()
+            .filter(|entry| source.is_none_or(|src| entry.key().0 == src))
+            .filter_map(|entry| {
+                entry
+                    .value()
+                    .last()
+                    .map(|hit| (true, *entry.key(), hit.seen_at))
+            })
+            .min_by_key(|(_, _, seen_at)| *seen_at);
+        let accept_candidate = self
+            .accept_hits
+            .iter()
+            .filter(|entry| source.is_none_or(|src| entry.key().0 == src))
+            .filter_map(|entry| {
+                entry
+                    .value()
+                    .last()
+                    .map(|hit| (false, *entry.key(), hit.seen_at))
+            })
+            .min_by_key(|(_, _, seen_at)| *seen_at);
+
+        match (drop_candidate, accept_candidate) {
+            (Some(a), Some(b)) => Some(if a.2 <= b.2 { a } else { b }),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    fn scan_flow_count_for_source(&self, source: IpAddr) -> usize {
+        self.port_hits
+            .iter()
+            .filter(|entry| entry.key().0 == source)
+            .count()
+            + self
+                .accept_hits
+                .iter()
+                .filter(|entry| entry.key().0 == source)
+                .count()
+    }
+
+    fn ensure_scan_flow_capacity(
+        &self,
+        source: IpAddr,
+        key: ScanPairKey,
+        is_drop: bool,
+        cfg: &DetectionConfig,
+    ) {
+        let target_exists = if is_drop {
+            self.port_hits.contains_key(&key)
+        } else {
+            self.accept_hits.contains_key(&key)
+        };
+        if target_exists {
+            return;
+        }
+
+        while self.scan_flow_count_for_source(source) >= cfg.max_flows_per_source {
+            let Some((drop_map, old_key, _)) = self.oldest_scan_flow(Some(source)) else {
+                break;
+            };
+            self.remove_scan_flow(drop_map, old_key);
+        }
+        while self.port_hits.len() + self.accept_hits.len() >= cfg.max_tracked_flows {
+            let Some((drop_map, old_key, _)) = self.oldest_scan_flow(None) else {
+                break;
+            };
+            self.remove_scan_flow(drop_map, old_key);
+        }
+    }
+
     /// Creeaza un nou Detector cu configurarea specificata.
     ///
     /// NOTA RUST: `DashMap::new()` creeaza un map gol, pre-alocat cu
@@ -721,6 +806,12 @@ impl Detector {
                 self.slow_cooldowns.retain(|(src, _), _| *src != old_ip);
                 self.accept_cooldowns.retain(|(src, _), _| *src != old_ip);
                 self.lateral_cooldowns.remove(&old_ip);
+                for mut entry in self.distributed_hits.iter_mut() {
+                    entry.value_mut().retain(|hit| hit.source_ip != old_ip);
+                }
+                self.beacon_hits.retain(|(src, _, _), _| *src != old_ip);
+                self.beacon_cooldowns
+                    .retain(|(src, _, _), _| *src != old_ip);
             }
         }
 
@@ -760,6 +851,7 @@ impl Detector {
         };
         let scan_pair = event.dest_ip.map(|dst| (ip, dst));
         if let Some(key) = scan_pair {
+            self.ensure_scan_flow_capacity(ip, key, event.action == "drop", &cfg);
             let mut hits = hits_map.entry(key).or_default();
             hits.push(PortHit {
                 port: event.dest_port,
@@ -1505,6 +1597,8 @@ mod tests {
             alert_cooldown_secs: 5,
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
+            max_tracked_flows: 20_000,
+            max_flows_per_source: 1_000,
             whitelist: Vec::new(),
             exceptions: Default::default(),
             fast_scan: FastScanConfig {
@@ -1559,6 +1653,8 @@ mod tests {
             alert_cooldown_secs: 5,
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
+            max_tracked_flows: 20_000,
+            max_flows_per_source: 1_000,
             whitelist: Vec::new(),
             exceptions: Default::default(),
             fast_scan: FastScanConfig {
@@ -1934,6 +2030,8 @@ mod tests {
             alert_cooldown_secs: 5,
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
+            max_tracked_flows: 20_000,
+            max_flows_per_source: 1_000,
             whitelist: Vec::new(),
             exceptions: Default::default(),
             fast_scan: FastScanConfig {
@@ -2256,6 +2354,8 @@ mod tests {
             alert_cooldown_secs: 5,
             max_hits_per_ip: 1_000,
             max_tracked_ips: 10_000,
+            max_tracked_flows: 20_000,
+            max_flows_per_source: 1_000,
             whitelist: Vec::new(),
             exceptions: Default::default(),
             fast_scan: FastScanConfig {
@@ -2819,5 +2919,57 @@ mod tests {
             detector.beacon_hits.get(&key).is_none(),
             "Drop-urile nu trebuie sa populeze beacon_hits"
         );
+    }
+
+    #[test]
+    fn test_scan_flow_cardinality_limits_are_enforced() {
+        let mut cfg = test_config();
+        cfg.max_tracked_flows = 3;
+        cfg.max_flows_per_source = 2;
+        let detector = Detector::new(cfg);
+
+        for target in ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"] {
+            detector.process_event(&make_event_with_dest("192.0.2.10", target, 80));
+        }
+        assert!(detector.scan_flow_count_for_source("192.0.2.10".parse().unwrap()) <= 2);
+
+        detector.process_event(&make_event_with_dest("192.0.2.11", "10.0.1.1", 80));
+        detector.process_event(&make_event_with_dest("192.0.2.12", "10.0.1.2", 80));
+        assert!(detector.port_hits.len() + detector.accept_hits.len() <= 3);
+    }
+
+    #[test]
+    fn test_source_eviction_removes_cross_indexed_state() {
+        let mut cfg = test_config();
+        cfg.max_tracked_ips = 1;
+        let detector = Detector::new(cfg);
+        let old_src: IpAddr = "192.0.2.20".parse().unwrap();
+        let dst: IpAddr = "10.0.0.10".parse().unwrap();
+        detector.process_event(&make_event_with_dest("192.0.2.20", "10.0.0.10", 80));
+        detector.distributed_hits.insert(
+            dst,
+            vec![DistributedHit {
+                source_ip: old_src,
+                port: 80,
+                seen_at: Instant::now(),
+            }],
+        );
+        detector.beacon_hits.insert(
+            (old_src, dst, 443),
+            vec![BeaconHit {
+                seen_at: Instant::now(),
+            }],
+        );
+
+        detector.process_event(&make_event_with_dest("192.0.2.21", "10.0.0.11", 80));
+
+        assert!(detector
+            .distributed_hits
+            .get(&dst)
+            .is_none_or(|hits| hits.iter().all(|hit| hit.source_ip != old_src)));
+        assert!(!detector
+            .beacon_hits
+            .iter()
+            .any(|entry| entry.key().0 == old_src));
     }
 }

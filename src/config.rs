@@ -50,6 +50,7 @@ use std::path::Path;
 /// In Rust, copierea explicita (Clone) este preferata fata de copierea
 /// implicita, pentru a face costul vizibil in cod.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub network: NetworkConfig,
     pub detection: DetectionConfig,
@@ -63,6 +64,7 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     pub listen_address: String,
     pub listen_port: u16,
@@ -79,6 +81,28 @@ pub struct NetworkConfig {
     /// Implicit: 10.000 pachete.
     #[serde(default = "default_udp_burst_size")]
     pub udp_burst_size: u64,
+
+    /// Per-sender token bucket prevents one trusted source from exhausting the
+    /// global budget shared by all firewalls.
+    #[serde(default = "default_udp_per_sender_rate_limit")]
+    pub udp_per_sender_rate_limit: u64,
+    #[serde(default = "default_udp_per_sender_burst_size")]
+    pub udp_per_sender_burst_size: u64,
+
+    /// Allowlist for the actual UDP sender address. It is mandatory whenever
+    /// the listener is exposed on a non-loopback interface.
+    #[serde(default)]
+    pub trusted_senders: Vec<String>,
+
+    /// Defensive framing limits applied before parsing coalesced datagrams.
+    #[serde(default = "default_max_lines_per_datagram")]
+    pub max_lines_per_datagram: usize,
+    #[serde(default = "default_max_line_length")]
+    pub max_line_length: usize,
+
+    /// Per-event terminal output is expensive and is disabled by default.
+    #[serde(default)]
+    pub log_events: bool,
 
     /// Mapping static IP → hostname (ex: "10.0.1.10" = "srv-dc01").
     /// Folosit pentru afisare in alerte CLI, email si SIEM (shost=/dhost= in CEF).
@@ -97,6 +121,22 @@ fn default_udp_burst_size() -> u64 {
     10_000
 }
 
+fn default_udp_per_sender_rate_limit() -> u64 {
+    2_500
+}
+
+fn default_udp_per_sender_burst_size() -> u64 {
+    5_000
+}
+
+fn default_max_lines_per_datagram() -> usize {
+    256
+}
+
+fn default_max_line_length() -> usize {
+    16_384
+}
+
 /// Configurare detectie - contine sub-structuri pentru fiecare tip de scan.
 ///
 /// NOTA RUST: Structurile imbricate (nested) se mapeaza pe sectiuni TOML
@@ -109,6 +149,7 @@ fn default_udp_burst_size() -> u64 {
 ///   - Retrocompatibil: configuratii vechi fara campul nou continua sa functioneze
 ///   - Functiile de default trebuie sa returneze acelasi tip ca si campul
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DetectionConfig {
     pub alert_cooldown_secs: u64,
 
@@ -124,6 +165,16 @@ pub struct DetectionConfig {
     /// Implicit: 100.000 IP-uri.
     #[serde(default = "default_max_tracked_ips")]
     pub max_tracked_ips: usize,
+
+    /// Maximum number of `(source, destination)` scan-flow keys across the
+    /// drop and accept maps. This closes the cardinality gap left by the
+    /// source-only `max_tracked_ips` limit.
+    #[serde(default = "default_max_tracked_flows")]
+    pub max_tracked_flows: usize,
+
+    /// Maximum scan-flow keys owned by one source IP.
+    #[serde(default = "default_max_flows_per_source")]
+    pub max_flows_per_source: usize,
 
     /// Lista de IP-uri si subrețele excluse din detecție.
     /// Accepta IP-uri individuale ("10.0.1.10") si CIDR ("10.0.2.0/24").
@@ -174,6 +225,14 @@ fn default_max_tracked_ips() -> usize {
     100_000
 }
 
+fn default_max_tracked_flows() -> usize {
+    200_000
+}
+
+fn default_max_flows_per_source() -> usize {
+    4_096
+}
+
 /// Exceptii detectie — reducerea fals-pozitivelor pentru scenarii specifice.
 ///
 /// Diferenta fata de whitelist:
@@ -185,6 +244,7 @@ fn default_max_tracked_ips() -> usize {
 ///   - Porturi interne cu fan-out (SMB 445, WinRM 5985) → nu conteaza la Lateral
 ///   - Servere populare (DNS 53, NTP 123) → nu declanseaza Distributed Scan
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DetectionExceptions {
     /// IP-uri autorizate sa faca scanning. NU declanseaza Lateral Movement.
     #[serde(default)]
@@ -210,6 +270,7 @@ pub struct DetectionExceptions {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FastScanConfig {
     /// Numar de porturi unice peste care se declanseaza alerta.
     pub port_threshold: usize,
@@ -218,6 +279,7 @@ pub struct FastScanConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SlowScanConfig {
     pub port_threshold: usize,
     /// Fereastra de timp in minute (convertita in secunde la utilizare).
@@ -238,6 +300,7 @@ pub struct SlowScanConfig {
 /// Pragurile implicite sunt mai conservative decat Fast Scan deoarece
 /// traficul accepted este mai "normal" si am vrea sa evitam false positives.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AcceptScanConfig {
     /// Numarul de porturi ACCEPTATE unice care declanseaza alerta.
     pub port_threshold: usize,
@@ -270,6 +333,7 @@ fn default_accept_scan() -> AcceptScanConfig {
 /// Valori implicite: 5 destinatii in 60 secunde, dezactivat implicit
 /// pentru retrocompatibilitate (config-uri vechi nu au sectiunea).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LateralMovementConfig {
     /// Activare/dezactivare detectie. Implicit: false (retrocompatibil).
     #[serde(default)]
@@ -313,6 +377,7 @@ fn default_lateral_movement() -> LateralMovementConfig {
 /// Valori implicite: 5 surse unice in 60 secunde, dezactivat implicit
 /// pentru retrocompatibilitate (config-uri vechi nu au sectiunea).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DistributedScanConfig {
     /// Activare/dezactivare detectie. Implicit: false (retrocompatibil).
     #[serde(default)]
@@ -350,6 +415,7 @@ fn default_distributed_scan() -> DistributedScanConfig {
 ///
 /// Valori implicite: dezactivat (retrocompatibil cu config-uri vechi).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BeaconingConfig {
     /// Activare/dezactivare detectie. Implicit: false.
     #[serde(default)]
@@ -417,6 +483,7 @@ fn default_beaconing() -> BeaconingConfig {
 /// Se aplica doar la Fast Scan, Slow Scan si Accept Scan.
 /// Lateral Movement si Distributed Scan raman cu praguri statice.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DynamicThresholdConfig {
     /// Activare/dezactivare praguri dinamice. Implicit: false (retrocompatibil).
     #[serde(default)]
@@ -476,12 +543,36 @@ fn default_dynamic_threshold() -> DynamicThresholdConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlertingConfig {
     pub siem: SiemConfig,
     pub email: EmailConfig,
+
+    #[serde(default = "default_alert_queue_capacity")]
+    pub queue_capacity: usize,
+    #[serde(default = "default_retry_initial_secs")]
+    pub retry_initial_secs: u64,
+    #[serde(default = "default_retry_max_secs")]
+    pub retry_max_secs: u64,
+    #[serde(default = "default_spool_directory")]
+    pub spool_directory: String,
+}
+
+fn default_alert_queue_capacity() -> usize {
+    1024
+}
+fn default_retry_initial_secs() -> u64 {
+    1
+}
+fn default_retry_max_secs() -> u64 {
+    60
+}
+fn default_spool_directory() -> String {
+    "spool".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SiemConfig {
     pub enabled: bool,
     pub host: String,
@@ -495,6 +586,7 @@ pub struct SiemConfig {
 /// este owned de EmailConfig. Cand EmailConfig este dropat, tot
 /// lantul de ownership este dealocat automat - zero memory leaks.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmailConfig {
     pub enabled: bool,
     pub smtp_server: String,
@@ -525,6 +617,7 @@ fn default_email_footer() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CleanupConfig {
     pub interval_secs: u64,
     pub max_entry_age_secs: u64,
@@ -539,6 +632,7 @@ pub struct CleanupConfig {
 /// Valori implicite: dezactivat, port 8080, bind 127.0.0.1 (doar local),
 /// 1000 alerte in buffer-ul circular.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebDashboardConfig {
     /// Activare/dezactivare dashboard web. Implicit: false (retrocompatibil).
     #[serde(default)]
@@ -556,6 +650,13 @@ pub struct WebDashboardConfig {
     /// Numarul maxim de alerte pastrate in buffer-ul circular. Implicit: 1000.
     #[serde(default = "default_web_max_alerts")]
     pub max_alerts: usize,
+
+    /// API bearer token. Required when binding to a non-loopback address.
+    #[serde(default)]
+    pub auth_token: String,
+
+    #[serde(default = "default_web_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
 }
 
 fn default_web_port() -> u16 {
@@ -567,6 +668,9 @@ fn default_web_bind() -> String {
 fn default_web_max_alerts() -> usize {
     1000
 }
+fn default_web_max_concurrent_requests() -> usize {
+    32
+}
 
 fn default_web_dashboard() -> WebDashboardConfig {
     WebDashboardConfig {
@@ -574,6 +678,8 @@ fn default_web_dashboard() -> WebDashboardConfig {
         port: default_web_port(),
         bind: default_web_bind(),
         max_alerts: default_web_max_alerts(),
+        auth_token: String::new(),
+        max_concurrent_requests: default_web_max_concurrent_requests(),
     }
 }
 
@@ -641,9 +747,13 @@ impl AppConfig {
                     .to_string(),
             );
         }
-        if self.network.listen_address.is_empty() {
-            errors.push("network.listen_address nu poate fi gol".to_string());
-        }
+        let listen_ip = match self.network.listen_address.parse::<std::net::IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(_) => {
+                errors.push("network.listen_address trebuie sa fie o adresa IP valida".to_string());
+                None
+            }
+        };
         if !matches!(self.network.parser.as_str(), "gaia" | "cef" | "gaia_cef") {
             errors.push(format!(
                 "network.parser = {:?} este invalid. Valori acceptate: \"gaia\", \"cef\", \"gaia_cef\"",
@@ -651,20 +761,54 @@ impl AppConfig {
             ));
         }
         // Validare hostnames: cheile trebuie sa fie IP-uri valide.
-        for ip_str in self.network.hostnames.keys() {
+        for (ip_str, hostname) in &self.network.hostnames {
             if ip_str.parse::<std::net::IpAddr>().is_err() {
                 errors.push(format!(
                     "network.hostnames: cheia \"{}\" nu este un IP valid",
                     ip_str
                 ));
             }
+            if hostname.len() > 255 {
+                errors.push(format!(
+                    "network.hostnames[{}] depaseste 255 caractere",
+                    ip_str
+                ));
+            }
+        }
+        for sender in &self.network.trusted_senders {
+            if sender.parse::<std::net::IpAddr>().is_err() {
+                errors.push(format!(
+                    "network.trusted_senders: IP invalid: \"{}\"",
+                    sender
+                ));
+            }
+        }
+        if listen_ip.is_some_and(|ip| !ip.is_loopback()) && self.network.trusted_senders.is_empty()
+        {
+            errors.push(
+                "network.trusted_senders trebuie configurat cand listen_address nu este loopback"
+                    .to_string(),
+            );
+        }
+        if self.network.max_lines_per_datagram == 0 {
+            errors.push("network.max_lines_per_datagram trebuie sa fie > 0".to_string());
+        }
+        if self.network.max_line_length == 0 || self.network.max_line_length > 65_507 {
+            errors
+                .push("network.max_line_length trebuie sa fie intre 1 si 65507 bytes".to_string());
         }
 
         // Validare subnets: cheile trebuie sa fie CIDR valide.
-        for cidr_str in self.network.subnets.keys() {
+        for (cidr_str, label) in &self.network.subnets {
             if SubnetEntry::parse(cidr_str).is_none() {
                 errors.push(format!(
                     "network.subnets: cheia \"{}\" nu este un CIDR valid (ex: \"10.10.1.0/24\")",
+                    cidr_str
+                ));
+            }
+            if label.len() > 255 {
+                errors.push(format!(
+                    "network.subnets[{}] depaseste 255 caractere",
                     cidr_str
                 ));
             }
@@ -685,6 +829,20 @@ impl AppConfig {
                  medie — se pierd pachete la orice varf scurt de trafic",
                 self.network.udp_burst_size, self.network.udp_rate_limit
             ));
+        }
+        if self.network.udp_per_sender_rate_limit > 0 && self.network.udp_per_sender_burst_size == 0
+        {
+            errors.push(
+                "network.udp_per_sender_burst_size trebuie sa fie > 0 cand limita per sender este activa"
+                    .to_string(),
+            );
+        }
+        if self.network.udp_rate_limit > 0
+            && self.network.udp_per_sender_rate_limit > self.network.udp_rate_limit
+        {
+            errors.push(
+                "network.udp_per_sender_rate_limit nu poate depasi udp_rate_limit".to_string(),
+            );
         }
 
         // --- Detection ---
@@ -752,6 +910,21 @@ impl AppConfig {
             errors.push(
                 "detection.max_tracked_ips = 0: niciun IP nu poate fi urmarit, detectia devine imposibila"
                     .to_string(),
+            );
+        }
+        if self.detection.max_tracked_flows == 0 {
+            errors.push(
+                "detection.max_tracked_flows = 0: niciun flow nu poate fi urmarit".to_string(),
+            );
+        }
+        if self.detection.max_flows_per_source == 0 {
+            errors.push(
+                "detection.max_flows_per_source = 0: niciun flow per sursa nu poate fi urmarit"
+                    .to_string(),
+            );
+        } else if self.detection.max_flows_per_source > self.detection.max_tracked_flows {
+            errors.push(
+                "detection.max_flows_per_source nu poate depasi max_tracked_flows".to_string(),
             );
         }
         if self.detection.fast_scan.port_threshold == 0 {
@@ -937,6 +1110,43 @@ impl AppConfig {
                     "web_dashboard.max_alerts = 0: nicio alerta nu va fi stocata".to_string(),
                 );
             }
+            if self.web_dashboard.max_alerts > 10_000 {
+                errors.push("web_dashboard.max_alerts nu poate depasi 10000".to_string());
+            }
+            if self.web_dashboard.max_concurrent_requests == 0
+                || self.web_dashboard.max_concurrent_requests > 1024
+            {
+                errors.push(
+                    "web_dashboard.max_concurrent_requests trebuie sa fie intre 1 si 1024"
+                        .to_string(),
+                );
+            }
+            match self.web_dashboard.bind.parse::<std::net::IpAddr>() {
+                Ok(ip) if !ip.is_loopback() && self.web_dashboard.auth_token.len() < 16 => {
+                    errors.push(
+                        "web_dashboard.auth_token trebuie sa aiba minimum 16 caractere cand bind nu este loopback"
+                            .to_string(),
+                    );
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    errors.push("web_dashboard.bind trebuie sa fie o adresa IP valida".to_string())
+                }
+            }
+        }
+
+        if self.alerting.queue_capacity == 0 {
+            errors.push("alerting.queue_capacity trebuie sa fie > 0".to_string());
+        }
+        if self.alerting.retry_initial_secs == 0
+            || self.alerting.retry_max_secs < self.alerting.retry_initial_secs
+        {
+            errors.push(
+                "alerting retry_initial_secs trebuie sa fie > 0 si <= retry_max_secs".to_string(),
+            );
+        }
+        if self.alerting.spool_directory.trim().is_empty() {
+            errors.push("alerting.spool_directory nu poate fi gol".to_string());
         }
 
         // --- Alerting: SIEM ---
@@ -973,6 +1183,26 @@ impl AppConfig {
                     "alerting.email.to nu poate fi goala: adauga cel putin un destinatar"
                         .to_string(),
                 );
+            }
+            if self
+                .alerting
+                .email
+                .from
+                .parse::<lettre::message::Mailbox>()
+                .is_err()
+            {
+                errors.push("alerting.email.from nu este o adresa email valida".to_string());
+            }
+            for recipient in &self.alerting.email.to {
+                if recipient.parse::<lettre::message::Mailbox>().is_err() {
+                    errors.push(format!(
+                        "alerting.email.to contine o adresa invalida: {}",
+                        recipient
+                    ));
+                }
+            }
+            if self.alerting.email.email_footer.len() > 65_536 {
+                errors.push("alerting.email.email_footer depaseste 65536 bytes".to_string());
             }
         }
 
@@ -1096,5 +1326,44 @@ impl SubnetEntry {
             .filter(|entry| entry.matches(ip))
             .max_by_key(|entry| entry.prefix_len)
             .map(|entry| entry.label.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_configuration_fields_are_rejected() {
+        let source = format!(
+            "{}\nunexpected_security_switch = true\n",
+            include_str!("../config.toml")
+        );
+        let error = toml::from_str::<AppConfig>(&source).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn checked_in_configuration_is_valid() {
+        let config: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn exposed_udp_listener_requires_trusted_senders() {
+        let mut config: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        config.network.trusted_senders.clear();
+
+        let error = config.validate().unwrap_err();
+        assert!(error.to_string().contains("trusted_senders"));
+    }
+
+    #[test]
+    fn loopback_udp_listener_can_omit_trusted_senders() {
+        let mut config: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        config.network.listen_address = "127.0.0.1".to_string();
+        config.network.trusted_senders.clear();
+
+        config.validate().unwrap();
     }
 }

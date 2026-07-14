@@ -22,7 +22,7 @@
 //
 // =============================================================================
 
-use super::{LogEvent, LogParser};
+use super::{split_cef_fields, LogEvent, LogParser};
 use std::net::IpAddr;
 
 /// Parser pentru log-uri in format CEF (Common Event Format).
@@ -33,6 +33,12 @@ use std::net::IpAddr;
 /// Sized Type). Compilatorul il optimizeaza complet - exista doar la
 /// nivel de tip, nu la runtime.
 pub struct CefParser;
+
+impl Default for CefParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CefParser {
     pub fn new() -> Self {
@@ -66,12 +72,7 @@ impl LogParser for CefParser {
         // specifica explicit tipul in care colectam. Necesar cand compilatorul
         // nu poate infera tipul (collect este generic si poate produce
         // Vec, String, HashMap, etc).
-        let parts: Vec<&str> = line[cef_start..].splitn(8, '|').collect();
-
-        // Validam ca avem toate cele 8 campuri CEF.
-        if parts.len() < 8 {
-            return None;
-        }
+        let parts = split_cef_fields(&line[cef_start..])?;
 
         // Extensiile sunt in ultimul camp (index 7), ca perechi cheie=valoare.
         let extension = parts[7];
@@ -203,6 +204,15 @@ mod tests {
     fn test_reject_non_cef() {
         let parser = CefParser::new();
         assert!(parser.parse("not a CEF log").is_none());
+    }
+
+    #[test]
+    fn test_escaped_pipe_in_cef_header() {
+        let parser = CefParser::new();
+        let log = "CEF:0|Vendor|Product|1|100|Drop \\| policy|5|src=192.0.2.1 dst=198.51.100.1 dpt=443 proto=TCP act=drop";
+        let event = parser.parse(log).expect("valid escaped CEF header");
+        assert_eq!(event.source_ip.to_string(), "192.0.2.1");
+        assert_eq!(event.dest_port, 443);
     }
 
     #[test]

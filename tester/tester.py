@@ -506,17 +506,13 @@ def simulate_beaconing_c2(
     si beacons custom. IDS-RS detecteaza prin Coefficient of Variation (CV)
     pe intervalele inter-arrival.
 
-    NOTA: scenariul comprima timpul pentru testare rapida. In productie un
-    beacon real ar avea interval = 60s reali, dar aici --interval 0.5 (sau
-    mai mic) imita comportamentul fara a astepta 8 minute.
-
     Pragurile default din config.toml:
       min_events=8, time_window=3600s, cv_threshold=0.30, min_interval=10s.
-    Pentru testul comprimat seteaza in config.toml min_interval_secs = 0
-    sau scade --interval suficient incat sa ramana > min_interval.
+    Intervalul testerului trebuie sa fie >= min_interval_secs, deoarece IDS-RS
+    masoara timpul real de sosire, nu timestamp-ul declarat in log.
 
     Exemplu:
-      python tester.py beaconing-c2 --count 10 --interval 0.5 --jitter 5
+      python tester.py beaconing-c2 --count 10 --interval 10 --jitter 5
       python tester.py beaconing-c2 --count 12 --interval 60 --target 10.0.1.50 --target-port 443
     """
     print(f"[*] Simulare BEACONING C2 (format: {fmt.upper()})")
@@ -541,7 +537,7 @@ def simulate_beaconing_c2(
     print()
     print(f"[+] Beaconing C2 complet: {sent_count} log-uri trimise ({fmt.upper()})")
     print(f"    Asigura-te ca [detection.beaconing] enabled = true in config.toml")
-    print(f"    Pentru detectie in timp comprimat seteaza min_interval_secs = 0")
+    print(f"    --interval trebuie sa fie >= detection.beaconing.min_interval_secs")
 
 
 def simulate_presentation_wave(
@@ -562,7 +558,7 @@ def simulate_presentation_wave(
       - detection.lateral_movement.enabled = true
       - detection.distributed_scan.enabled = true
       - detection.beaconing.enabled = true
-      - detection.beaconing.min_interval_secs = 0 (pentru intervale comprimate)
+      - beaconing foloseste intervalul minim real configurat (default 10s)
     """
     intensity = max(1, intensity)
     print("[*] PRESENTATION WAVE MODE")
@@ -653,7 +649,7 @@ def simulate_presentation_wave(
             source_ip=f"{src_prefix}.{((src_last + wave + 79) % 254) + 1}",
             target_ip=f"10.0.{wave}.50",
             target_port=443,
-            interval=0.2,
+            interval=10.0,
             jitter_pct=3.0,
             count=10 + wave,
             fmt=fmt,
@@ -1778,8 +1774,8 @@ def main() -> None:
     beacon_parser.add_argument(
         "--interval",
         type=float,
-        default=0.5,
-        help="Interval mediu intre calluri in secunde (default: 0.5 pentru test rapid)",
+        default=10.0,
+        help="Interval mediu intre calluri in secunde (default: 10, egal cu min_interval_secs)",
     )
     beacon_parser.add_argument(
         "--jitter",

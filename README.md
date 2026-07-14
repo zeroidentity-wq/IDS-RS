@@ -79,7 +79,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 | **Alertare** | SIEM (UDP CEF), Email (SMTP async) |
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
-| **Teste** | 59 teste unitare — toate trec |
+| **Teste** | 87 teste unitare — toate trec |
 | **Clippy** | 7 warnings pre-existente (cosmetice, niciuna funcțională) |
 
 ### Implementat
@@ -99,7 +99,31 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Beaconing C2 detection (#24) — flow periodic (CV pe intervale), SigID 1006, severitate CEF 9
 - [x] Web Dashboard (#25) — server HTTP embedded cu graf D3.js force-directed, API JSON, auto-refresh 5s
 - [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
-- [x] Teste unitare: 66 passed (parseri, detector, alerter, whitelist, lateral movement, distributed scan)
+- [x] Teste unitare: 89 passed (parseri, detector, delivery spool, config strict, web auth, whitelist si toate detectiile)
+
+### Hardening operational
+
+Versiunea curenta aplica limite si controale explicite pe toate fluxurile critice:
+
+- `trusted_senders` este obligatoriu pe un listener non-loopback; configuratia
+  inclusa accepta doar localhost si trebuie completata cu IP-urile firewall/relay;
+- rate limiting-ul global si per sender este taxat per eveniment/linie, nu per
+  datagrama, iar numarul de linii si lungimea unei linii sunt limitate;
+- `max_tracked_flows` si `max_flows_per_source` limiteaza cardinalitatea cheilor
+  `(source, destination)`, pe langa limitele per IP si per vector;
+- SIEM si email au cozi independente; erorile si saturarea sunt salvate atomic
+  in `alerting.spool_directory` si redate cu exponential backoff;
+- listele CEF sunt esantionate, iar datagrama SIEM are o limita stricta de 60 KB;
+- campurile TOML necunoscute sunt respinse, pentru ca typo-urile sa nu dezactiveze
+  silentios o protectie;
+- API-ul dashboard-ului necesita bearer token cand bind-ul nu este loopback si
+  aplica limita de concurenta plus security headers; pentru acces remote, HTTP-ul
+  trebuie publicat exclusiv printr-un reverse proxy TLS;
+- toolchain-ul/MSRV este fixat la Rust 1.85 si verificat in CI pe Linux si Windows.
+
+Setarile de listener, parser, cleanup, spool/queue/retry si securitate web necesita
+restart. La `SIGHUP`, modificarile acestor campuri sunt raportate si ignorate; pragurile,
+whitelist-ul, destinatarii si rate limiter-ul raman hot-reloadable.
 
 ### De implementat
 
@@ -194,6 +218,9 @@ sudo dnf install -y gcc openssl-devel pkg-config
 
 - [Rust](https://rustup.rs/) (include cargo)
 - [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) cu componenta "C++ build tools"
+
+Pe Windows, oprirea gratioasa este disponibila prin Ctrl+C. `SIGHUP` si `SIGTERM`
+sunt disponibile doar pe Unix/Linux.
 
 ### Verificare instalare
 

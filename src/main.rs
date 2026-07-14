@@ -48,25 +48,17 @@
 //
 // =============================================================================
 
-mod alerter;
-mod config;
-mod detector;
-mod display;
-mod parser;
-mod web;
-
-use alerter::Alerter;
 use arc_swap::ArcSwap;
-use config::{AppConfig, SubnetEntry};
-use detector::Detector;
-use std::collections::{HashMap, VecDeque};
+use ids_rs::alerter::Alerter;
+use ids_rs::config::{AppConfig, SubnetEntry};
+use ids_rs::delivery;
+use ids_rs::detector::Detector;
+use ids_rs::{display, parser, web};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
 
 // =============================================================================
 // TokenBucket — Rate Limiter pentru receptie UDP
@@ -260,10 +252,20 @@ async fn main() -> anyhow::Result<()> {
             .collect()
     }
 
+    fn parse_trusted_senders(config: &AppConfig) -> HashSet<IpAddr> {
+        config
+            .network
+            .trusted_senders
+            .iter()
+            .filter_map(|ip| ip.parse().ok())
+            .collect()
+    }
+
     let hostnames = Arc::new(ArcSwap::from_pointee(parse_hostnames(&config)));
     let subnets = Arc::new(ArcSwap::from_pointee(SubnetEntry::parse_subnets(
         &config.network.subnets,
     )));
+    let mut trusted_senders = parse_trusted_senders(&config);
 
     let detector = Arc::new(Detector::new(config.detection.clone()));
     let alerter = Arc::new(Alerter::new(
@@ -273,15 +275,8 @@ async fn main() -> anyhow::Result<()> {
         SubnetEntry::parse_subnets(&config.network.subnets),
     )?);
 
-    let (alert_tx, mut alert_rx) = mpsc::channel(1024);
-    let alert_worker_alerter = Arc::clone(&alerter);
-    let dropped_alerts = Arc::new(AtomicU64::new(0));
-    let dropped_alerts_stats = Arc::clone(&dropped_alerts);
-    let alert_worker = tokio::spawn(async move {
-        while let Some(alert) = alert_rx.recv().await {
-            alert_worker_alerter.send_alert(&alert).await;
-        }
-    });
+    let (delivery, delivery_workers) =
+        delivery::DeliveryManager::start(&config.alerting, Arc::clone(&alerter))?;
 
     display::log_info("Detector initializat (DashMap thread-safe)");
 
@@ -398,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let mut sender_rate_limiters: HashMap<IpAddr, TokenBucket> = HashMap::new();
 
     // Interval pentru afisarea periodica a statisticilor de rate limiting.
     // Folosim `tokio::time::interval` cu 30 secunde — suficient de rar
@@ -406,6 +402,7 @@ async fn main() -> anyhow::Result<()> {
     // Primul tick al `interval()` e imediat — il consumam ca sa nu afisam
     // statistici goale la startup.
     rate_limit_tick.tick().await;
+    let mut framing_dropped: u64 = 0;
 
     // =========================================================================
     // 8. SIGNAL HANDLERS — SIGHUP (Hot Reload #16) si SIGTERM (Graceful Shutdown)
@@ -434,9 +431,33 @@ async fn main() -> anyhow::Result<()> {
     // la fel ca la Ctrl+C: alerta in curs de trimitere (.await activ) se
     // finalizeaza complet inainte de iesire — nu se pierde nicio alerta.
     //
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let (sighup_tx, mut sighup_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (sigterm_tx, mut sigterm_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        let Ok(mut signal) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        else {
+            return;
+        };
+        while signal.recv().await.is_some() {
+            let _ = sighup_tx.send(());
+        }
+    });
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        else {
+            return;
+        };
+        while signal.recv().await.is_some() {
+            let _ = sigterm_tx.send(());
+        }
+    });
+    // On non-Unix platforms the senders keep these branches pending while
+    // Ctrl+C remains available as the portable shutdown mechanism.
+    #[cfg(not(unix))]
+    let (_sighup_guard, _sigterm_guard) = (sighup_tx, sigterm_tx);
 
     // =========================================================================
     // 9. MAIN LOOP - Receptie si Procesare Log-uri
@@ -487,16 +508,16 @@ async fn main() -> anyhow::Result<()> {
             // de SIGHUP si recv_from. Alerta curenta (daca send_alert este in
             // curs de .await) se finalizeaza complet — select! verifica
             // semnalele doar la urmatoarea iteratie a loop-ului.
-            _ = sigterm.recv() => {
+            _ = sigterm_rx.recv() => {
                 display::log_info("SIGTERM primit — oprire gratiosa...");
                 break;
             }
 
             // Branch: Hot reload config la SIGHUP (#16).
-            _ = sighup.recv() => {
+            _ = sighup_rx.recv() => {
                 display::log_reload("SIGHUP primit — reincarc config.toml...");
                 match AppConfig::load(&config_path) {
-                    Ok(new_config) => {
+                    Ok(mut new_config) => {
                         // Verificam campurile care NU pot fi reincarcate (necesita restart).
                         if new_config.network.listen_port != config.network.listen_port
                             || new_config.network.listen_address != config.network.listen_address
@@ -510,9 +531,15 @@ async fn main() -> anyhow::Result<()> {
                                 "SIGHUP: parser modificat — necesita restart, ignorat"
                             );
                         }
+                        new_config.network.listen_port = config.network.listen_port;
+                        new_config.network.listen_address = config.network.listen_address.clone();
+                        new_config.network.parser = config.network.parser.clone();
 
                         // Aplicam noile valori la componentele reincarcabile.
                         debug_mode = new_config.network.debug;
+                        let trusted_senders_changed =
+                            new_config.network.trusted_senders != config.network.trusted_senders;
+                        trusted_senders = parse_trusted_senders(&new_config);
 
                         // Detector: praguri, cooldown, whitelist.
                         detector.update_config(new_config.detection.clone());
@@ -532,19 +559,51 @@ async fn main() -> anyhow::Result<()> {
                         subnets.store(Arc::new(new_subnets));
 
                         // Web dashboard: bind/port necesita restart.
-                        if new_config.web_dashboard.enabled
-                            && (new_config.web_dashboard.bind != config.web_dashboard.bind
-                                || new_config.web_dashboard.port != config.web_dashboard.port)
+                        if new_config.web_dashboard.enabled != config.web_dashboard.enabled
+                            || new_config.web_dashboard.bind != config.web_dashboard.bind
+                            || new_config.web_dashboard.port != config.web_dashboard.port
+                            || new_config.web_dashboard.auth_token != config.web_dashboard.auth_token
+                            || new_config.web_dashboard.max_concurrent_requests
+                                != config.web_dashboard.max_concurrent_requests
                         {
                             display::log_warning(
-                                "SIGHUP: web_dashboard.bind/port modificate — necesita restart, ignorat"
+                                "SIGHUP: web_dashboard enabled/bind/port/auth/concurrency necesita restart, ignorat"
                             );
                         }
-                        if new_config.web_dashboard.enabled && !config.web_dashboard.enabled {
+                        new_config.web_dashboard.enabled = config.web_dashboard.enabled;
+                        new_config.web_dashboard.bind = config.web_dashboard.bind.clone();
+                        new_config.web_dashboard.port = config.web_dashboard.port;
+                        new_config.web_dashboard.auth_token = config.web_dashboard.auth_token.clone();
+                        new_config.web_dashboard.max_concurrent_requests =
+                            config.web_dashboard.max_concurrent_requests;
+
+                        if new_config.cleanup.interval_secs != config.cleanup.interval_secs
+                            || new_config.cleanup.max_entry_age_secs
+                                != config.cleanup.max_entry_age_secs
+                        {
                             display::log_warning(
-                                "SIGHUP: web_dashboard activat — necesita restart pentru pornire server"
+                                "SIGHUP: cleanup interval/max age necesita restart, ignorat"
                             );
                         }
+                        new_config.cleanup = config.cleanup.clone();
+
+                        if new_config.alerting.queue_capacity != config.alerting.queue_capacity
+                            || new_config.alerting.retry_initial_secs
+                                != config.alerting.retry_initial_secs
+                            || new_config.alerting.retry_max_secs != config.alerting.retry_max_secs
+                            || new_config.alerting.spool_directory
+                                != config.alerting.spool_directory
+                        {
+                            display::log_warning(
+                                "SIGHUP: alerting queue/retry/spool necesita restart, ignorat"
+                            );
+                        }
+                        new_config.alerting.queue_capacity = config.alerting.queue_capacity;
+                        new_config.alerting.retry_initial_secs =
+                            config.alerting.retry_initial_secs;
+                        new_config.alerting.retry_max_secs = config.alerting.retry_max_secs;
+                        new_config.alerting.spool_directory =
+                            config.alerting.spool_directory.clone();
 
                         // Rate limiter: recream daca s-a schimbat.
                         if new_config.network.udp_rate_limit != config.network.udp_rate_limit
@@ -564,6 +623,19 @@ async fn main() -> anyhow::Result<()> {
                                 display::log_reload("Rate limiting UDP dezactivat");
                                 None
                             };
+                        }
+                        if trusted_senders_changed
+                            || new_config.network.udp_per_sender_rate_limit
+                                != config.network.udp_per_sender_rate_limit
+                            || new_config.network.udp_per_sender_burst_size
+                                != config.network.udp_per_sender_burst_size
+                        {
+                            sender_rate_limiters.clear();
+                            display::log_reload(&format!(
+                                "Rate limiting per sender: {} evenimente/s, burst {}",
+                                new_config.network.udp_per_sender_rate_limit,
+                                new_config.network.udp_per_sender_burst_size
+                            ));
                         }
 
                         // Salvam config-ul nou pentru comparatii viitoare la urmatorul SIGHUP.
@@ -587,11 +659,10 @@ async fn main() -> anyhow::Result<()> {
                         display::log_rate_limited(dropped);
                     }
                 }
-                let dropped_alerts = dropped_alerts_stats.swap(0, Ordering::Relaxed);
-                if dropped_alerts > 0 {
+                if framing_dropped > 0 {
                     display::log_warning(&format!(
-                        "Coada de alerte plina: {} alerte au fost dropate",
-                        dropped_alerts
+                        "{} evenimente UDP respinse de limitele de framing/sursa",
+                        std::mem::take(&mut framing_dropped)
                     ));
                 }
             }
@@ -599,13 +670,10 @@ async fn main() -> anyhow::Result<()> {
             // Branch: Pachet UDP primit.
             result = socket.recv_from(&mut buf) => {
                 match result {
-                    Ok((len, _addr)) => {
-                        // Rate limiting: verificam daca avem token disponibil.
-                        // Daca bucket-ul e gol, dropam pachetul silentios.
-                        if let Some(ref mut limiter) = rate_limiter {
-                            if !limiter.try_consume() {
-                                continue;
-                            }
+                    Ok((len, addr)) => {
+                        if !trusted_senders.is_empty() && !trusted_senders.contains(&addr.ip()) {
+                            framing_dropped = framing_dropped.saturating_add(1);
+                            continue;
                         }
 
                         // NOTA RUST - String::from_utf8_lossy:
@@ -629,12 +697,41 @@ async fn main() -> anyhow::Result<()> {
                         // `.lines()` returneaza un iterator care produce &str
                         // pentru fiecare linie, ignorand delimitatorii (\n, \r\n).
                         //
-                        for line in data.lines() {
+                        for (line_index, line) in data.lines().enumerate() {
+                            if line_index >= config.network.max_lines_per_datagram {
+                                framing_dropped = framing_dropped.saturating_add(1);
+                                continue;
+                            }
                             // `.trim()` returneaza un &str fara spatii la inceput/sfarsit.
                             // Nu aloca memorie noua - returneaza un sub-slice.
                             let line = line.trim();
                             if line.is_empty() {
                                 continue;
+                            }
+                            if line.len() > config.network.max_line_length {
+                                framing_dropped = framing_dropped.saturating_add(1);
+                                continue;
+                            }
+                            // The token budget is charged per logical event, not per
+                            // datagram, so newline coalescing cannot bypass the limit.
+                            if config.network.udp_per_sender_rate_limit > 0 {
+                                let sender_limiter = sender_rate_limiters
+                                    .entry(addr.ip())
+                                    .or_insert_with(|| {
+                                        TokenBucket::new(
+                                            config.network.udp_per_sender_rate_limit,
+                                            config.network.udp_per_sender_burst_size,
+                                        )
+                                    });
+                                if !sender_limiter.try_consume() {
+                                    framing_dropped = framing_dropped.saturating_add(1);
+                                    continue;
+                                }
+                            }
+                            if let Some(ref mut limiter) = rate_limiter {
+                                if !limiter.try_consume() {
+                                    continue;
+                                }
                             }
 
                             // Debug: afiseaza linia raw primita.
@@ -651,14 +748,16 @@ async fn main() -> anyhow::Result<()> {
 
                                 // Afisam evenimentul in terminal cu badge dinamic
                                 // (albastru = drop, verde = accept).
-                                display::log_firewall_event(
-                                    &event.source_ip,
-                                    event.dest_port,
-                                    &event.protocol,
-                                    &event.action,
-                                    &hostnames.load(),
-                                    &subnets.load(),
-                                );
+                                if config.network.log_events {
+                                    display::log_firewall_event(
+                                        &event.source_ip,
+                                        event.dest_port,
+                                        &event.protocol,
+                                        &event.action,
+                                        &hostnames.load(),
+                                        &subnets.load(),
+                                    );
+                                }
 
                                 // Pastram log-ul original la nivel debug pentru audit/troubleshooting.
                                 tracing::debug!(raw = %event.raw_log, "Log original");
@@ -683,16 +782,9 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
 
-                                    // Coada bounded decupleaza I/O-ul lent SIEM/SMTP de receptia UDP.
-                                    match alert_tx.try_send(alert) {
-                                        Ok(()) => {}
-                                        Err(TrySendError::Full(_)) => {
-                                            dropped_alerts.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                        Err(TrySendError::Closed(_)) => {
-                                            display::log_warning("Worker-ul de alerte este oprit");
-                                        }
-                                    }
+                                    // SIEM and email have independent bounded queues.
+                                    // Saturation/failure is persisted to the durable spool.
+                                    delivery.enqueue(&alert);
                                 }
                             } else if debug_mode {
                                 // Debug: afiseaza detalii despre esecul parsarii.
@@ -714,14 +806,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    drop(alert_tx);
-    match tokio::time::timeout(Duration::from_secs(10), alert_worker).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            display::log_warning(&format!("Worker-ul de alerte s-a oprit cu eroare: {}", e));
-        }
-        Err(_) => {
-            display::log_warning("Timeout la golirea cozii de alerte la oprire");
+    drop(delivery);
+    for worker in delivery_workers {
+        if tokio::time::timeout(Duration::from_secs(10), worker)
+            .await
+            .is_err()
+        {
+            display::log_warning("Timeout la oprirea unui worker; alertele ramase sunt in spool");
         }
     }
 

@@ -128,6 +128,28 @@ fn sorted_ip_list_with_primary(ips: &[IpAddr], primary: IpAddr) -> String {
         .join(",")
 }
 
+fn sorted_ip_sample(ips: &[IpAddr], primary: Option<IpAddr>, limit: usize) -> String {
+    let mut unique = ips.iter().copied().collect::<BTreeSet<_>>();
+    if let Some(ip) = primary {
+        unique.insert(ip);
+    }
+    unique
+        .into_iter()
+        .take(limit)
+        .map(|ip| ip.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn port_sample(ports: &[u16], limit: usize) -> String {
+    ports
+        .iter()
+        .take(limit)
+        .map(|port| port.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn comma_to_display_list(value: &str) -> String {
     value.replace(',', ", ")
 }
@@ -447,31 +469,32 @@ impl Alerter {
         self.subnets.store(Arc::new(new_subnets));
     }
 
-    /// Trimite alerta catre toate destinatiile configurate.
-    ///
-    /// NOTA RUST - ASYNC si ERROR HANDLING:
-    ///
-    /// `async fn` + `.await` = functie asincrona care suspenda executia
-    /// la fiecare operatie I/O fara a bloca thread-ul.
-    ///
-    /// Erorile individuale (SIEM/email) sunt LOGATE, nu propagate.
-    /// Daca SIEM-ul e down, inca vrem sa trimitem email (si invers).
-    /// Pattern: "log and continue" vs "fail fast".
-    ///
-    pub async fn send_alert(&self, alert: &Alert) {
-        let cfg = self.config.load();
-        if cfg.siem.enabled {
-            if let Err(e) = self.send_siem_alert(alert).await {
-                display::log_error(&format!("Eroare trimitere alerta SIEM: {:#}", e));
-            }
+    /// Send to the SIEM sink only. Delivery workers use this to isolate
+    /// backpressure and retries between output destinations.
+    pub async fn send_siem(&self, alert: &Alert) -> Result<()> {
+        if self.config.load().siem.enabled {
+            self.send_siem_alert(alert).await
+        } else {
+            Ok(())
         }
+    }
 
+    /// Send to the email sink only.
+    pub async fn send_email(&self, alert: &Alert) -> Result<()> {
         let mailer_guard = self.mailer.load();
         if let Some(ref mailer) = **mailer_guard {
-            if let Err(e) = self.send_email_alert(alert, mailer).await {
-                display::log_error(&format!("Eroare trimitere email: {:#}", e));
-            }
+            self.send_email_alert(alert, mailer).await
+        } else {
+            Ok(())
         }
+    }
+
+    pub fn siem_enabled(&self) -> bool {
+        self.config.load().siem.enabled
+    }
+
+    pub fn email_enabled(&self) -> bool {
+        self.config.load().email.enabled
     }
 
     /// Trimite o alerta catre SIEM prin UDP syslog.
@@ -612,7 +635,7 @@ impl Alerter {
         // coloanele cs6 afisate in Active Channel.
         let msg_text = match alert.scan_type {
             ScanType::DistributedScan => {
-                let sources = sorted_ip_list_with_primary(&alert.unique_sources, alert.source_ip);
+                let sources = sorted_ip_sample(&alert.unique_sources, Some(alert.source_ip), 128);
                 if sources.is_empty() {
                     scan_label.clone()
                 } else {
@@ -620,7 +643,7 @@ impl Alerter {
                 }
             }
             ScanType::LateralMovement => {
-                let hosts = sorted_ip_list(&alert.unique_dests);
+                let hosts = sorted_ip_sample(&alert.unique_dests, None, 128);
                 if hosts.is_empty() {
                     scan_label.clone()
                 } else {
@@ -628,12 +651,7 @@ impl Alerter {
                 }
             }
             ScanType::Fast | ScanType::Slow | ScanType::AcceptScan => {
-                let ports = alert
-                    .unique_ports
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let ports = port_sample(&alert.unique_ports, 256);
                 if ports.is_empty() {
                     scan_label.clone()
                 } else {
@@ -705,12 +723,7 @@ impl Alerter {
                         sanitize_cef_extension(&sample)
                     )
                 };
-                let full_list = alert
-                    .unique_ports
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let full_list = port_sample(&alert.unique_ports, 256);
                 let full_list_field = if full_list.is_empty() {
                     String::new()
                 } else {
@@ -740,12 +753,7 @@ impl Alerter {
                         sanitize_cef_extension(&sample)
                     )
                 };
-                let full_list = alert
-                    .unique_ports
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let full_list = port_sample(&alert.unique_ports, 256);
                 let full_list_field = if full_list.is_empty() {
                     String::new()
                 } else {
@@ -775,12 +783,7 @@ impl Alerter {
                         sanitize_cef_extension(&sample)
                     )
                 };
-                let full_list = alert
-                    .unique_ports
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let full_list = port_sample(&alert.unique_ports, 256);
                 let full_list_field = if full_list.is_empty() {
                     String::new()
                 } else {
@@ -808,7 +811,7 @@ impl Alerter {
                         sanitize_cef_extension(&sample)
                     )
                 };
-                let full_list = sorted_ip_list(&alert.unique_dests);
+                let full_list = sorted_ip_sample(&alert.unique_dests, None, 128);
                 let full_list_field = if full_list.is_empty() {
                     String::new()
                 } else {
@@ -830,7 +833,7 @@ impl Alerter {
                     ),
                     None => String::new(),
                 };
-                let sources = sorted_ip_list_with_primary(&alert.unique_sources, alert.source_ip);
+                let sources = sorted_ip_sample(&alert.unique_sources, Some(alert.source_ip), 128);
                 let source_list_field = if sources.is_empty() {
                     String::new()
                 } else {
@@ -883,6 +886,16 @@ impl Alerter {
             cs1label = cs1_label,
             cs1 = sanitize_cef_extension(&cs1_value),
         );
+
+        // Keep a safety margin below the maximum UDP payload. The list fields
+        // above are sampled, so reaching this limit indicates an unexpectedly
+        // large administrator-controlled label rather than attack cardinality.
+        if message.len() > 60_000 {
+            anyhow::bail!(
+                "mesajul SIEM are {} bytes si depaseste limita sigura de 60000",
+                message.len()
+            );
+        }
 
         // Cream un socket UDP efemer (port 0 = OS alege automat).
         let socket = UdpSocket::bind("0.0.0.0:0")
@@ -1108,25 +1121,39 @@ impl Alerter {
         // NOTA RUST - ITERATIE cu `for`:
         // `for recipient in &cfg.to` itereaza prin referinte (&String).
         // Nu consumam Vec-ul - il imprumutam doar pentru citire.
+        let mut failures = Vec::new();
         for recipient in &cfg.to {
-            let email = Message::builder()
-                .from(
-                    cfg.from
+            let result: Result<()> = async {
+                let email = Message::builder()
+                    .from(
+                        cfg.from
+                            .parse()
+                            .with_context(|| format!("Adresa 'from' invalida: {}", cfg.from))?,
+                    )
+                    .to(recipient
                         .parse()
-                        .with_context(|| format!("Adresa 'from' invalida: {}", cfg.from))?,
-                )
-                .to(recipient
-                    .parse()
-                    .with_context(|| format!("Adresa destinatar invalida: {}", recipient))?)
-                .subject(&subject)
-                .header(ContentType::TEXT_HTML)
-                .body(html_body.clone())
-                .context("Nu pot construi mesajul email")?;
+                        .with_context(|| format!("Adresa destinatar invalida: {}", recipient))?)
+                    .subject(&subject)
+                    .header(ContentType::TEXT_HTML)
+                    .body(html_body.clone())
+                    .context("Nu pot construi mesajul email")?;
 
-            mailer
-                .send(email)
-                .await
-                .with_context(|| format!("Nu pot trimite email catre {}", recipient))?;
+                mailer
+                    .send(email)
+                    .await
+                    .with_context(|| format!("Nu pot trimite email catre {}", recipient))?;
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                failures.push(format!("{}: {:#}", recipient, error));
+            }
+        }
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "livrare email esuata partial/complet: {}",
+                failures.join("; ")
+            );
         }
 
         display::log_alert_sent("Email", &format!("{}", alert.scan_type));
@@ -1140,7 +1167,11 @@ impl Alerter {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_cef_extension, sanitize_cef_header};
+    use super::{sanitize_cef_extension, sanitize_cef_header, Alerter};
+    use crate::config::{AppConfig, SubnetEntry};
+    use crate::detector::{Alert, ScanType};
+    use chrono::Local;
+    use std::collections::HashMap;
 
     #[test]
     fn test_sanitize_header_newline() {
@@ -1200,5 +1231,45 @@ mod tests {
         let input = "a\\|b";
         let output = sanitize_cef_header(input);
         assert_eq!(output, "a\\\\\\|b");
+    }
+
+    #[tokio::test]
+    async fn large_alert_is_sampled_below_safe_udp_size() {
+        let mut app = AppConfig::load("config.toml").unwrap();
+        app.alerting.email.enabled = false;
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        app.alerting.siem.host = "127.0.0.1".to_string();
+        app.alerting.siem.port = receiver.local_addr().unwrap().port();
+        let alerter = Alerter::new(
+            app.alerting,
+            app.detection,
+            HashMap::new(),
+            SubnetEntry::parse_subnets(&HashMap::new()),
+        )
+        .unwrap();
+        let alert = Alert {
+            scan_type: ScanType::Fast,
+            source_ip: "192.0.2.1".parse().unwrap(),
+            dest_ip: Some("198.51.100.1".parse().unwrap()),
+            unique_ports: (0..10_000).collect(),
+            unique_dests: Vec::new(),
+            unique_sources: Vec::new(),
+            timestamp: Local::now(),
+            beacon_port: None,
+            mean_interval_secs: None,
+            cv: None,
+            event_count: None,
+        };
+
+        alerter.send_siem(&alert).await.unwrap();
+        let mut buffer = vec![0u8; 65_507];
+        let (length, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            receiver.recv_from(&mut buffer),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(length <= 60_000);
     }
 }
