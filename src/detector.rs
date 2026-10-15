@@ -430,9 +430,33 @@ fn effective_threshold_value(
     (dynamic.ceil() as usize).clamp(floor.max(1), ceiling.max(1))
 }
 
-/// Cate fluxuri elibereaza o evictie cand o limita este atinsa.
+/// Cate intrari elibereaza o evictie cand o limita este atinsa.
+///
+/// Gasirea celor mai vechi intrari cere o parcurgere O(n). Eliberand un lot
+/// de ~1/8 din limita, parcurgerea se amortizeaza la O(1) per cheie noua, in
+/// loc de O(n) la fiecare cheie noua (ex: flood cu IP-uri sursa spoofed).
 fn eviction_batch(limit: usize) -> usize {
     (limit / 8).max(1)
+}
+
+/// Cate intrari trebuie eliberate ca sa incapa una noua: cel putin surplusul
+/// fata de limita, rotunjit in sus la un lot intreg.
+fn eviction_count(len: usize, limit: usize) -> usize {
+    (len + 1).saturating_sub(limit).max(eviction_batch(limit))
+}
+
+/// Cheile celor mai vechi `count` intrari, dupa `age` (mai mic = mai vechi).
+/// Selectie partiala O(n), fara sortare completa.
+fn oldest_keys<K, A: Ord>(mut aged: Vec<(A, K)>, count: usize) -> Vec<K> {
+    let count = count.min(aged.len());
+    if count == 0 {
+        return Vec::new();
+    }
+    if count < aged.len() {
+        aged.select_nth_unstable_by(count - 1, |left, right| left.0.cmp(&right.0));
+    }
+    aged.truncate(count);
+    aged.into_iter().map(|(_, key)| key).collect()
 }
 
 fn count_unique_ports_in_hits(hits: &[PortHit], window: Duration, now: Instant) -> usize {
@@ -605,13 +629,9 @@ impl Detector {
     }
 
     /// Elimina cele mai vechi `count` fluxuri dintre `candidates` (dupa
-    /// ultimul hit). Selectie partiala O(n), fara sortare completa.
+    /// ultimul hit).
     fn evict_oldest_scan_flows(&self, candidates: Vec<(bool, ScanPairKey)>, count: usize) {
-        let count = count.min(candidates.len());
-        if count == 0 {
-            return;
-        }
-        let mut aged: Vec<(Option<Instant>, bool, ScanPairKey)> = candidates
+        let aged = candidates
             .into_iter()
             .map(|(is_drop, key)| {
                 let map = if is_drop {
@@ -622,15 +642,49 @@ impl Detector {
                 let last = map
                     .get(&key)
                     .and_then(|hits| hits.last().map(|hit| hit.seen_at));
-                (last, is_drop, key)
+                (last, (is_drop, key))
             })
             .collect();
-        if count < aged.len() {
-            aged.select_nth_unstable_by_key(count - 1, |(last, _, _)| *last);
-        }
-        for (_, is_drop, key) in aged.into_iter().take(count) {
+        for (is_drop, key) in oldest_keys(aged, count) {
             self.remove_scan_flow(is_drop, key);
         }
+    }
+
+    /// Elimina complet un set de IP-uri sursa din toate structurile.
+    ///
+    /// Fluxurile de scan sunt gasite prin indexul `source_flows`; restul
+    /// tabelelor sunt parcurse o singura data pentru tot lotul.
+    fn evict_sources(&self, victims: &HashSet<IpAddr>) {
+        if victims.is_empty() {
+            return;
+        }
+        for ip in victims {
+            if let Some((_, flows)) = self.source_flows.remove(ip) {
+                for (is_drop, dest) in flows {
+                    self.remove_scan_flow(is_drop, (*ip, dest));
+                }
+            }
+            self.lateral_hits.remove(ip);
+            self.lateral_cooldowns.remove(ip);
+            self.last_seen.remove(ip);
+        }
+        // Cooldown-urile pot supravietui fluxului (cleanup sterge hit-urile
+        // vechi, nu si cooldown-ul), deci nu sunt acoperite de index.
+        self.fast_cooldowns
+            .retain(|(src, _), _| !victims.contains(src));
+        self.slow_cooldowns
+            .retain(|(src, _), _| !victims.contains(src));
+        self.accept_cooldowns
+            .retain(|(src, _), _| !victims.contains(src));
+        for mut entry in self.distributed_hits.iter_mut() {
+            entry
+                .value_mut()
+                .retain(|hit| !victims.contains(&hit.source_ip));
+        }
+        self.beacon_hits
+            .retain(|(src, _, _), _| !victims.contains(src));
+        self.beacon_cooldowns
+            .retain(|(src, _, _), _| !victims.contains(src));
     }
 
     /// Face loc pentru un flux nou `(source, dest)` respectand
@@ -668,10 +722,9 @@ impl Detector {
                         .collect()
                 })
                 .unwrap_or_default();
-            let excess = per_source + 1 - cfg.max_flows_per_source;
             self.evict_oldest_scan_flows(
                 candidates,
-                excess.max(eviction_batch(cfg.max_flows_per_source)),
+                eviction_count(per_source, cfg.max_flows_per_source),
             );
         }
 
@@ -683,11 +736,7 @@ impl Detector {
                 .map(|entry| (true, *entry.key()))
                 .chain(self.accept_hits.iter().map(|entry| (false, *entry.key())))
                 .collect();
-            let excess = total + 1 - cfg.max_tracked_flows;
-            self.evict_oldest_scan_flows(
-                candidates,
-                excess.max(eviction_batch(cfg.max_tracked_flows)),
-            );
+            self.evict_oldest_scan_flows(candidates, eviction_count(total, cfg.max_tracked_flows));
         }
     }
 
@@ -841,31 +890,15 @@ impl Detector {
         // Acum: `last_seen` urmareste orice IP, indiferent de actiune.
         let is_new_ip = !self.last_seen.contains_key(&ip);
         if is_new_ip && self.last_seen.len() >= cfg.max_tracked_ips {
-            // Gasim IP-ul cu cel mai vechi last_seen (Least Recently Used).
-            let lru_ip: Option<IpAddr> = self
+            // Evictam in lot cele mai vechi IP-uri (Least Recently Used).
+            let aged = self
                 .last_seen
                 .iter()
-                .min_by_key(|e| *e.value())
-                .map(|e| *e.key());
-
-            if let Some(old_ip) = lru_ip {
-                // Eliminam IP-ul LRU din TOATE structurile.
-                self.port_hits.retain(|(src, _), _| *src != old_ip);
-                self.accept_hits.retain(|(src, _), _| *src != old_ip);
-                self.source_flows.remove(&old_ip);
-                self.lateral_hits.remove(&old_ip);
-                self.last_seen.remove(&old_ip);
-                self.fast_cooldowns.retain(|(src, _), _| *src != old_ip);
-                self.slow_cooldowns.retain(|(src, _), _| *src != old_ip);
-                self.accept_cooldowns.retain(|(src, _), _| *src != old_ip);
-                self.lateral_cooldowns.remove(&old_ip);
-                for mut entry in self.distributed_hits.iter_mut() {
-                    entry.value_mut().retain(|hit| hit.source_ip != old_ip);
-                }
-                self.beacon_hits.retain(|(src, _, _), _| *src != old_ip);
-                self.beacon_cooldowns
-                    .retain(|(src, _, _), _| *src != old_ip);
-            }
+                .map(|entry| (*entry.value(), *entry.key()))
+                .collect();
+            let count = eviction_count(self.last_seen.len(), cfg.max_tracked_ips);
+            let victims: HashSet<IpAddr> = oldest_keys(aged, count).into_iter().collect();
+            self.evict_sources(&victims);
         }
 
         // Actualizam last_seen pentru IP-ul curent (nou sau existent).
@@ -1120,12 +1153,14 @@ impl Detector {
                     // `.last()` da `seen_at` cel mai recent O(1).
                     let is_new_dest = !self.distributed_hits.contains_key(&dest_ip);
                     if is_new_dest && self.distributed_hits.len() >= cfg.max_tracked_ips {
-                        let lru_dest: Option<IpAddr> = self
+                        let aged = self
                             .distributed_hits
                             .iter()
-                            .min_by_key(|e| e.value().last().map(|h| h.seen_at).unwrap_or(now))
-                            .map(|e| *e.key());
-                        if let Some(old) = lru_dest {
+                            .map(|e| (e.value().last().map(|h| h.seen_at), *e.key()))
+                            .collect();
+                        let count =
+                            eviction_count(self.distributed_hits.len(), cfg.max_tracked_ips);
+                        for old in oldest_keys(aged, count) {
                             self.distributed_hits.remove(&old);
                             self.distributed_cooldowns.remove(&old);
                         }
@@ -1198,12 +1233,13 @@ impl Detector {
                     // --- Cap pe numarul de flow-uri urmarite (LRU pe ultimul seen_at) ---
                     let is_new_flow = !self.beacon_hits.contains_key(&flow_key);
                     if is_new_flow && self.beacon_hits.len() >= cfg.max_tracked_ips {
-                        let lru_key: Option<(IpAddr, IpAddr, u16)> = self
+                        let aged = self
                             .beacon_hits
                             .iter()
-                            .min_by_key(|e| e.value().last().map(|h| h.seen_at).unwrap_or(now))
-                            .map(|e| *e.key());
-                        if let Some(old) = lru_key {
+                            .map(|e| (e.value().last().map(|h| h.seen_at), *e.key()))
+                            .collect();
+                        let count = eviction_count(self.beacon_hits.len(), cfg.max_tracked_ips);
+                        for old in oldest_keys(aged, count) {
                             self.beacon_hits.remove(&old);
                             self.beacon_cooldowns.remove(&old);
                         }
@@ -3093,5 +3129,69 @@ mod tests {
             .beacon_hits
             .iter()
             .any(|entry| entry.key().0 == old_src));
+    }
+
+    #[test]
+    fn test_source_lru_eviction_keeps_newest_and_cleans_state() {
+        let mut cfg = test_config();
+        cfg.max_tracked_ips = 64;
+        let detector = Detector::new(cfg);
+        let dst = "10.9.9.9";
+
+        for i in 0..1_000u32 {
+            let source = IpAddr::from(std::net::Ipv4Addr::from(0xc000_0200 + i)).to_string();
+            detector.process_event(&make_event_with_dest(&source, dst, 80));
+            assert!(detector.tracked_ips() <= 64);
+        }
+        let newest: IpAddr = IpAddr::from(std::net::Ipv4Addr::from(0xc000_0200 + 999));
+        assert!(detector.last_seen.contains_key(&newest));
+        // Starea per sursa ramane coerenta cu last_seen.
+        for entry in detector.port_hits.iter() {
+            assert!(detector.last_seen.contains_key(&entry.key().0));
+        }
+        for entry in detector.source_flows.iter() {
+            assert!(detector.last_seen.contains_key(entry.key()));
+        }
+    }
+
+    #[test]
+    fn test_spoofed_source_flood_at_ip_limit_is_not_quadratic() {
+        // Inainte: fiecare IP nou peste limita parcurgea last_seen si apoi
+        // ~10 tabele intregi (~35s pentru acest scenariu). Evictia in lot
+        // amortizeaza parcurgerea (<1s).
+        let mut cfg = test_config();
+        cfg.max_tracked_ips = 5_000;
+        let detector = Detector::new(cfg);
+
+        let started = Instant::now();
+        for i in 0..60_000u32 {
+            let source = IpAddr::from(std::net::Ipv4Addr::from(0x0b00_0000 + i)).to_string();
+            detector.process_event(&make_event_with_dest(&source, "10.9.9.9", 80));
+        }
+        assert!(detector.tracked_ips() <= 5_000);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "flood-ul a durat {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn test_distributed_and_beacon_caps_evict_in_batches() {
+        let mut cfg = beaconing_config();
+        cfg.max_tracked_ips = 16;
+        cfg.distributed_scan.enabled = true;
+        let detector = Detector::new(cfg);
+
+        for i in 0..200u32 {
+            let target = IpAddr::from(std::net::Ipv4Addr::from(0x0a05_0000 + i)).to_string();
+            detector.process_event(&make_beacon_accept("10.0.1.5", &target, 443));
+            assert!(detector.beacon_hits.len() <= 16);
+            assert!(detector.distributed_hits.len() <= 16);
+        }
+        let newest: IpAddr = IpAddr::from(std::net::Ipv4Addr::from(0x0a05_0000 + 199));
+        let source: IpAddr = "10.0.1.5".parse().unwrap();
+        assert!(detector.beacon_hits.contains_key(&(source, newest, 443)));
+        assert!(detector.distributed_hits.contains_key(&newest));
     }
 }
