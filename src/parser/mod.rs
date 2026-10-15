@@ -51,6 +51,14 @@ use std::net::IpAddr;
 /// Split the eight CEF fields while respecting escaped header delimiters
 /// (`\|`). `str::splitn('|')` corrupts valid CEF headers containing a pipe.
 pub(crate) fn split_cef_fields(input: &str) -> Option<Vec<&str>> {
+    let fields = split_cef_fields_lenient(input);
+    (fields.len() == 8).then_some(fields)
+}
+
+/// Like [`split_cef_fields`], but returns however many fields (up to eight)
+/// the line has. Used where truncated CEF records still carry useful data,
+/// e.g. a Gaia LEA blob in the Name field with severity/extensions missing.
+pub(crate) fn split_cef_fields_lenient(input: &str) -> Vec<&str> {
     let mut fields = Vec::with_capacity(8);
     let mut start = 0;
     let mut escaped = false;
@@ -66,7 +74,7 @@ pub(crate) fn split_cef_fields(input: &str) -> Option<Vec<&str>> {
         }
     }
     fields.push(&input[start..]);
-    (fields.len() == 8).then_some(fields)
+    fields
 }
 
 /// Eveniment de log parsabil - structura comuna pentru toate formatele.

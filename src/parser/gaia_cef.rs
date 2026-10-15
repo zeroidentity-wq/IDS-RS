@@ -40,7 +40,7 @@
 //
 // =============================================================================
 
-use super::{split_cef_fields, LogEvent, LogParser};
+use super::{split_cef_fields_lenient, LogEvent, LogParser};
 use std::net::IpAddr;
 
 /// Parser pentru blob-uri LEA de la Checkpoint Gaia (via ArcSight).
@@ -125,7 +125,9 @@ impl GaiaCefParser {
     /// 3. Daca NU contine "CEF:" → trateaza toata linia ca blob LEA raw
     fn find_lea_blob(line: &str) -> Option<LeaSource<'_>> {
         if let Some(cef_start) = line.find("CEF:") {
-            let parts = split_cef_fields(&line[cef_start..])?;
+            // Split tolerant: inregistrarile trunchiate (fara severitate sau
+            // extensii) au totusi blob-ul LEA in Name si trebuie parsate.
+            let parts = split_cef_fields_lenient(&line[cef_start..]);
 
             // Strategia 1: blob LEA in Name field (index 5)
             if parts.len() >= 6 {
@@ -301,6 +303,19 @@ mod tests {
         assert_eq!(event.dest_ip.unwrap().to_string(), "10.0.0.1");
         assert_eq!(event.dest_port, 443);
         assert_eq!(event.protocol, "tcp");
+        assert_eq!(event.action, "drop");
+    }
+
+    #[test]
+    fn test_parse_truncated_cef_with_lea_in_name() {
+        // Inregistrare trunchiata: lipsesc Severity si Extensions. Blob-ul LEA
+        // din Name (index 5) este complet si trebuie parsat.
+        let parser = GaiaCefParser::new();
+        let log = "CEF:0|Check Point|VPN-1|R81|Drop|action=\"Drop\" src=\"192.168.11.7\" dst=\"10.0.0.1\" service=\"22\" proto=\"6\"";
+
+        let event = parser.parse(log).unwrap();
+        assert_eq!(event.source_ip.to_string(), "192.168.11.7");
+        assert_eq!(event.dest_port, 22);
         assert_eq!(event.action, "drop");
     }
 
