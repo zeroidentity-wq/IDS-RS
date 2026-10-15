@@ -1,8 +1,9 @@
-use crate::alerter::{Alerter, PermanentFailure, SinkUnavailable};
+use crate::alerter::{Alerter, EmailFailure, PermanentFailure, SinkUnavailable};
 use crate::config::AlertingConfig;
 use crate::detector::Alert;
 use crate::display;
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,40 @@ impl Sink {
     }
 }
 
+/// O intrare din spool: alerta plus, pentru email, destinatarii care inca
+/// nu au primit-o (`None` = toti destinatarii configurati).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpoolRecord {
+    alert: Alert,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recipients: Option<Vec<String>>,
+}
+
+impl SpoolRecord {
+    fn new(alert: Alert) -> Self {
+        Self {
+            alert,
+            recipients: None,
+        }
+    }
+
+    fn for_recipients(&self, recipients: &[String]) -> Self {
+        Self {
+            alert: self.alert.clone(),
+            recipients: Some(recipients.to_vec()),
+        }
+    }
+}
+
+/// Formatul de pe disc. Versiunile anterioare salvau direct `Alert`;
+/// acestea sunt citite in continuare ca intrari pentru toti destinatarii.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredRecord {
+    Current(SpoolRecord),
+    Legacy(Alert),
+}
+
 #[derive(Clone)]
 struct Spool {
     directory: PathBuf,
@@ -49,13 +84,13 @@ impl Spool {
         })
     }
 
-    fn persist(&self, alert: &Alert) -> Result<()> {
-        Self::persist_into(&self.directory, alert)
+    fn persist(&self, record: &SpoolRecord) -> Result<()> {
+        Self::persist_into(&self.directory, record)
     }
 
     /// Salveaza direct in dead-letter o alerta care a esuat definitiv.
-    fn bury(&self, alert: &Alert) -> Result<()> {
-        Self::persist_into(&self.dead_letter, alert)
+    fn bury(&self, record: &SpoolRecord) -> Result<()> {
+        Self::persist_into(&self.dead_letter, record)
     }
 
     /// Muta in dead-letter un fisier existent din spool.
@@ -65,7 +100,17 @@ impl Spool {
         Ok(())
     }
 
-    fn persist_into(directory: &Path, alert: &Alert) -> Result<()> {
+    /// Inlocuieste atomic continutul unui fisier din spool, pastrandu-i
+    /// pozitia in coada (numele determina ordinea).
+    fn rewrite(&self, path: &Path, record: &SpoolRecord) -> Result<()> {
+        let name = path.file_name().context("cale spool fara nume de fisier")?;
+        let temporary = self
+            .directory
+            .join(format!(".{}.tmp", name.to_string_lossy()));
+        Self::write_atomic(&temporary, path, record)
+    }
+
+    fn persist_into(directory: &Path, record: &SpoolRecord) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -74,20 +119,23 @@ impl Spool {
         let stem = format!("{now:020}-{:010}-{sequence:020}", std::process::id());
         let temporary = directory.join(format!(".{stem}.tmp"));
         let final_path = directory.join(format!("{stem}.json"));
-        let payload = serde_json::to_vec(alert).context("nu pot serializa alerta pentru spool")?;
+        Self::write_atomic(&temporary, &final_path, record)
+    }
 
+    fn write_atomic(temporary: &Path, final_path: &Path, record: &SpoolRecord) -> Result<()> {
+        let payload = serde_json::to_vec(record).context("nu pot serializa alerta pentru spool")?;
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(&temporary)
+            .open(temporary)
             .with_context(|| format!("nu pot crea {}", temporary.display()))?;
         file.write_all(&payload)?;
         file.sync_all()?;
-        fs::rename(&temporary, &final_path)?;
+        fs::rename(temporary, final_path)?;
         Ok(())
     }
 
-    fn oldest(&self) -> Result<Option<(PathBuf, Alert)>> {
+    fn oldest(&self) -> Result<Option<(PathBuf, SpoolRecord)>> {
         let mut paths = fs::read_dir(&self.directory)?
             .filter_map(|entry| entry.ok().map(|item| item.path()))
             .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
@@ -98,10 +146,13 @@ impl Spool {
             match fs::read(&path)
                 .with_context(|| format!("nu pot citi {}", path.display()))
                 .and_then(|bytes| {
-                    serde_json::from_slice(&bytes)
+                    serde_json::from_slice::<StoredRecord>(&bytes)
                         .with_context(|| format!("spool corupt: {}", path.display()))
                 }) {
-                Ok(alert) => return Ok(Some((path, alert))),
+                Ok(StoredRecord::Current(record)) => return Ok(Some((path, record))),
+                Ok(StoredRecord::Legacy(alert)) => {
+                    return Ok(Some((path, SpoolRecord::new(alert))))
+                }
                 Err(error) => {
                     let bad = path.with_extension("bad");
                     let _ = fs::rename(&path, &bad);
@@ -180,7 +231,7 @@ fn enqueue_or_spool(sender: &mpsc::Sender<Alert>, spool: &Spool, alert: Alert, l
     match sender.try_send(alert) {
         Ok(()) => {}
         Err(TrySendError::Full(alert) | TrySendError::Closed(alert)) => {
-            if let Err(error) = spool.persist(&alert) {
+            if let Err(error) = spool.persist(&SpoolRecord::new(alert)) {
                 display::log_error(&format!(
                     "FATAL: alerta {} nu a putut fi pusa nici in coada, nici in spool: {:#}",
                     label, error
@@ -207,39 +258,29 @@ async fn run_worker(
     let mut unavailable_reported = false;
     loop {
         match spool.oldest() {
-            Ok(Some((path, alert))) => match deliver(sink, &alerter, &alert).await {
-                Ok(()) => {
-                    if let Err(error) = fs::remove_file(&path) {
-                        display::log_error(&format!(
-                            "Alerta livrata dar spool-ul {} nu poate fi sters: {}",
-                            path.display(),
-                            error
-                        ));
+            Ok(Some((path, record))) => {
+                let result = deliver(sink, &alerter, &record).await;
+                let delivered = result.is_ok();
+                match settle(
+                    sink,
+                    &spool,
+                    Some(&path),
+                    &record,
+                    result,
+                    &mut unavailable_reported,
+                ) {
+                    Settled::Done => {
+                        if delivered {
+                            backoff = retry_initial;
+                        }
                     }
-                    backoff = retry_initial;
-                    unavailable_reported = false;
-                    continue;
-                }
-                Err(error) if is_permanent(&error) => {
-                    report_permanent(sink, &error);
-                    if let Err(bury_error) = spool.bury_file(&path) {
-                        display::log_error(&format!(
-                            "FATAL: nu pot muta {} in dead-letter: {:#}",
-                            path.display(),
-                            bury_error
-                        ));
+                    Settled::Retry => {
                         tokio::time::sleep(backoff).await;
                         backoff = backoff.saturating_mul(2).min(retry_max);
                     }
-                    continue;
                 }
-                Err(error) => {
-                    report_failure(sink, &error, &mut unavailable_reported);
-                    tokio::time::sleep(backoff).await;
-                    backoff = backoff.saturating_mul(2).min(retry_max);
-                    continue;
-                }
-            },
+                continue;
+            }
             Ok(None) => {}
             Err(error) => {
                 display::log_error(&format!("Eroare citire spool {}: {:#}", sink.name(), error));
@@ -252,25 +293,113 @@ async fn run_worker(
         let Some(alert) = receiver.recv().await else {
             break;
         };
-        if let Err(error) = deliver(sink, &alerter, &alert).await {
-            let saved = if is_permanent(&error) {
-                report_permanent(sink, &error);
-                spool.bury(&alert)
-            } else {
-                report_failure(sink, &error, &mut unavailable_reported);
-                spool.persist(&alert)
-            };
-            if let Err(spool_error) = saved {
-                display::log_error(&format!(
-                    "FATAL: nu pot salva alerta {} in spool: {:#}",
-                    sink.name(),
-                    spool_error
-                ));
-            }
-        } else {
+        let record = SpoolRecord::new(alert);
+        let result = deliver(sink, &alerter, &record).await;
+        if result.is_ok() {
             backoff = retry_initial;
-            unavailable_reported = false;
         }
+        settle(
+            sink,
+            &spool,
+            None,
+            &record,
+            result,
+            &mut unavailable_reported,
+        );
+    }
+}
+
+enum Settled {
+    /// Intrarea a fost rezolvata (livrata sau mutata in dead-letter).
+    Done,
+    /// Ceva ramane de reincercat; intrarea e (inca) in spool.
+    Retry,
+}
+
+/// Aplica rezultatul unei livrari asupra spool-ului.
+///
+/// `origin` este fisierul din spool din care provine intrarea, sau `None`
+/// pentru o alerta venita direct din coada (inca nesalvata pe disc).
+fn settle(
+    sink: Sink,
+    spool: &Spool,
+    origin: Option<&Path>,
+    record: &SpoolRecord,
+    result: Result<()>,
+    unavailable_reported: &mut bool,
+) -> Settled {
+    let error = match result {
+        Ok(()) => {
+            *unavailable_reported = false;
+            if let Some(path) = origin {
+                if let Err(error) = fs::remove_file(path) {
+                    display::log_error(&format!(
+                        "Alerta livrata dar spool-ul {} nu poate fi sters: {}",
+                        path.display(),
+                        error
+                    ));
+                }
+            }
+            return Settled::Done;
+        }
+        Err(error) => error,
+    };
+
+    // Email partial: destinatarii care au primit alerta sunt eliminati,
+    // ca un retry sa nu le-o trimita din nou.
+    if let Some(failure) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<EmailFailure>())
+    {
+        if !failure.rejected.is_empty() {
+            log_save_error(sink, spool.bury(&record.for_recipients(&failure.rejected)));
+        }
+        if failure.pending.is_empty() {
+            report_permanent(sink, &error);
+            if let Some(path) = origin {
+                let _ = fs::remove_file(path);
+            }
+            return Settled::Done;
+        }
+        report_failure(sink, &error, unavailable_reported);
+        let retry = record.for_recipients(&failure.pending);
+        log_save_error(
+            sink,
+            match origin {
+                Some(path) => spool.rewrite(path, &retry),
+                None => spool.persist(&retry),
+            },
+        );
+        return Settled::Retry;
+    }
+
+    if is_permanent(&error) {
+        report_permanent(sink, &error);
+        let buried = match origin {
+            Some(path) => spool.bury_file(path),
+            None => spool.bury(record),
+        };
+        if buried.is_err() {
+            log_save_error(sink, buried);
+            return Settled::Retry;
+        }
+        return Settled::Done;
+    }
+
+    report_failure(sink, &error, unavailable_reported);
+    if origin.is_none() {
+        log_save_error(sink, spool.persist(record));
+    }
+    Settled::Retry
+}
+
+fn log_save_error(sink: Sink, result: Result<()>) {
+    if let Err(error) = result {
+        display::log_error(&format!(
+            "FATAL: nu pot salva alerta {} in spool: {:#}",
+            sink.name(),
+            error
+        ));
     }
 }
 
@@ -304,10 +433,14 @@ fn report_permanent(sink: Sink, error: &anyhow::Error) {
     ));
 }
 
-async fn deliver(sink: Sink, alerter: &Alerter, alert: &Alert) -> Result<()> {
+async fn deliver(sink: Sink, alerter: &Alerter, record: &SpoolRecord) -> Result<()> {
     match sink {
-        Sink::Siem => alerter.send_siem(alert).await,
-        Sink::Email => alerter.send_email(alert).await,
+        Sink::Siem => alerter.send_siem(&record.alert).await,
+        Sink::Email => {
+            alerter
+                .send_email(&record.alert, record.recipients.as_deref())
+                .await
+        }
     }
 }
 
@@ -342,11 +475,11 @@ mod tests {
         );
         let base = std::env::temp_dir().join(unique);
         let spool = Spool::new(&base, Sink::Siem).unwrap();
-        spool.persist(&alert()).unwrap();
+        spool.persist(&SpoolRecord::new(alert())).unwrap();
         let (path, recovered) = spool.oldest().unwrap().unwrap();
         assert!(path.exists());
         assert_eq!(
-            recovered.source_ip,
+            recovered.alert.source_ip,
             "192.0.2.1".parse::<std::net::IpAddr>().unwrap()
         );
         fs::remove_dir_all(base).unwrap();
@@ -361,7 +494,7 @@ mod tests {
         );
         let base = std::env::temp_dir().join(unique);
         let spool = Spool::new(&base, Sink::Siem).unwrap();
-        spool.persist(&alert()).unwrap();
+        spool.persist(&SpoolRecord::new(alert())).unwrap();
 
         let mut app = crate::config::AppConfig::load("config.toml").unwrap();
         app.alerting.siem.enabled = false;
@@ -406,8 +539,8 @@ mod tests {
         let poisoned = alert();
         let mut healthy = alert();
         healthy.source_ip = "192.0.2.2".parse().unwrap();
-        spool.persist(&poisoned).unwrap();
-        spool.persist(&healthy).unwrap();
+        spool.persist(&SpoolRecord::new(poisoned.clone())).unwrap();
+        spool.persist(&SpoolRecord::new(healthy)).unwrap();
 
         let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut app = crate::config::AppConfig::load("config.toml").unwrap();
@@ -438,6 +571,100 @@ mod tests {
 
         assert!(spool.oldest().unwrap().is_none());
         assert_eq!(fs::read_dir(&spool.dead_letter).unwrap().count(), 1);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn legacy_spool_entries_are_still_readable() {
+        let unique = format!(
+            "ids-rs-spool-test-{}-{}",
+            std::process::id(),
+            SPOOL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let base = std::env::temp_dir().join(unique);
+        let spool = Spool::new(&base, Sink::Email).unwrap();
+        fs::write(
+            spool.directory.join("0-legacy.json"),
+            serde_json::to_vec(&alert()).unwrap(),
+        )
+        .unwrap();
+
+        let (_, record) = spool.oldest().unwrap().unwrap();
+        assert!(record.recipients.is_none());
+        assert_eq!(record.alert.unique_ports, vec![22, 80, 443]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn email_retry_keeps_only_undelivered_recipients() {
+        let unique = format!(
+            "ids-rs-spool-test-{}-{}",
+            std::process::id(),
+            SPOOL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let base = std::env::temp_dir().join(unique);
+        let spool = Spool::new(&base, Sink::Email).unwrap();
+        let (port, delivered) =
+            crate::alerter::test_smtp::start(std::collections::HashMap::from([
+                ("gone@test.local".to_string(), "550".to_string()),
+                ("later@test.local".to_string(), "451".to_string()),
+            ]))
+            .await;
+
+        let mut app = crate::config::AppConfig::load("config.toml").unwrap();
+        app.alerting.siem.enabled = false;
+        app.alerting.email.enabled = true;
+        app.alerting.email.smtp_server = "127.0.0.1".to_string();
+        app.alerting.email.smtp_port = port;
+        app.alerting.email.smtp_tls = false;
+        app.alerting.email.to = vec![
+            "ok@test.local".to_string(),
+            "gone@test.local".to_string(),
+            "later@test.local".to_string(),
+        ];
+        let alerter = Alerter::new(
+            app.alerting,
+            app.detection,
+            std::collections::HashMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let record = SpoolRecord::new(alert());
+        let result = deliver(Sink::Email, &alerter, &record).await;
+        let mut reported = false;
+        assert!(matches!(
+            settle(Sink::Email, &spool, None, &record, result, &mut reported),
+            Settled::Retry
+        ));
+
+        let (path, pending) = spool.oldest().unwrap().unwrap();
+        assert_eq!(
+            pending.recipients,
+            Some(vec!["later@test.local".to_string()])
+        );
+        let dead = fs::read_dir(&spool.dead_letter)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let buried: SpoolRecord = serde_json::from_slice(&fs::read(dead.path()).unwrap()).unwrap();
+        assert_eq!(buried.recipients, Some(vec!["gone@test.local".to_string()]));
+
+        // Retry din spool: ok@ nu primeste a doua oara.
+        let result = deliver(Sink::Email, &alerter, &pending).await;
+        settle(
+            Sink::Email,
+            &spool,
+            Some(&path),
+            &pending,
+            result,
+            &mut reported,
+        );
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec!["ok@test.local".to_string()]
+        );
         fs::remove_dir_all(base).unwrap();
     }
 }

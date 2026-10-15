@@ -411,6 +411,31 @@ impl std::fmt::Display for PermanentFailure {
 
 impl std::error::Error for PermanentFailure {}
 
+/// Email-ul nu a ajuns la toti destinatarii. Destinatarii care l-au primit
+/// nu apar aici, ca un retry sa nu le trimita aceeasi alerta din nou.
+#[derive(Debug)]
+pub struct EmailFailure {
+    /// Esec tranzitoriu (conexiune, 4xx): se reincearca doar pentru acestia.
+    pub pending: Vec<String>,
+    /// Esec permanent (5xx, mesaj invalid): merg in dead-letter.
+    pub rejected: Vec<String>,
+    details: Vec<String>,
+}
+
+impl std::fmt::Display for EmailFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "livrare email esuata ({} de reincercat, {} respinsi definitiv): {}",
+            self.pending.len(),
+            self.rejected.len(),
+            self.details.join("; ")
+        )
+    }
+}
+
+impl std::error::Error for EmailFailure {}
+
 /// Componenta de alertare - trimite notificari catre SIEM si email.
 ///
 /// NOTA RUST: Acest struct DETINE (owns) configurarea. Clonarea s-a facut
@@ -507,10 +532,13 @@ impl Alerter {
     }
 
     /// Send to the email sink only.
-    pub async fn send_email(&self, alert: &Alert) -> Result<()> {
+    ///
+    /// `recipients` restrange livrarea la un subset al destinatarilor
+    /// configurati (retry dupa un esec partial); `None` = toti.
+    pub async fn send_email(&self, alert: &Alert, recipients: Option<&[String]>) -> Result<()> {
         let mailer_guard = self.mailer.load();
         if let Some(ref mailer) = **mailer_guard {
-            self.send_email_alert(alert, mailer).await
+            self.send_email_alert(alert, recipients, mailer).await
         } else {
             Err(SinkUnavailable(
                 "mailer SMTP indisponibil (email dezactivat sau eroare la initializare)",
@@ -961,6 +989,7 @@ impl Alerter {
     async fn send_email_alert(
         &self,
         alert: &Alert,
+        recipients: Option<&[String]>,
         mailer: &AsyncSmtpTransport<Tokio1Executor>,
     ) -> Result<()> {
         let alert_cfg = self.config.load();
@@ -1147,15 +1176,21 @@ impl Alerter {
             cmd_dst_ip: &cmd_dst_ip,
         });
 
-        // Trimitem un email catre fiecare destinatar.
+        // Trimitem un email separat catre fiecare destinatar si retinem
+        // exact cine NU l-a primit: la retry, cei care l-au primit deja nu
+        // trebuie sa primeasca din nou aceeasi alerta.
         //
-        // NOTA RUST - ITERATIE cu `for`:
-        // `for recipient in &cfg.to` itereaza prin referinte (&String).
-        // Nu consumam Vec-ul - il imprumutam doar pentru citire.
-        let mut failures = Vec::new();
-        for recipient in &cfg.to {
-            let result: Result<()> = async {
-                let email = Message::builder()
+        // Un destinatar eliminat intre timp din config (SIGHUP) este sarit.
+        let targets: Vec<&String> = match recipients {
+            Some(subset) => cfg.to.iter().filter(|r| subset.contains(r)).collect(),
+            None => cfg.to.iter().collect(),
+        };
+        let mut pending = Vec::new();
+        let mut rejected = Vec::new();
+        let mut details = Vec::new();
+        for recipient in targets {
+            let email: Result<Message> = (|| {
+                Message::builder()
                     .from(
                         cfg.from
                             .parse()
@@ -1167,24 +1202,33 @@ impl Alerter {
                     .subject(&subject)
                     .header(ContentType::TEXT_HTML)
                     .body(html_body.clone())
-                    .context("Nu pot construi mesajul email")?;
+                    .context("Nu pot construi mesajul email")
+            })();
+            let email = match email {
+                Ok(email) => email,
+                Err(error) => {
+                    details.push(format!("{}: {:#}", recipient, error));
+                    rejected.push(recipient.clone());
+                    continue;
+                }
+            };
 
-                mailer
-                    .send(email)
-                    .await
-                    .with_context(|| format!("Nu pot trimite email catre {}", recipient))?;
-                Ok(())
-            }
-            .await;
-            if let Err(error) = result {
-                failures.push(format!("{}: {:#}", recipient, error));
+            if let Err(error) = mailer.send(email).await {
+                details.push(format!("{}: {}", recipient, error));
+                if error.is_permanent() {
+                    rejected.push(recipient.clone());
+                } else {
+                    pending.push(recipient.clone());
+                }
             }
         }
-        if !failures.is_empty() {
-            anyhow::bail!(
-                "livrare email esuata partial/complet: {}",
-                failures.join("; ")
-            );
+        if !pending.is_empty() || !rejected.is_empty() {
+            return Err(EmailFailure {
+                pending,
+                rejected,
+                details,
+            }
+            .into());
         }
 
         display::log_alert_sent("Email", &format!("{}", alert.scan_type));
@@ -1196,9 +1240,87 @@ impl Alerter {
 // Teste unitare — sanitize_cef()
 // =============================================================================
 
+/// Server SMTP minimal pentru teste: accepta orice destinatar, cu exceptia
+/// celor din `responses`, carora le raspunde la RCPT cu codul dat (ex: 550
+/// = permanent, 451 = tranzitoriu). Inregistreaza destinatarii carora le-a
+/// fost livrat efectiv un mesaj.
+#[cfg(test)]
+pub(crate) mod test_smtp {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    pub(crate) type Delivered = Arc<Mutex<Vec<String>>>;
+
+    pub(crate) async fn start(responses: HashMap<String, String>) -> (u16, Delivered) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let delivered: Delivered = Arc::default();
+        let log = Arc::clone(&delivered);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let responses = responses.clone();
+                let log = Arc::clone(&log);
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read).lines();
+                    let mut accepted = Vec::new();
+                    let _ = write.write_all(b"220 fake\r\n").await;
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let upper = line.to_ascii_uppercase();
+                        let reply = if upper.starts_with("RCPT TO:") {
+                            let address = line[8..]
+                                .trim()
+                                .trim_start_matches('<')
+                                .split('>')
+                                .next()
+                                .unwrap_or_default()
+                                .to_string();
+                            match responses.get(&address) {
+                                Some(code) => format!("{code} nu\r\n"),
+                                None => {
+                                    accepted.push(address);
+                                    "250 ok\r\n".to_string()
+                                }
+                            }
+                        } else if upper == "DATA" {
+                            let _ = write.write_all(b"354 go\r\n").await;
+                            while let Ok(Some(body)) = lines.next_line().await {
+                                if body == "." {
+                                    break;
+                                }
+                            }
+                            log.lock().unwrap().append(&mut accepted);
+                            "250 ok\r\n".to_string()
+                        } else if upper.starts_with("RSET") {
+                            accepted.clear();
+                            "250 ok\r\n".to_string()
+                        } else if upper.starts_with("QUIT") {
+                            let _ = write.write_all(b"221 bye\r\n").await;
+                            break;
+                        } else {
+                            "250 ok\r\n".to_string()
+                        };
+                        if write.write_all(reply.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        (port, delivered)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_cef_extension, sanitize_cef_header, Alerter, SinkUnavailable};
+    use super::{
+        sanitize_cef_extension, sanitize_cef_header, Alerter, EmailFailure, SinkUnavailable,
+    };
     use crate::config::{AppConfig, SubnetEntry};
     use crate::detector::{Alert, ScanType};
     use chrono::Local;
@@ -1332,7 +1454,64 @@ mod tests {
 
         let siem = alerter.send_siem(&alert).await.unwrap_err();
         assert!(siem.downcast_ref::<SinkUnavailable>().is_some());
-        let email = alerter.send_email(&alert).await.unwrap_err();
+        let email = alerter.send_email(&alert, None).await.unwrap_err();
         assert!(email.downcast_ref::<SinkUnavailable>().is_some());
+    }
+
+    #[tokio::test]
+    async fn partial_email_failure_reports_only_undelivered_recipients() {
+        let (port, delivered) = super::test_smtp::start(HashMap::from([
+            ("gone@test.local".to_string(), "550".to_string()),
+            ("later@test.local".to_string(), "451".to_string()),
+        ]))
+        .await;
+        let mut app = AppConfig::load("config.toml").unwrap();
+        app.alerting.siem.enabled = false;
+        app.alerting.email.enabled = true;
+        app.alerting.email.smtp_server = "127.0.0.1".to_string();
+        app.alerting.email.smtp_port = port;
+        app.alerting.email.smtp_tls = false;
+        app.alerting.email.to = vec![
+            "ok@test.local".to_string(),
+            "gone@test.local".to_string(),
+            "later@test.local".to_string(),
+        ];
+        let alerter = Alerter::new(
+            app.alerting,
+            app.detection,
+            HashMap::new(),
+            SubnetEntry::parse_subnets(&HashMap::new()),
+        )
+        .unwrap();
+        let alert = Alert {
+            scan_type: ScanType::Fast,
+            source_ip: "192.0.2.1".parse().unwrap(),
+            dest_ip: Some("198.51.100.1".parse().unwrap()),
+            unique_ports: vec![22, 80],
+            unique_dests: Vec::new(),
+            unique_sources: Vec::new(),
+            timestamp: Local::now(),
+            beacon_port: None,
+            mean_interval_secs: None,
+            cv: None,
+            event_count: None,
+        };
+
+        let error = alerter.send_email(&alert, None).await.unwrap_err();
+        let failure = error.downcast_ref::<EmailFailure>().unwrap();
+        assert_eq!(failure.pending, vec!["later@test.local".to_string()]);
+        assert_eq!(failure.rejected, vec!["gone@test.local".to_string()]);
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec!["ok@test.local".to_string()]
+        );
+
+        // Retry-ul vizeaza doar destinatarul ramas; ok@ nu primeste din nou.
+        let pending = failure.pending.clone();
+        let _ = alerter.send_email(&alert, Some(&pending)).await;
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec!["ok@test.local".to_string()]
+        );
     }
 }
