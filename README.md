@@ -56,6 +56,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [Compilare](#compilare)
 - [Configurare](#configurare)
 - [Formate de log — Anatomie si flux](#formate-de-log--anatomie-si-flux)
+- [Loguri de la alte firewall-uri — Parser custom](#loguri-de-la-alte-firewall-uri--parser-custom)
 - [Calatoria unui eveniment — De la firewall la SIEM](#calatoria-unui-eveniment--de-la-firewall-la-siem)
 - [Rulare](#rulare)
 - [Testare](#testare)
@@ -76,18 +77,19 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 | Categorie | Detalii |
 |-----------|---------|
 | **Detectie** | Fast Scan, Slow Scan, Accept Scan, Lateral Movement — toate funcționale |
-| **Parseri** | Checkpoint Gaia, CEF/ArcSight, Gaia-CEF (LEA blob in CEF Name) |
+| **Parseri** | Checkpoint Gaia, CEF/ArcSight, Gaia-CEF (LEA blob in CEF Name), Custom configurabil (cheie=valoare / CSV — FortiGate, iptables, Palo Alto etc.) |
 | **Alertare** | SIEM (UDP CEF), Email (SMTP async) |
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
 | **Livrare** | Cozi separate SIEM/email, spool durabil pe disc, dead-letter, retry per destinatar |
-| **Teste** | 117 teste (114 biblioteca + 3 binar) — toate trec |
+| **Teste** | 145 teste (142 biblioteca + 3 binar) — toate trec |
 | **Clippy** | 0 warnings (`cargo clippy --all-targets -- -D warnings` in CI) |
 
 ### Implementat
 
 - [x] Detectie Fast Scan + Slow Scan + Accept Scan
 - [x] Parseri Gaia, CEF si Gaia-CEF (LEA blob in CEF Name)
+- [x] Parser custom configurabil din `config.toml` (`kv` / `csv`) + subcomenzile `learn` si `test-parser` — vezi [Parser custom](#loguri-de-la-alte-firewall-uri--parser-custom)
 - [x] Alertare SIEM (UDP CEF) si Email (SMTP async cu cache transport)
 - [x] Sanitizare campuri CEF anti-injection
 - [x] Rate Limiting UDP (Token Bucket)
@@ -102,7 +104,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Web Dashboard (#25) — server HTTP embedded cu graf D3.js force-directed, API JSON, auto-refresh 5s
 - [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
 - [x] Livrare durabila: spool pe disc, dead-letter pentru esecuri permanente, retry email doar catre destinatarii ramasi, golirea cozilor in spool la oprire
-- [x] Teste: 117 passed (parseri, detector, livrare/spool cu server SMTP fals, config strict, reload, web auth, whitelist si toate detectiile)
+- [x] Teste: 145 passed (parser custom, learn/test-parser, parseri, detector, livrare/spool cu server SMTP fals, config strict, reload, web auth, whitelist si toate detectiile)
 
 ### Hardening operational
 
@@ -145,7 +147,7 @@ procesul nu porneste (in loc sa ruleze fara semnale functionale).
 
 ### De implementat
 
-- [ ] Parser FortiGate (format Fortinet)
+- [x] Parser FortiGate (format Fortinet) — prin parser-ul custom
 - [ ] Raport zilnic email cu clasificare subretele
 - [x] Hot reload config la SIGHUP
 - [x] Lateral Movement detection (#22)
@@ -161,7 +163,7 @@ procesul nu porneste (in loc sa ruleze fara semnale functionale).
 - [ ] Supresie/deduplicare alerte — cooldown per IP per tip alerta, previne flood de emailuri (#28)
 
 #### Parseri noi
-- [ ] Parser iptables/nftables — firewall Linux (#29)
+- [x] Parser iptables/nftables — firewall Linux (#29) — prin parser-ul custom
 - [ ] Parser Cisco ASA (#30)
 - [ ] File watcher (tail -f echivalent) — citire din fisiere log locale, nu doar UDP (#31)
 
@@ -319,7 +321,7 @@ Constrangerile validate:
 [network]
 listen_address = "0.0.0.0"    # Interfata de ascultare
 listen_port = 5555             # Port UDP pentru receptie log-uri
-parser = "gaia"                # Parser activ: "gaia", "cef" sau "gaia_cef"
+parser = "gaia"                # Parser activ: "gaia", "cef", "gaia_cef" sau "custom"
 # debug = true                 # Mod debug: afiseaza fiecare pachet cu validare parsare
 
 [network.hostnames]            # Mapping static IP → hostname (optional)
@@ -390,6 +392,10 @@ Sep 3 15:12:20 192.168.99.1 Checkpoint: 3Sep2007 15:12:08 drop 192.168.11.7 >eth
 
 In acest format, ArcSight pune tot blob-ul LEA (perechi `key="value"`) in campul Name (index 5)
 al CEF-ului, nu in extensii (index 7). Parser-ul `gaia_cef` extrage campurile din Name.
+
+**Custom** — orice alt firewall care trimite linii `cheie=valoare` sau CSV (FortiGate,
+iptables, Palo Alto...). Formatul se descrie in `[custom_parser]`; vezi
+[Loguri de la alte firewall-uri](#loguri-de-la-alte-firewall-uri--parser-custom).
 
 ---
 
@@ -588,6 +594,111 @@ un ArcSight SmartConnector instalat, deoarece acesta normalizeaza totul la CEF.
 Modul `"gaia"` este util cand conectezi firewall-ul **direct** la IDS-RS, fara intermediar.
 Modul `"gaia_cef"` este pentru cazul specific in care ArcSight primeste log-uri LEA v5
 de la Checkpoint vechi si le pune in campul Name al CEF-ului, nu in extensii.
+
+---
+
+## Loguri de la alte firewall-uri — Parser custom
+
+Parserele `gaia`, `cef` si `gaia_cef` sunt facute pentru Check Point. Pentru orice
+alt firewall care trimite linii **cheie=valoare** sau **CSV**, IDS-RS are parser-ul
+`custom`: formatul se descrie in `config.toml`, fara modificari de cod.
+
+Formatul **nu este ghicit la rulare**. Intr-un IDS, o linie interpretata gresit nu
+da nicio eroare, doar rateaza atacuri — de aceea maparea este explicita, iar
+programul ajuta doar la scrierea ei (`learn`) si la verificarea ei (`test-parser`).
+
+### Pasii de configurare
+
+1. **Colecteaza un sample** de cateva sute de linii, cat mai variat: conexiuni
+   blocate, conexiuni permise si alte tipuri de log pe care le trimite firewall-ul.
+
+2. **Genereaza o propunere:**
+   ```bash
+   ./target/release/ids-rs learn sample.log
+   ```
+   Comanda afiseaza campurile gasite (tipul dedus si exemple de valori), o
+   sectiune `[custom_parser]` gata de copiat si cate linii din sample parseaza ea.
+   Liniile `# VERIFICA:` marcheaza ce a fost ghicit, iar `# TODO:` ce lipseste.
+
+3. **Copiaza sectiunea in `config.toml`** si seteaza `parser = "custom"` in `[network]`.
+   Verifica fiecare camp si muta in `drop_values` / `accept_values` valorile din
+   comentariul „Valori de actiune neclasificate”, daca au sens pentru voi.
+
+4. **Verifica pe sample:**
+   ```bash
+   ./target/release/ids-rs test-parser config.toml sample.log
+   ```
+   ```
+     Parsate:               23  (drop 20, accept 3)
+     Actiune nemapata:       1
+         "server-rst" ×1
+     Ignorate:               1  (alt format, require_text lipsa, IP/port lipsa sau invalid)
+
+   Exemple parsate:
+     linia 1      drop   192.168.1.66 → 10.0.0.9:21223/tcp
+   ```
+   Repeta pasii 3–4 pana cand rezultatul corespunde asteptarilor.
+
+5. **Porneste IDS-ul.** Evenimentele cu actiune nemapata sunt ignorate, dar raportate
+   la fiecare 30 de secunde (`N evenimente ignorate: actiune nemapata (ex: "...")`),
+   ca o mapare incompleta sa nu ascunda trafic fara urma.
+
+### Referinta `[custom_parser]`
+
+| Camp | Obligatoriu | Descriere |
+|------|-------------|-----------|
+| `format` | da | `"kv"` — perechi `cheie=valoare` separate prin spatii, valori optional intre ghilimele; `"csv"` — coloane separate de `delimiter` |
+| `delimiter` | nu | Doar pentru `csv`. Implicit `","`; ex. `";"`, `"\t"`, `"\|"` |
+| `require_text` | nu | Liniile care nu contin textul sunt ignorate (ex. `'type="traffic"'`, `",TRAFFIC,"`) |
+| `fields.src_ip` | da | Cheia (kv) sau indexul coloanei de la 0 (csv) cu IP-ul sursa |
+| `fields.dst_ip` | da | IP-ul destinatie — fara el nu se pot forma perechile pentru Fast/Slow/Accept Scan |
+| `fields.dst_port` | da | Portul destinatie; liniile fara port valid (ex. ICMP) sunt ignorate |
+| `fields.protocol` | nu | Nume (`TCP`) sau numar IANA (`6`); implicit `tcp` |
+| `fields.action` + `drop_values` / `accept_values` | una din doua | Campul cu actiunea si valorile care inseamna drop / accept (fara diferenta majuscule/minuscule) |
+| `action_from_text` | una din doua | Pentru log-uri fara camp de actiune: `{ "TEXT" = "drop" \| "accept" }`, cautat in linie; castiga textul cel mai lung |
+
+Drop-urile alimenteaza Fast Scan si Slow Scan; accept-urile alimenteaza Accept Scan,
+Lateral Movement, Distributed Scan si Beaconing. Valorile care nu apar in nicio
+lista (ex. `reject` daca nu l-ati adaugat) nu ajung la detector.
+
+Validarea la pornire raporteaza toate erorile odata: sectiune lipsa, ambele sau
+niciuna dintre sursele de actiune, aceeasi valoare la drop si accept, coloana
+numerica in format `kv` sau cheie text in format `csv`.
+
+### Exemple gata facute
+
+La finalul `config.toml` sunt trei exemple comentate, verificate automat de teste
+pe sample-urile din `tester/`:
+
+| Firewall | Format | Actiunea vine din | Sample |
+|----------|--------|-------------------|--------|
+| FortiGate | `kv`, `require_text = 'type="traffic"'` | `action` (`deny` / `accept`, `close`, `timeout`) | `tester/sample_fast_fortigate.log` |
+| iptables | `kv` (`SRC=`, `DST=`, `DPT=`) | prefixul `--log-prefix` (`FW-DROP` / `FW-ACCEPT`) | `tester/sample_fast_iptables.log` |
+| Palo Alto | `csv`, coloanele 7, 8, 25, 29, 30 | coloana 30 (`deny`, `drop`, `reset-*` / `allow`) | `tester/sample_fast_paloalto.log` |
+
+Valorile de actiune din exemple urmeaza documentatia producatorilor — confirmati-le
+pe log-urile voastre cu `test-parser`. Pentru iptables, prefixele trebuie sa fie cele
+din regulile voastre, de exemplu:
+```bash
+iptables -A INPUT -j LOG --log-prefix "FW-DROP: "
+```
+
+Test complet cu tester-ul (dupa ce ati activat exemplul corespunzator):
+```bash
+python3 tester/tester.py fast-scan --format fortigate --ports 20 --delay 0.1
+python3 tester/tester.py fast-scan --format iptables  --ports 20 --delay 0.1
+python3 tester/tester.py fast-scan --format paloalto  --ports 20 --delay 0.1
+```
+
+### Limitari
+
+- Un singur parser per instanta: un firewall cu alt format ruleaza intr-o instanta
+  separata, cu propriul `config.toml` si port.
+- Doar formate pe o singura linie, `kv` sau `csv` (nu JSON, nu XML, nu multi-linie).
+- `[custom_parser]` si `network.parser` necesita restart; la `SIGHUP` modificarile
+  lor sunt raportate si ignorate.
+- `learn` analizeaza primele 10.000 de linii; la CSV generic alegerea coloanelor
+  este cea mai nesigura — verificati-o pe tabelul de campuri afisat.
 
 ---
 
@@ -828,6 +939,12 @@ Fiecare componenta face un singur lucru bine:
 
 # Cu debug logging intern (tracing)
 RUST_LOG=debug ./target/release/ids-rs
+
+# Propune [custom_parser] dintr-un sample de log (nu porneste IDS-ul)
+./target/release/ids-rs learn sample.log
+
+# Verifica parser-ul configurat pe un sample (cod de iesire 1 daca nu parseaza nimic)
+./target/release/ids-rs test-parser config.toml sample.log
 ```
 
 ### Mod Debug (diagnostic parsare)
@@ -900,7 +1017,7 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 114 passed` (biblioteca) si `test result: ok. 3 passed` (binar).
+Rezultat asteptat: `test result: ok. 142 passed` (biblioteca) si `test result: ok. 3 passed` (binar).
 
 Pentru verificarea completa, ca in CI:
 
@@ -914,6 +1031,9 @@ Testele acopera:
 - Parser GAIA: drop valid, accept parsat (nu ignorat), broadcast fara src, ICMP fara service, format invalid
 - Parser CEF: drop valid, accept parsat, syslog header, syslog priority header, non-CEF, campuri incomplete
 - Parser Gaia-CEF: drop valid, accept valid, fara src, fara service, proto UDP/ICMP mapping, case-insensitive action, non-CEF, actiune irelevanta, dest_ip optional
+- Parser custom: FortiGate / iptables / Palo Alto, `require_text`, actiuni nemapate numarate, prefix iptables cel mai specific, ghilimele si escape-uri, UTF-8; exemplele din `config.toml` ruleaza pe sample-urile din `tester/`
+- `learn` / `test-parser`: detectie format, mapare dupa nume si continut, TOML generat recitit identic, escapare text din sample, raport parsate / nemapate / ignorate
+- Config custom: sectiune obligatorie, sursa de actiune unica, drop/accept fara suprapuneri, coloane vs chei, fixat la SIGHUP
 - Detector Fast Scan: alert, sub prag, cooldown, cleanup, IP-uri separate, max_hits_per_ip, max_tracked_ips LRU
 - Detector Slow Scan: alert dedicat, cooldown, independenta fata de Fast Scan (`slow_test_config()`)
 - Detector Accept Scan: alert accept, drop nu declanseaza accept scan, accept nu declanseaza fast scan, cooldown accept
@@ -942,6 +1062,12 @@ Proiectul include fisiere de log pre-generate, gata de replay:
 | `sample_slow_gaia_cef.log` | GAIA-CEF | 35 | 35 drop-uri LEA in CEF Name, porturi unice | Alerta Slow Scan |
 | `sample_normal_gaia_cef.log` | GAIA-CEF | 5 | 5 drop-uri LEA in CEF Name (sub prag) | Fara alerta |
 | `sample2_gaia.log` | GAIA | 56 | Log-uri reale Checkpoint (accept + drop mixt) | Depinde de continut |
+| `sample_fast_fortigate.log` | FortiGate (custom) | 25 | 20 deny + 3 accept + 1 log de sistem + 1 `server-rst` | Alerta Fast Scan; 1 actiune nemapata |
+| `sample_fast_iptables.log` | iptables (custom) | 25 | 20 `FW-DROP` + 3 `FW-ACCEPT` + 1 linie kernel + 1 `FW-LOG` | Alerta Fast Scan; 1 actiune nemapata |
+| `sample_fast_paloalto.log` | Palo Alto (custom) | 24 | 20 deny + 3 allow (TRAFFIC) + 1 log SYSTEM | Alerta Fast Scan |
+
+Sample-urile custom necesita `parser = "custom"` si exemplul corespunzator din
+`[custom_parser]` (comentat la finalul `config.toml`).
 
 ---
 
@@ -1131,12 +1257,14 @@ ids-rs/
 │   ├── alerter.rs          # Trimitere alerte: SIEM (UDP) + Email (SMTP async)
 │   ├── delivery.rs         # Cozi de livrare, spool pe disc, dead-letter, retry
 │   ├── web.rs              # Dashboard web embedded (axum): API alerte/graf/dosar IP
+│   ├── parser_tools.rs     # Subcomenzile learn si test-parser
 │   ├── lib.rs              # Exporta modulele pentru binar si teste
 │   └── parser/
 │       ├── mod.rs          # Trait LogParser, LogEvent, factory function
 │       ├── gaia.rs         # Parser Checkpoint Gaia (format real syslog)
 │       ├── cef.rs          # Parser CEF / ArcSight
-│       └── gaia_cef.rs     # Parser Gaia LEA blob in CEF Name (via ArcSight)
+│       ├── gaia_cef.rs     # Parser Gaia LEA blob in CEF Name (via ArcSight)
+│       └── custom.rs       # Parser declarativ din [custom_parser] (kv / csv)
 └── tester/
     ├── tester.py              # Script Python de testare (fast/slow/normal/replay/sample)
     ├── sample_fast_gaia.log   # 20 drop-uri GAIA (Fast Scan)
@@ -1148,7 +1276,10 @@ ids-rs/
     ├── sample_fast_gaia_cef.log   # 20 drop-uri GAIA-CEF (Fast Scan)
     ├── sample_slow_gaia_cef.log   # 35 drop-uri GAIA-CEF (Slow Scan)
     ├── sample_normal_gaia_cef.log # 5 drop-uri GAIA-CEF  (sub prag, trafic normal)
-    └── sample2_gaia.log           # 56 log-uri reale Checkpoint GAIA (accept + drop mixt)
+    ├── sample2_gaia.log           # 56 log-uri reale Checkpoint GAIA (accept + drop mixt)
+    ├── sample_fast_fortigate.log  # FortiGate: Fast Scan + linii ignorate/nemapate (custom)
+    ├── sample_fast_iptables.log   # iptables:  Fast Scan + linii ignorate/nemapate (custom)
+    └── sample_fast_paloalto.log   # Palo Alto: Fast Scan + log SYSTEM ignorat (custom)
 ```
 
 ### Dependente principale
