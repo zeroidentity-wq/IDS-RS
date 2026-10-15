@@ -157,6 +157,37 @@ impl TokenBucket {
 ///
 /// IP-ul expeditorului unei datagrame, in forma canonica.
 ///
+/// Limita de intrari in harta de rate limitere per expeditor. Cu
+/// `trusted_senders` setat harta are cel mult o intrare per IP permis, dar
+/// fara el (permis doar pe loopback) fiecare adresa din 127.0.0.0/8 sau o
+/// sursa IPv6 locala noua ar adauga o intrare.
+const MAX_SENDER_LIMITERS: usize = 4096;
+/// Un expeditor fara trafic de atat timp poate fi evacuat din harta.
+const IDLE_SENDER_LIMITER: Duration = Duration::from_secs(60);
+
+/// Rate limiter-ul expeditorului, creat la nevoie, cu harta limitata la
+/// `MAX_SENDER_LIMITERS` intrari. Cand harta e plina se scot intai
+/// expeditorii inactivi; daca nu ajunge, harta este golita. Resetarea
+/// istoricului e preferabila cresterii fara limita, iar limita globala
+/// (`udp_rate_limit`) ramane activa oricum.
+fn sender_limiter(
+    limiters: &mut HashMap<IpAddr, TokenBucket>,
+    sender: IpAddr,
+    rate: u64,
+    burst: u64,
+) -> &mut TokenBucket {
+    if limiters.len() >= MAX_SENDER_LIMITERS && !limiters.contains_key(&sender) {
+        let now = Instant::now();
+        limiters.retain(|_, bucket| now.duration_since(bucket.last_refill) < IDLE_SENDER_LIMITER);
+        if limiters.len() >= MAX_SENDER_LIMITERS {
+            limiters.clear();
+        }
+    }
+    limiters
+        .entry(sender)
+        .or_insert_with(|| TokenBucket::new(rate, burst))
+}
+
 /// Un listener dual-stack (`::`) primeste datagramele IPv4 de la adrese
 /// IPv4-mapped (`::ffff:10.0.0.1`). Fara normalizare, acestea nu s-ar potrivi
 /// cu `trusted_senders = ["10.0.0.1"]` si fiecare sursa ar avea doua
@@ -708,14 +739,12 @@ async fn main() -> anyhow::Result<()> {
                             let (per_sender_rate, per_sender_burst) =
                                 config.network.per_sender_limits();
                             if per_sender_rate > 0 {
-                                let sender_limiter = sender_rate_limiters
-                                    .entry(sender)
-                                    .or_insert_with(|| {
-                                        TokenBucket::new(
-                                            per_sender_rate,
-                                            per_sender_burst,
-                                        )
-                                    });
+                                let sender_limiter = sender_limiter(
+                                    &mut sender_rate_limiters,
+                                    sender,
+                                    per_sender_rate,
+                                    per_sender_burst,
+                                );
                                 if !sender_limiter.try_consume() {
                                     framing_dropped = framing_dropped.saturating_add(1);
                                     continue;
@@ -817,9 +846,14 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_signal, sender_ip};
+    use super::{
+        next_signal, sender_ip, sender_limiter, TokenBucket, IDLE_SENDER_LIMITER,
+        MAX_SENDER_LIMITERS,
+    };
+    use std::collections::HashMap;
     use std::net::{IpAddr, SocketAddr};
     use std::time::Duration;
+    use std::time::Instant;
 
     #[test]
     fn ipv4_mapped_sender_matches_plain_ipv4() {
@@ -828,6 +862,40 @@ mod tests {
 
         let native: SocketAddr = "[2001:db8::1]:514".parse().unwrap();
         assert_eq!(sender_ip(native), "2001:db8::1".parse::<IpAddr>().unwrap());
+    }
+
+    fn local_sender(index: usize) -> IpAddr {
+        IpAddr::from([127, 0, (index >> 8) as u8, index as u8])
+    }
+
+    #[test]
+    fn sender_limiters_stay_bounded_and_evict_idle_senders_first() {
+        let mut limiters = HashMap::new();
+        for index in 0..MAX_SENDER_LIMITERS {
+            sender_limiter(&mut limiters, local_sender(index), 10, 10);
+        }
+        // Jumatate dintre expeditori devin inactivi.
+        let idle_since = Instant::now() - IDLE_SENDER_LIMITER * 2;
+        for index in 0..MAX_SENDER_LIMITERS / 2 {
+            limiters.get_mut(&local_sender(index)).unwrap().last_refill = idle_since;
+        }
+        let active = local_sender(MAX_SENDER_LIMITERS - 1);
+        limiters.get_mut(&active).unwrap().try_consume();
+
+        sender_limiter(&mut limiters, "10.0.0.1".parse().unwrap(), 10, 10);
+        assert_eq!(limiters.len(), MAX_SENDER_LIMITERS / 2 + 1);
+        assert!(!limiters.contains_key(&local_sender(0)));
+        // Expeditorul activ isi pastreaza bucket-ul (si tokenii consumati).
+        assert!(limiters[&active].tokens < 10.0);
+    }
+
+    #[test]
+    fn sender_limiters_are_cleared_when_every_sender_is_active() {
+        let mut limiters: HashMap<IpAddr, TokenBucket> = HashMap::new();
+        for index in 0..=MAX_SENDER_LIMITERS * 2 {
+            sender_limiter(&mut limiters, local_sender(index), 10, 10);
+            assert!(limiters.len() <= MAX_SENDER_LIMITERS);
+        }
     }
 
     #[tokio::test]
