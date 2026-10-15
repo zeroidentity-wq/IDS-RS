@@ -53,7 +53,7 @@ use ids_rs::alerter::Alerter;
 use ids_rs::config::{AppConfig, SubnetEntry};
 use ids_rs::delivery;
 use ids_rs::detector::Detector;
-use ids_rs::{display, parser, web};
+use ids_rs::{display, parser, parser_tools, web};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -177,6 +177,13 @@ async fn next_signal(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
     }
 }
 
+const USAGE: &str = "\
+Utilizare:
+  ids-rs [config.toml]                            porneste IDS-ul (implicit config.toml)
+  ids-rs learn <sample.log>                       propune [custom_parser] dintr-un sample
+  ids-rs test-parser <config.toml> <sample.log>   verifica parser-ul configurat pe un sample
+";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // =========================================================================
@@ -212,9 +219,22 @@ async fn main() -> anyhow::Result<()> {
     // liniei de comanda. `.nth(1)` returneaza al doilea argument (index 0 = exe).
     // `.unwrap_or_else` ofera o valoare default daca nu exista argument.
     //
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config.toml".to_string());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let config_path = match args.as_slice() {
+        ["learn", sample] => return parser_tools::learn(sample),
+        ["test-parser", config, sample] => return parser_tools::test_parser(config, sample),
+        ["-h" | "--help" | "help"] => {
+            print!("{USAGE}");
+            return Ok(());
+        }
+        [] => "config.toml".to_string(),
+        [config] if !matches!(*config, "learn" | "test-parser") => config.to_string(),
+        _ => {
+            eprint!("{USAGE}");
+            anyhow::bail!("argumente invalide: {:?}", args);
+        }
+    };
 
     let mut config = AppConfig::load(&config_path)?;
 

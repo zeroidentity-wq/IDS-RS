@@ -724,7 +724,7 @@ pub enum CustomFormat {
 ///
 /// NOTA RUST: `#[serde(untagged)]` alege varianta dupa tipul valorii din
 /// TOML - un string devine `Key`, un intreg devine `Column`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 #[serde(untagged)]
 pub enum FieldRef {
     Key(String),
@@ -797,7 +797,7 @@ impl CustomParserConfig {
         self.delimiter.unwrap_or(',')
     }
 
-    fn validate(&self, errors: &mut Vec<String>) {
+    pub(crate) fn validate(&self, errors: &mut Vec<String>) {
         let fields = &self.fields;
         let mapped = [
             ("src_ip", Some(&fields.src_ip)),

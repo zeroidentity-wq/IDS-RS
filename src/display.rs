@@ -587,7 +587,7 @@ pub fn log_debug_parse_fail(line: &str, parser_name: &str, expected: &str) {
 /// Liniile vin direct din datagrame UDP: un expeditor ar putea trimite
 /// secvente ANSI/OSC care muta cursorul, sterg ecranul sau rescriu titlul
 /// terminalului operatorului. Afisate escapate, raman doar text.
-fn printable(line: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn printable(line: &str) -> std::borrow::Cow<'_, str> {
     if !line.chars().any(char::is_control) {
         return std::borrow::Cow::Borrowed(line);
     }
@@ -609,7 +609,7 @@ fn printable(line: &str) -> std::borrow::Cow<'_, str> {
 /// Taie dupa caractere, nu dupa bytes: `&line[..120]` intra in panica daca
 /// byte-ul 120 cade in mijlocul unui caracter UTF-8 (ex: U+FFFD, pe care
 /// `from_utf8_lossy` il pune in locul oricarui byte invalid din datagrama).
-fn truncate_for_display(line: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_for_display(line: &str, max_chars: usize) -> String {
     match line.char_indices().nth(max_chars) {
         Some((cut, _)) => format!("{}...", &line[..cut]),
         None => line.to_string(),
