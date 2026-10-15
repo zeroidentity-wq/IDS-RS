@@ -1488,6 +1488,22 @@ impl Detector {
     pub fn cleanup(&self, max_age: Duration) {
         let now = Instant::now();
 
+        // Fiecare tabela pastreaza datele cel putin cat fereastra ei de
+        // detectie. Altfel, o fereastra mai lunga decat `max_age` (ex:
+        // beaconing 3600s vs cleanup 600s) nu ar putea strange niciodata
+        // destule evenimente: un beacon la 2 minute ar ramane cu 5 hit-uri.
+        let (drop_age, accept_age, lateral_age, distributed_age, beacon_age) = {
+            let cfg = self.config.load();
+            let at_least = |secs: u64| max_age.max(Duration::from_secs(secs));
+            (
+                at_least((cfg.slow_scan.time_window_mins * 60).max(cfg.fast_scan.time_window_secs)),
+                at_least(cfg.accept_scan.time_window_secs),
+                at_least(cfg.lateral_movement.time_window_secs),
+                at_least(cfg.distributed_scan.time_window_secs),
+                at_least(cfg.beaconing.time_window_secs),
+            )
+        };
+
         // --- Baseline sampling (#35) — INAINTE de curatare ---
         //
         // Esantionam numarul maxim de porturi unice per IP per fereastra de timp.
@@ -1553,7 +1569,7 @@ impl Detector {
         for mut entry in self.port_hits.iter_mut() {
             entry
                 .value_mut()
-                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= drop_age);
             if entry.value().is_empty() {
                 drop_empty.push(*entry.key());
             }
@@ -1576,7 +1592,7 @@ impl Detector {
         for mut entry in self.accept_hits.iter_mut() {
             entry
                 .value_mut()
-                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= accept_age);
             if entry.value().is_empty() {
                 accept_empty.push(*entry.key());
             }
@@ -1596,7 +1612,7 @@ impl Detector {
         for mut entry in self.lateral_hits.iter_mut() {
             entry
                 .value_mut()
-                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= lateral_age);
             if entry.value().is_empty() {
                 lateral_empty.push(*entry.key());
             }
@@ -1611,7 +1627,7 @@ impl Detector {
         for mut entry in self.distributed_hits.iter_mut() {
             entry
                 .value_mut()
-                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= distributed_age);
             if entry.value().is_empty() {
                 dist_empty.push(*entry.key());
             }
@@ -1627,7 +1643,7 @@ impl Detector {
         for mut entry in self.beacon_hits.iter_mut() {
             entry
                 .value_mut()
-                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= max_age);
+                .retain(|hit| now.saturating_duration_since(hit.seen_at) <= beacon_age);
             if entry.value().is_empty() {
                 beacon_empty.push(*entry.key());
             }
@@ -1932,8 +1948,9 @@ mod tests {
         detector.process_event(&make_event("10.0.0.1", 22));
         assert_eq!(detector.tracked_ips(), 1);
 
-        // Cleanup cu max_age = 0 -> sterge totul.
-        detector.cleanup(Duration::from_secs(0));
+        // Hit-uri mai vechi decat orice fereastra de detectie -> sterse.
+        backdate_all_hits(&detector, Duration::from_secs(7_200));
+        detector.cleanup(Duration::from_secs(60));
         assert_eq!(detector.tracked_ips(), 0);
     }
 
@@ -2736,6 +2753,27 @@ mod tests {
 
     /// Injecteaza un istoric de timestamp-uri intr-un flow beacon, simuland
     /// intervale spatiate la `interval_secs +/- jitter_secs` in trecut.
+    /// Muta in trecut toate hit-urile de scan/lateral, ca un test de cleanup
+    /// sa nu depinda de ferestrele de detectie (care limiteaza stergerea).
+    fn backdate_all_hits(detector: &Detector, by: Duration) {
+        let shift = |instant: Instant| instant.checked_sub(by).unwrap_or(instant);
+        for mut entry in detector.port_hits.iter_mut() {
+            for hit in entry.value_mut() {
+                hit.seen_at = shift(hit.seen_at);
+            }
+        }
+        for mut entry in detector.accept_hits.iter_mut() {
+            for hit in entry.value_mut() {
+                hit.seen_at = shift(hit.seen_at);
+            }
+        }
+        for mut entry in detector.lateral_hits.iter_mut() {
+            for hit in entry.value_mut() {
+                hit.seen_at = shift(hit.seen_at);
+            }
+        }
+    }
+
     fn inject_beacon_history(
         detector: &Detector,
         flow_key: (IpAddr, IpAddr, u16),
@@ -3067,8 +3105,8 @@ mod tests {
             .port_hits
             .contains_key(&(source, "10.1.3.231".parse().unwrap())));
 
-        std::thread::sleep(Duration::from_millis(5));
-        detector.cleanup(Duration::ZERO);
+        backdate_all_hits(&detector, Duration::from_secs(7_200));
+        detector.cleanup(Duration::from_secs(60));
         assert_eq!(detector.scan_flow_count_for_source(source), 0);
         assert!(detector.source_flows.is_empty());
     }
@@ -3193,5 +3231,48 @@ mod tests {
         let source: IpAddr = "10.0.1.5".parse().unwrap();
         assert!(detector.beacon_hits.contains_key(&(source, newest, 443)));
         assert!(detector.distributed_hits.contains_key(&newest));
+    }
+
+    #[test]
+    fn test_cleanup_keeps_beacon_history_for_the_whole_window() {
+        // Valorile implicite din config.toml: fereastra beaconing 3600s,
+        // interval maxim 3600s, cleanup.max_entry_age_secs = 600s.
+        let mut cfg = beaconing_config();
+        cfg.beaconing.min_events = 8;
+        cfg.beaconing.time_window_secs = 3600;
+        cfg.beaconing.max_interval_secs = 3600;
+        let detector = Detector::new(cfg);
+        let key = (
+            "10.0.1.5".parse::<IpAddr>().unwrap(),
+            "203.0.113.9".parse::<IpAddr>().unwrap(),
+            443,
+        );
+        // Beacon la 2 minute: 10 hit-uri acopera 20 de minute > max_age.
+        inject_beacon_history(&detector, key, 10, 120, 0.0);
+
+        detector.cleanup(Duration::from_secs(600));
+        assert_eq!(detector.beacon_hits.get(&key).unwrap().len(), 10);
+
+        let alerts = detector.process_event(&make_beacon_accept("10.0.1.5", "203.0.113.9", 443));
+        assert!(alerts
+            .iter()
+            .any(|alert| matches!(alert.scan_type, ScanType::Beaconing)));
+    }
+
+    #[test]
+    fn test_cleanup_still_prunes_beyond_the_detection_window() {
+        let mut cfg = beaconing_config();
+        cfg.beaconing.time_window_secs = 300;
+        let detector = Detector::new(cfg);
+        let key = (
+            "10.0.1.5".parse::<IpAddr>().unwrap(),
+            "203.0.113.9".parse::<IpAddr>().unwrap(),
+            443,
+        );
+        // Hit-uri la 110..1100s in urma: raman doar cele din ultimele
+        // max(600, 300) secunde (110, 220, 330, 440, 550).
+        inject_beacon_history(&detector, key, 10, 110, 0.0);
+        detector.cleanup(Duration::from_secs(600));
+        assert_eq!(detector.beacon_hits.get(&key).unwrap().len(), 5);
     }
 }
