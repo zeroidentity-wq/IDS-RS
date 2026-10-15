@@ -128,14 +128,21 @@ fn sorted_ip_list_with_primary(ips: &[IpAddr], primary: IpAddr) -> String {
         .join(",")
 }
 
+/// Esantion sortat de cel mult `limit` IP-uri unice. `primary` (IP-ul
+/// principal al alertei) este inclus intotdeauna, indiferent unde ar cadea
+/// in ordinea sortata — altfel inregistrarea SIEM ar putea omite chiar sursa.
 fn sorted_ip_sample(ips: &[IpAddr], primary: Option<IpAddr>, limit: usize) -> String {
     let mut unique = ips.iter().copied().collect::<BTreeSet<_>>();
     if let Some(ip) = primary {
-        unique.insert(ip);
+        unique.remove(&ip);
     }
-    unique
+    let others = limit.saturating_sub(usize::from(primary.is_some()));
+    let mut sample: BTreeSet<IpAddr> = unique.into_iter().take(others).collect();
+    if let Some(ip) = primary.filter(|_| limit > 0) {
+        sample.insert(ip);
+    }
+    sample
         .into_iter()
-        .take(limit)
         .map(|ip| ip.to_string())
         .collect::<Vec<_>>()
         .join(",")
@@ -1319,12 +1326,14 @@ pub(crate) mod test_smtp {
 #[cfg(test)]
 mod tests {
     use super::{
-        sanitize_cef_extension, sanitize_cef_header, Alerter, EmailFailure, SinkUnavailable,
+        sanitize_cef_extension, sanitize_cef_header, sorted_ip_sample, Alerter, EmailFailure,
+        SinkUnavailable,
     };
     use crate::config::{AppConfig, SubnetEntry};
     use crate::detector::{Alert, ScanType};
     use chrono::Local;
     use std::collections::HashMap;
+    use std::net::IpAddr;
 
     #[test]
     fn test_sanitize_header_newline() {
@@ -1512,6 +1521,26 @@ mod tests {
         assert_eq!(
             *delivered.lock().unwrap(),
             vec!["ok@test.local".to_string()]
+        );
+    }
+
+    #[test]
+    fn ip_sample_always_contains_primary() {
+        let sources: Vec<IpAddr> = (1..=300u32)
+            .map(|i| IpAddr::from(std::net::Ipv4Addr::from(0xcb00_7100 + i)))
+            .collect();
+        let primary: IpAddr = "203.0.113.250".parse().unwrap();
+
+        let sample = sorted_ip_sample(&sources, Some(primary), 128);
+        let listed: Vec<&str> = sample.split(',').collect();
+        assert_eq!(listed.len(), 128);
+        assert!(listed.contains(&"203.0.113.250"));
+
+        let small = sorted_ip_sample(&sources[..3], Some(primary), 128);
+        assert_eq!(small, "203.0.113.1,203.0.113.2,203.0.113.3,203.0.113.250");
+        assert_eq!(
+            sorted_ip_sample(&sources, None, 2),
+            "203.0.113.1,203.0.113.2"
         );
     }
 }
