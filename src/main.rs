@@ -155,6 +155,18 @@ impl TokenBucket {
 /// Operatorul `?` din functie propaga erorile automat catre apelant.
 /// In main(), eroarea este printata pe stderr si procesul se opreste.
 ///
+/// Asteapta urmatorul semnal livrat pe canal.
+///
+/// Daca task-ul care asculta semnalul s-a oprit (canal inchis), `recv()` ar
+/// intoarce `None` imediat la fiecare iteratie: SIGTERM ar opri procesul
+/// fara motiv, iar SIGHUP ar reincarca config-ul in bucla. Un canal inchis
+/// inseamna "niciun semnal de acum inainte", deci ramanem in asteptare.
+async fn next_signal(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
+    if receiver.recv().await.is_none() {
+        std::future::pending::<()>().await;
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // =========================================================================
@@ -433,27 +445,26 @@ async fn main() -> anyhow::Result<()> {
     //
     let (sighup_tx, mut sighup_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let (sigterm_tx, mut sigterm_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    // Inregistrarea handler-elor se face aici, cu `?`: daca esueaza, procesul
+    // nu porneste, in loc sa ruleze fara SIGTERM/SIGHUP functionale.
     #[cfg(unix)]
-    tokio::spawn(async move {
-        let Ok(mut signal) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        else {
-            return;
-        };
-        while signal.recv().await.is_some() {
-            let _ = sighup_tx.send(());
-        }
-    });
-    #[cfg(unix)]
-    tokio::spawn(async move {
-        let Ok(mut signal) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        else {
-            return;
-        };
-        while signal.recv().await.is_some() {
-            let _ = sigterm_tx.send(());
-        }
-    });
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut hangup = signal(SignalKind::hangup())
+            .map_err(|e| anyhow::anyhow!("Nu pot inregistra handler-ul SIGHUP: {e}"))?;
+        let mut terminate = signal(SignalKind::terminate())
+            .map_err(|e| anyhow::anyhow!("Nu pot inregistra handler-ul SIGTERM: {e}"))?;
+        tokio::spawn(async move {
+            while hangup.recv().await.is_some() {
+                let _ = sighup_tx.send(());
+            }
+        });
+        tokio::spawn(async move {
+            while terminate.recv().await.is_some() {
+                let _ = sigterm_tx.send(());
+            }
+        });
+    }
     // On non-Unix platforms the senders keep these branches pending while
     // Ctrl+C remains available as the portable shutdown mechanism.
     #[cfg(not(unix))]
@@ -508,13 +519,13 @@ async fn main() -> anyhow::Result<()> {
             // de SIGHUP si recv_from. Alerta curenta (daca send_alert este in
             // curs de .await) se finalizeaza complet — select! verifica
             // semnalele doar la urmatoarea iteratie a loop-ului.
-            _ = sigterm_rx.recv() => {
+            _ = next_signal(&mut sigterm_rx) => {
                 display::log_info("SIGTERM primit — oprire gratiosa...");
                 break;
             }
 
             // Branch: Hot reload config la SIGHUP (#16).
-            _ = sighup_rx.recv() => {
+            _ = next_signal(&mut sighup_rx) => {
                 display::log_reload("SIGHUP primit — reincarc config.toml...");
                 match AppConfig::load(&config_path)
                     .and_then(|loaded| loaded.prepare_reload(&config))
@@ -764,4 +775,28 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_signal;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn closed_signal_channel_never_fires() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<()>();
+        drop(sender);
+        let fired =
+            tokio::time::timeout(Duration::from_millis(50), next_signal(&mut receiver)).await;
+        assert!(fired.is_err());
+    }
+
+    #[tokio::test]
+    async fn delivered_signal_fires() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<()>();
+        sender.send(()).unwrap();
+        tokio::time::timeout(Duration::from_millis(50), next_signal(&mut receiver))
+            .await
+            .unwrap();
+    }
 }
