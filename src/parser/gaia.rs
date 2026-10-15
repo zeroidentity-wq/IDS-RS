@@ -35,7 +35,7 @@
 //
 // =============================================================================
 
-use super::{LogEvent, LogParser};
+use super::{Action, LogEvent, LogParser};
 use regex::Regex;
 use std::net::IpAddr;
 
@@ -126,16 +126,12 @@ impl LogParser for GaiaParser {
 
         // `.get(1)` returneaza Option<Match> - grupul capturat la indexul 1.
         // `.as_str()` obtine &str din Match.
-        // `.to_lowercase()` creeaza un String owned (alocare pe heap).
-        let action = caps.get(1)?.as_str().to_lowercase();
-
+        //
         // Filtram: procesam "drop" si "accept".
         //   drop   = firewall a BLOCAT conexiunea  → scanare porturi inchise/filtrate (Fast/Slow Scan)
         //   accept = firewall a PERMIS conexiunea  → scanare porturi deschise (Accept Scan)
         // "reject" si alte actiuni sunt ignorate — nu ne furnizeaza informatii utile.
-        if action != "drop" && action != "accept" {
-            return None;
-        }
+        let action = Action::from_firewall(caps.get(1)?.as_str())?;
 
         // Etapa 2: Key-value extraction din zona de extensii.
         // Zona de extensii este tot ce urmeaza dupa match-ul header-ului.
@@ -208,7 +204,7 @@ mod tests {
         assert_eq!(event.source_ip.to_string(), "192.168.11.34");
         assert_eq!(event.dest_port, 80);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     #[test]
@@ -227,7 +223,7 @@ mod tests {
         assert_eq!(event.source_ip.to_string(), "200.14.120.9");
         assert_eq!(event.dest_port, 53);
         assert_eq!(event.protocol, "udp");
-        assert_eq!(event.action, "accept");
+        assert_eq!(event.action, Action::Accept);
     }
 
     #[test]
@@ -267,7 +263,7 @@ mod tests {
         assert_eq!(event.source_ip.to_string(), "192.168.99.185");
         assert_eq!(event.dest_port, 43);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     #[test]

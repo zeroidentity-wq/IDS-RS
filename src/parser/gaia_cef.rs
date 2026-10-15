@@ -40,7 +40,7 @@
 //
 // =============================================================================
 
-use super::{split_cef_fields_lenient, LogEvent, LogParser};
+use super::{split_cef_fields_lenient, Action, LogEvent, LogParser};
 use std::net::IpAddr;
 
 /// Parser pentru blob-uri LEA de la Checkpoint Gaia (via ArcSight).
@@ -216,13 +216,8 @@ impl GaiaCefParser {
     /// Parseaza un blob LEA si construieste un LogEvent.
     fn parse_lea_blob(&self, blob: &str, raw_log: &str) -> Option<LogEvent> {
         // Extragem actiunea. Daca lipseste, nu putem procesa.
-        let action_raw = Self::extract_lea_field(blob, "action")?;
-        let action = action_raw.to_lowercase();
-
-        // Filtram: doar "drop" si "accept" (case-insensitive deja).
-        if action != "drop" && action != "accept" {
-            return None;
-        }
+        // Filtram: doar "drop" si "accept" (case-insensitive).
+        let action = Action::from_firewall(Self::extract_lea_field(blob, "action")?)?;
 
         // Extragem IP sursa (obligatoriu).
         let src_str = Self::extract_lea_field(blob, "src")?;
@@ -303,7 +298,7 @@ mod tests {
         assert_eq!(event.dest_ip.unwrap().to_string(), "10.0.0.1");
         assert_eq!(event.dest_port, 443);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     #[test]
@@ -316,7 +311,7 @@ mod tests {
         let event = parser.parse(log).unwrap();
         assert_eq!(event.source_ip.to_string(), "192.168.11.7");
         assert_eq!(event.dest_port, 22);
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     #[test]
@@ -329,7 +324,7 @@ mod tests {
         assert_eq!(event.source_ip.to_string(), "10.0.0.5");
         assert_eq!(event.dest_port, 80);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "accept");
+        assert_eq!(event.action, Action::Accept);
     }
 
     #[test]
@@ -379,7 +374,7 @@ mod tests {
         let log = "<134>Feb 17 11:32:44 gw CEF:0|CheckPoint|FW-1|R77|100|action=\"DROP\" src=\"1.2.3.4\" dst=\"5.6.7.8\" service=\"22\" proto=\"6\"|5|";
 
         let event = parser.parse(log).unwrap();
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     #[test]
@@ -411,7 +406,7 @@ mod tests {
         assert!(event.dest_ip.is_none());
         assert_eq!(event.dest_port, 8080);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     // =========================================================================
@@ -439,7 +434,7 @@ mod tests {
         assert_eq!(event.dest_ip.unwrap().to_string(), "172.16.0.100");
         assert_eq!(event.dest_port, 23);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     #[test]
@@ -452,7 +447,7 @@ mod tests {
         let event = parser.parse(log).unwrap();
         assert_eq!(event.source_ip.to_string(), "192.168.1.50");
         assert_eq!(event.dest_port, 80);
-        assert_eq!(event.action, "accept");
+        assert_eq!(event.action, Action::Accept);
     }
 
     #[test]
@@ -493,6 +488,6 @@ mod tests {
         assert_eq!(event.dest_ip.unwrap().to_string(), "10.2.2.2");
         assert_eq!(event.dest_port, 22);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 }

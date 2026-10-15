@@ -720,7 +720,7 @@ async fn main() -> anyhow::Result<()> {
                                         &event.source_ip,
                                         event.dest_port,
                                         &event.protocol,
-                                        &event.action,
+                                        event.action,
                                         &hostnames.load(),
                                         &subnets.load(),
                                     );

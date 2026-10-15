@@ -32,7 +32,7 @@
 
 use crate::config::{AppConfig, SubnetEntry};
 use crate::detector::{Alert, ScanType};
-use crate::parser::LogEvent;
+use crate::parser::{Action, LogEvent};
 use chrono::Local;
 use colored::*;
 use std::collections::HashMap;
@@ -465,7 +465,7 @@ pub fn log_firewall_event(
     ip: &IpAddr,
     port: u16,
     protocol: &str,
-    action: &str,
+    action: Action,
     hostnames: &HashMap<IpAddr, String>,
     subnets: &[SubnetEntry],
 ) {
@@ -473,7 +473,7 @@ pub fn log_firewall_event(
     // Badge dinamic: albastru pentru drop, verde pentru accept.
     // NOTA RUST: `if-else` ca expresie — returneaza ColoredString din ambele ramuri.
     // Tipul este unificat la compile-time (ambele returneaza ColoredString).
-    let badge = if action == "accept" {
+    let badge = if action == Action::Accept {
         " ACCPT".on_green().black().bold()
     } else {
         " DROP ".on_blue().white().bold()
@@ -485,7 +485,7 @@ pub fn log_firewall_event(
         format_ip(ip, hostnames, subnets).bright_blue(),
         format!("{}", port).bright_blue(),
         printable(protocol).bright_blue(),
-        action.bright_blue()
+        action.as_str().bright_blue()
     );
 }
 
@@ -553,7 +553,7 @@ pub fn log_debug_parse_ok(event: &LogEvent) {
         event.source_ip.to_string().green(),
         event.dest_port.to_string().green(),
         printable(&event.protocol).green(),
-        event.action.green()
+        event.action.as_str().green()
     );
 }
 

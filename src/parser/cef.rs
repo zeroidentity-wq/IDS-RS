@@ -22,7 +22,7 @@
 //
 // =============================================================================
 
-use super::{split_cef_fields, LogEvent, LogParser};
+use super::{split_cef_fields, Action, LogEvent, LogParser};
 use std::net::IpAddr;
 
 /// Parser pentru log-uri in format CEF (Common Event Format).
@@ -88,7 +88,7 @@ impl LogParser for CefParser {
         let mut dest_ip: Option<IpAddr> = None;
         let mut dest_port: Option<u16> = None;
         let mut protocol = String::from("tcp");
-        let mut action = String::new();
+        let mut action: Option<Action> = None;
 
         // Parcurgem perechile cheie=valoare din extensii.
         //
@@ -107,7 +107,7 @@ impl LogParser for CefParser {
                     "dst" => dest_ip = kv[1].parse().ok(),
                     "dpt" => dest_port = kv[1].parse().ok(),
                     "proto" => protocol = kv[1].to_lowercase(),
-                    "act" => action = kv[1].to_lowercase(),
+                    "act" => action = Action::from_firewall(kv[1]),
                     // Ignoram cheile necunoscute (extensibil pe viitor).
                     _ => {}
                 }
@@ -122,9 +122,7 @@ impl LogParser for CefParser {
         // Filtram: procesam "drop" si "accept" (similar cu parser-ul Gaia).
         //   drop   = conexiune BLOCATA de firewall → Fast/Slow Scan
         //   accept = conexiune PERMISA de firewall → Accept Scan (porturi deschise)
-        if action != "drop" && action != "accept" {
-            return None;
-        }
+        let action = action?;
 
         Some(LogEvent {
             source_ip,
@@ -158,7 +156,7 @@ mod tests {
         assert_eq!(event.source_ip.to_string(), "192.168.11.7");
         assert_eq!(event.dest_port, 443);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     #[test]
@@ -173,7 +171,7 @@ mod tests {
         assert_eq!(event.source_ip.to_string(), "10.0.0.5");
         assert_eq!(event.dest_port, 80);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "accept");
+        assert_eq!(event.action, Action::Accept);
     }
 
     #[test]
@@ -185,7 +183,7 @@ mod tests {
         assert_eq!(event.source_ip.to_string(), "11.11.11.11");
         assert_eq!(event.dest_port, 444);
         assert_eq!(event.protocol, "udp");
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     #[test]
@@ -197,7 +195,7 @@ mod tests {
         assert_eq!(event.source_ip.to_string(), "10.0.0.5");
         assert_eq!(event.dest_port, 8080);
         assert_eq!(event.protocol, "tcp");
-        assert_eq!(event.action, "drop");
+        assert_eq!(event.action, Action::Drop);
     }
 
     #[test]

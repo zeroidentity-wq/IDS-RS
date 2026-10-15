@@ -40,7 +40,7 @@
 // =============================================================================
 
 use crate::config::{DetectionConfig, DetectionExceptions, DynamicThresholdConfig};
-use crate::parser::LogEvent;
+use crate::parser::{Action, LogEvent};
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Local};
 use dashmap::DashMap;
@@ -934,15 +934,15 @@ impl Detector {
         // `.drain(..N)` sterge primele N elemente (cele mai vechi, oldest-first).
         // Aplica aceeasi limita (max_hits_per_ip) la ambele map-uri.
         //
-        let hits_map: &DashMap<ScanPairKey, Vec<PortHit>> = if event.action == "drop" {
+        let hits_map: &DashMap<ScanPairKey, Vec<PortHit>> = if event.action == Action::Drop {
             &self.port_hits
         } else {
-            // "accept" si orice alta actiune filtrata de parser → accept_hits.
+            // Action::Accept → accept_hits.
             &self.accept_hits
         };
         let scan_pair = event.dest_ip.map(|dst| (ip, dst));
         if let Some(key) = scan_pair {
-            let is_drop = event.action == "drop";
+            let is_drop = event.action == Action::Drop;
             self.ensure_scan_flow_capacity(ip, key, is_drop, &cfg);
             self.index_scan_flow(is_drop, key);
             let mut hits = hits_map.entry(key).or_default();
@@ -1074,7 +1074,7 @@ impl Detector {
             if let Some(dest_ip) = event.dest_ip {
                 // Exceptii: authorized_scanners nu declanseaza Lateral Movement.
                 // Porturi din ignore_lateral_ports nu se contorizeaza.
-                if event.action == "accept"
+                if event.action == Action::Accept
                     && !exc.authorized_scanners.contains(&ip)
                     && !exc.ignore_lateral_ports.contains(&event.dest_port)
                 {
@@ -1227,7 +1227,7 @@ impl Detector {
         // timestamp-uri consecutive. CV mic + mean in [min_interval, max_interval]
         // => beaconing.
         let bc_cfg = &cfg.beaconing;
-        if bc_cfg.enabled && event.action == "accept" {
+        if bc_cfg.enabled && event.action == Action::Accept {
             if let Some(dest_ip) = event.dest_ip {
                 let dport = event.dest_port;
                 let flow_key = (ip, dest_ip, dport);
@@ -1828,7 +1828,7 @@ mod tests {
             dest_ip: Some("10.0.0.1".parse().unwrap()),
             dest_port: port,
             protocol: "tcp".to_string(),
-            action: "drop".to_string(),
+            action: Action::Drop,
             raw_log: String::new(),
         }
     }
@@ -1840,7 +1840,7 @@ mod tests {
             dest_ip: Some(dest_ip.parse().unwrap()),
             dest_port: port,
             protocol: "tcp".to_string(),
-            action: "drop".to_string(),
+            action: Action::Drop,
             raw_log: String::new(),
         }
     }
@@ -1852,7 +1852,7 @@ mod tests {
             dest_ip: Some(dest_ip.parse().unwrap()),
             dest_port: port,
             protocol: "tcp".to_string(),
-            action: "accept".to_string(),
+            action: Action::Accept,
             raw_log: String::new(),
         }
     }
@@ -2009,7 +2009,7 @@ mod tests {
             dest_port: port,
             protocol: "tcp".to_string(),
             // Diferenta fata de make_event: actiunea este "accept" nu "drop".
-            action: "accept".to_string(),
+            action: Action::Accept,
             raw_log: String::new(),
         }
     }
@@ -2531,7 +2531,7 @@ mod tests {
             dest_ip: Some(dest_ip.parse().unwrap()),
             dest_port: port,
             protocol: "tcp".to_string(),
-            action: "drop".to_string(),
+            action: Action::Drop,
             raw_log: String::new(),
         }
     }
@@ -2657,7 +2657,7 @@ mod tests {
             dest_ip: Some("10.0.0.100".parse().unwrap()),
             dest_port: 80,
             protocol: "tcp".to_string(),
-            action: "accept".to_string(),
+            action: Action::Accept,
             raw_log: String::new(),
         });
         // Sursa 3: drop → ar trebui sa declanseze alerta
@@ -2707,7 +2707,7 @@ mod tests {
                 dest_ip: Some(dest.parse().unwrap()),
                 dest_port: 445,
                 protocol: "tcp".to_string(),
-                action: "drop".to_string(),
+                action: Action::Drop,
                 raw_log: String::new(),
             });
             let lateral: Vec<_> = alerts
@@ -2751,7 +2751,7 @@ mod tests {
             dest_ip: Some(dst.parse().unwrap()),
             dest_port: port,
             protocol: "tcp".to_string(),
-            action: "accept".to_string(),
+            action: Action::Accept,
             raw_log: String::new(),
         }
     }
@@ -3050,7 +3050,7 @@ mod tests {
             dest_ip: Some("10.0.1.50".parse().unwrap()),
             dest_port: 443,
             protocol: "tcp".to_string(),
-            action: "drop".to_string(),
+            action: Action::Drop,
             raw_log: String::new(),
         };
         for _ in 0..10 {

@@ -77,6 +77,47 @@ pub(crate) fn split_cef_fields_lenient(input: &str) -> Vec<&str> {
     fields
 }
 
+/// Actiunea firewall-ului, singurele doua valori pe care detectorul le foloseste.
+///
+/// NOTA RUST: un enum in loc de String face imposibila o valoare neasteptata
+/// (ex: "deny", "Drop ") dupa parser - compilatorul obliga fiecare `match`
+/// sa trateze exact aceste doua cazuri. Normalizarea se face o singura data,
+/// la granita parser-ului.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Conexiune BLOCATA de firewall → Fast/Slow Scan.
+    Drop,
+    /// Conexiune PERMISA de firewall → Accept Scan, Lateral, Distributed, Beaconing.
+    Accept,
+}
+
+impl Action {
+    /// Normalizeaza actiunea Check Point / CEF ("Drop", "ACCEPT", ...).
+    /// Orice alta actiune ("reject", "log", ...) este ignorata → None.
+    pub fn from_firewall(raw: &str) -> Option<Self> {
+        if raw.eq_ignore_ascii_case("drop") {
+            Some(Action::Drop)
+        } else if raw.eq_ignore_ascii_case("accept") {
+            Some(Action::Accept)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Action::Drop => "drop",
+            Action::Accept => "accept",
+        }
+    }
+}
+
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Eveniment de log parsabil - structura comuna pentru toate formatele.
 ///
 /// NOTA RUST: #[derive(Debug, Clone)]
@@ -103,8 +144,8 @@ pub struct LogEvent {
     /// Protocolul (tcp, udp, icmp, etc.).
     pub protocol: String,
 
-    /// Actiunea firewall-ului (drop, reject, accept, etc.).
-    pub action: String,
+    /// Actiunea firewall-ului, normalizata de parser.
+    pub action: Action,
 
     /// Log-ul original brut - pastrat pentru audit/debugging.
     pub raw_log: String,
@@ -157,5 +198,19 @@ pub fn create_parser(parser_type: &str) -> anyhow::Result<Box<dyn LogParser>> {
             "Parser necunoscut: '{}'. Optiuni valide: gaia, cef, gaia_cef",
             parser_type
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Action;
+
+    #[test]
+    fn firewall_actions_are_normalized_case_insensitively() {
+        assert_eq!(Action::from_firewall("Drop"), Some(Action::Drop));
+        assert_eq!(Action::from_firewall("ACCEPT"), Some(Action::Accept));
+        assert_eq!(Action::from_firewall("reject"), None);
+        assert_eq!(Action::from_firewall("Log"), None);
+        assert_eq!(Action::from_firewall(""), None);
     }
 }
