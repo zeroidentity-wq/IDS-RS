@@ -41,7 +41,7 @@ si Beaconing C2, si trimite alerte catre SIEM si email.
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
 | **Livrare** | Cozi separate SIEM/email, spool durabil pe disc, dead-letter, retry per destinatar |
-| **Teste** | 145 teste (142 biblioteca + 3 binar) — toate trec |
+| **Teste** | 151 teste (146 biblioteca + 5 binar) — toate trec |
 | **Clippy** | 0 warnings (`cargo clippy --all-targets -- -D warnings` in CI) |
 
 ### Implementat
@@ -63,7 +63,7 @@ si Beaconing C2, si trimite alerte catre SIEM si email.
 - [x] Web Dashboard (#25) — server HTTP embedded cu graf D3.js force-directed, API JSON, auto-refresh 5s
 - [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
 - [x] Livrare durabila: spool pe disc, dead-letter pentru esecuri permanente, retry email doar catre destinatarii ramasi, golirea cozilor in spool la oprire
-- [x] Teste: 145 passed (parser custom, learn/test-parser, parseri, detector, livrare/spool cu server SMTP fals, config strict, reload, web auth, whitelist si toate detectiile)
+- [x] Teste: 151 passed (parser custom, statistici de parsare, learn/test-parser, parseri, detector, livrare/spool cu server SMTP fals, config strict, reload, web auth, whitelist si toate detectiile)
 
 ### Hardening operational
 
@@ -598,9 +598,15 @@ programul ajuta doar la scrierea ei (`learn`) si la verificarea ei (`test-parser
    ```
    Repeta pasii 3–4 pana cand rezultatul corespunde asteptarilor.
 
-5. **Porneste IDS-ul.** Evenimentele cu actiune nemapata sunt ignorate, dar raportate
-   la fiecare 30 de secunde (`N evenimente ignorate: actiune nemapata (ex: "...")`),
-   ca o mapare incompleta sa nu ascunda trafic fara urma.
+5. **Porneste IDS-ul.** La fiecare 30 de secunde apare un rezumat al parsarii:
+   ```
+   [STAT] Parsare 30s: 1200 linii → 1150 parsate | 10 actiune nemapata | 40 ignorate
+   ```
+   Evenimentele cu actiune nemapata sunt raportate separat, cu un exemplu
+   (`N evenimente ignorate: actiune nemapata (ex: "...")`). Daca intr-o fereastra
+   nicio linie nu este parsata, apare un avertisment cu o linie de exemplu — semn ca
+   formatul log-urilor s-a schimbat (ex: dupa un update de firmware). Aceleasi
+   contoare, cumulate de la pornire, sunt in `GET /api/stats` pe dashboard.
 
 ### Referinta `[custom_parser]`
 
@@ -1020,7 +1026,7 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 142 passed` (biblioteca) si `test result: ok. 3 passed` (binar).
+Rezultat asteptat: `test result: ok. 146 passed` (biblioteca) si `test result: ok. 5 passed` (binar).
 
 Pentru verificarea completa, ca in CI:
 
@@ -1045,7 +1051,8 @@ Testele acopera:
 - Livrare: spool durabil, intrari vechi (format anterior) citite, alerta pastrata cat canalul e indisponibil, dead-letter fara blocarea cozii, retry doar catre destinatarii ramasi, golirea cozilor la oprire cu SMTP blocat
 - Config: campuri necunoscute respinse, `trusted_senders` obligatoriu pe listener expus, revalidare la reload, limite per sender implicite
 - Detector capacitate: limite pe fluxuri si IP-uri, evictie in lot, sweep orizontal si flood cu IP-uri spoofed fara cost patratic
-- Binar: adrese IPv4-mapped normalizate, canal de semnal inchis nu declanseaza oprirea
+- Statistici de parsare: fiecare linie numarata intr-o singura categorie, diferente pe fereastra, exemplu trunchiat, raspunsul `/api/stats`
+- Binar: adrese IPv4-mapped normalizate, canal de semnal inchis nu declanseaza oprirea, harta de rate limitere per expeditor limitata (evacuare inactivi, apoi resetare)
 
 ---
 
@@ -2399,6 +2406,8 @@ Aceasta permite ierarhii: `/16` pentru cladire, `/24` pentru etaj.
   - `GET /` → dashboard HTML cu graf D3.js force-directed
   - `GET /api/alerts` → JSON cu ultimele N alerte din memorie
   - `GET /api/graph` → noduri (IP-uri) + muchii (conexiuni) pentru graf
+  - `GET /api/stats` → parser activ, uptime si contorii de parsare cumulati
+    (`lines`, `parsed`, `unmapped`, `ignored`); protejat de token, ca restul `/api`
   - Noduri colorate: rosu = atacator, gri = tinta; dimensiune = numar alerte
   - Muchii colorate dupa tip: rosu = Fast Scan, galben = Slow Scan, magenta = Accept Scan
   - Hover pe nod: detalii IP (porturi scanate, timestamps, tip atac)

@@ -53,6 +53,7 @@ use ids_rs::alerter::Alerter;
 use ids_rs::config::{AppConfig, SubnetEntry};
 use ids_rs::delivery;
 use ids_rs::detector::Detector;
+use ids_rs::stats::{self, ParseCounts, ParseSamples, ParseStats};
 use ids_rs::{display, parser, parser_tools, web};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
@@ -157,6 +158,9 @@ impl TokenBucket {
 ///
 /// IP-ul expeditorului unei datagrame, in forma canonica.
 ///
+/// Intervalul raportului periodic de parsare si rate limiting.
+const PARSE_REPORT_SECS: u64 = 30;
+
 /// Limita de intrari in harta de rate limitere per expeditor. Cu
 /// `trusted_senders` setat harta are cel mult o intrare per IP permis, dar
 /// fara el (permis doar pe loopback) fiecare adresa din 127.0.0.0/8 sau o
@@ -366,10 +370,19 @@ async fn main() -> anyhow::Result<()> {
     // pentru a permite activarea via SIGHUP fara pierdere de alerte.
     //
     let alert_buffer: web::AlertBuffer = Arc::new(Mutex::new(VecDeque::new()));
+    // Contorii de parsare: incrementati in bucla UDP, cititi de /api/stats.
+    let parse_stats = Arc::new(ParseStats::default());
 
     if config.web_dashboard.enabled {
         let web_alerts = Arc::clone(&alert_buffer);
-        match web::start_web_server(&config.web_dashboard, web_alerts).await {
+        match web::start_web_server(
+            &config.web_dashboard,
+            web_alerts,
+            Arc::clone(&parse_stats),
+            parser.name(),
+        )
+        .await
+        {
             Ok(_handle) => {}
             Err(e) => {
                 display::log_warning(&format!("Web dashboard nu a pornit: {:#}", e));
@@ -469,14 +482,16 @@ async fn main() -> anyhow::Result<()> {
     };
     let mut sender_rate_limiters: HashMap<IpAddr, TokenBucket> = HashMap::new();
 
-    // Interval pentru afisarea periodica a statisticilor de rate limiting.
-    // Folosim `tokio::time::interval` cu 30 secunde — suficient de rar
-    // pentru a nu polua output-ul, dar suficient de des pentru vizibilitate.
-    let mut rate_limit_tick = tokio::time::interval(Duration::from_secs(30));
+    // Interval pentru afisarea periodica a statisticilor de rate limiting si
+    // de parsare. Folosim `tokio::time::interval` cu 30 secunde — suficient
+    // de rar pentru a nu polua output-ul, dar suficient de des pentru vizibilitate.
+    let mut rate_limit_tick = tokio::time::interval(Duration::from_secs(PARSE_REPORT_SECS));
     // Primul tick al `interval()` e imediat — il consumam ca sa nu afisam
     // statistici goale la startup.
     rate_limit_tick.tick().await;
     let mut framing_dropped: u64 = 0;
+    let mut last_parse_counts = ParseCounts::default();
+    let mut parse_samples = ParseSamples::default();
 
     // =========================================================================
     // 8. SIGNAL HANDLERS — SIGHUP (Hot Reload #16) si SIGTERM (Graceful Shutdown)
@@ -680,12 +695,15 @@ async fn main() -> anyhow::Result<()> {
                         std::mem::take(&mut framing_dropped)
                     ));
                 }
-                if let Some((count, sample)) = parser.take_unmapped_actions() {
-                    display::log_warning(&format!(
-                        "{} evenimente ignorate: actiune nemapata (ex: {:?}) — verifica [custom_parser]",
-                        count, sample
-                    ));
-                }
+                let counts = parse_stats.snapshot();
+                display::log_parse_report(
+                    parser.name(),
+                    PARSE_REPORT_SECS,
+                    &counts.since(last_parse_counts),
+                    &parse_samples,
+                );
+                last_parse_counts = counts;
+                parse_samples = ParseSamples::default();
             }
 
             // Branch: Pachet UDP primit.
@@ -762,7 +780,12 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             // Parsam linia cu parser-ul activ (dynamic dispatch).
-                            if let Some(event) = parser.parse(line) {
+                            if let Some(event) = stats::parse_line(
+                                parser.as_ref(),
+                                line,
+                                &parse_stats,
+                                &mut parse_samples,
+                            ) {
                                 // Debug: afiseaza campurile extrase.
                                 if debug_mode {
                                     display::log_debug_parse_ok(&event);

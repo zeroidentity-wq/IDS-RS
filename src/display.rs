@@ -33,6 +33,7 @@
 use crate::config::{AppConfig, SubnetEntry};
 use crate::detector::{Alert, ScanType};
 use crate::parser::{Action, LogEvent};
+use crate::stats::{ParseCounts, ParseSamples};
 use chrono::Local;
 use colored::*;
 use std::collections::HashMap;
@@ -501,6 +502,51 @@ pub fn log_stats(tracked_ips: usize, cleaned_ips: usize) {
         tracked_ips.to_string().white().bold(),
         cleaned_ips.to_string().white().bold()
     );
+}
+
+/// Raportul periodic de parsare (apelat din bucla principala).
+///
+/// Format: [timestamp] [STAT] Parsare 30s: 1200 linii → 1150 parsate | 10 actiune nemapata | 40 ignorate
+///
+/// Avertizeaza separat cand exista actiuni nemapate si cand nicio linie din
+/// fereastra nu a fost parsata - semn ca formatul log-urilor nu mai
+/// corespunde parser-ului (ex: dupa un update de firmware).
+pub fn log_parse_report(
+    parser_name: &str,
+    window_secs: u64,
+    counts: &ParseCounts,
+    samples: &ParseSamples,
+) {
+    if counts.lines == 0 {
+        return;
+    }
+    let ts = timestamp();
+    println!(
+        "{} {} Parsare {}s: {} linii → {} parsate | {} actiune nemapata | {} ignorate",
+        ts.dimmed(),
+        " STAT ".on_cyan().black().bold(),
+        window_secs,
+        counts.lines.to_string().white().bold(),
+        counts.parsed.to_string().white().bold(),
+        counts.unmapped.to_string().white().bold(),
+        counts.ignored.to_string().white().bold()
+    );
+    if counts.unmapped > 0 {
+        log_warning(&format!(
+            "{} evenimente ignorate: actiune nemapata (ex: {:?}) — verifica [custom_parser]",
+            counts.unmapped,
+            samples.unmapped_action.as_deref().unwrap_or_default()
+        ));
+    }
+    if counts.parsed == 0 {
+        log_warning(&format!(
+            "Nicio linie parsata in ultimele {}s de parser-ul {} — formatul log-urilor nu corespunde? \
+             Verifica cu `ids-rs test-parser`. Ex: {}",
+            window_secs,
+            parser_name,
+            printable(samples.ignored_line.as_deref().unwrap_or("-"))
+        ));
+    }
 }
 
 /// Confirma reincarcarea configuratiei la SIGHUP (badge cyan).

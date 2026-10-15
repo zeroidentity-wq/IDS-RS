@@ -21,6 +21,7 @@
 use crate::config::WebDashboardConfig;
 use crate::detector::{Alert, ScanType};
 use crate::display;
+use crate::stats::ParseStats;
 use axum::{
     extract::{Query, Request, State},
     http::{header, HeaderValue, StatusCode},
@@ -45,6 +46,9 @@ pub type AlertBuffer = Arc<Mutex<VecDeque<Alert>>>;
 #[derive(Clone)]
 struct AppState {
     alerts: AlertBuffer,
+    parse_stats: Arc<ParseStats>,
+    parser_name: Arc<str>,
+    started_at: Instant,
     auth_token: Arc<str>,
     request_slots: Arc<tokio::sync::Semaphore>,
     snapshot_cache: Arc<Mutex<SnapshotCache>>,
@@ -63,9 +67,14 @@ struct SnapshotCache {
 pub async fn start_web_server(
     config: &WebDashboardConfig,
     alerts: AlertBuffer,
+    parse_stats: Arc<ParseStats>,
+    parser_name: &str,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let state = AppState {
         alerts,
+        parse_stats,
+        parser_name: Arc::from(parser_name),
+        started_at: Instant::now(),
         auth_token: Arc::from(config.auth_token.as_str()),
         request_slots: Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_requests)),
         snapshot_cache: Arc::new(Mutex::new(SnapshotCache {
@@ -78,6 +87,7 @@ pub async fn start_web_server(
         .route("/api/alerts", get(get_alerts))
         .route("/api/graph", get(get_graph))
         .route("/api/ip/{ip}", get(get_ip_dossier))
+        .route("/api/stats", get(get_stats))
         .route_layer(middleware::from_fn_with_state(state.clone(), api_guard));
     let app = Router::new()
         .route("/", get(get_dashboard))
@@ -105,6 +115,20 @@ pub async fn start_web_server(
 
 async fn get_health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Contorii de parsare cumulati de la pornire. Sub `api_guard`: volumul de
+/// trafic nu e public, chiar daca /health este.
+async fn get_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(stats_body(&state))
+}
+
+fn stats_body(state: &AppState) -> serde_json::Value {
+    serde_json::json!({
+        "parser": &*state.parser_name,
+        "uptime_secs": state.started_at.elapsed().as_secs(),
+        "parse": state.parse_stats.snapshot(),
+    })
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -628,9 +652,13 @@ const DASHBOARD_HTML: &str = include_str!("../static/dashboard.html");
 
 #[cfg(test)]
 mod tests {
-    use super::{build_graph, constant_time_eq};
+    use super::{build_graph, constant_time_eq, stats_body, AppState, SnapshotCache};
     use crate::detector::{Alert, ScanType};
+    use crate::stats::ParseStats;
     use chrono::Local;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     #[test]
     fn lateral_movement_counts_each_contacted_host_once() {
@@ -669,5 +697,27 @@ mod tests {
         assert!(constant_time_eq(b"0123456789abcdef", b"0123456789abcdef"));
         assert!(!constant_time_eq(b"0123456789abcdef", b"0123456789abcdeg"));
         assert!(!constant_time_eq(b"short", b"longer"));
+    }
+
+    #[test]
+    fn stats_body_reports_parser_and_cumulative_counts() {
+        let state = AppState {
+            alerts: Arc::new(Mutex::new(VecDeque::new())),
+            parse_stats: Arc::new(ParseStats::default()),
+            parser_name: Arc::from("Custom (CSV)"),
+            started_at: Instant::now(),
+            auth_token: Arc::from(""),
+            request_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            snapshot_cache: Arc::new(Mutex::new(SnapshotCache {
+                refreshed_at: Instant::now(),
+                alerts: Arc::new(Vec::new()),
+            })),
+        };
+        let body = stats_body(&state);
+        assert_eq!(body["parser"], "Custom (CSV)");
+        assert_eq!(body["parse"]["lines"], 0);
+        for key in ["parsed", "unmapped", "ignored"] {
+            assert!(body["parse"][key].is_u64(), "{key} lipseste: {body}");
+        }
     }
 }
