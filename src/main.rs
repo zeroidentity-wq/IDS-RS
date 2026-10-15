@@ -155,6 +155,16 @@ impl TokenBucket {
 /// Operatorul `?` din functie propaga erorile automat catre apelant.
 /// In main(), eroarea este printata pe stderr si procesul se opreste.
 ///
+/// IP-ul expeditorului unei datagrame, in forma canonica.
+///
+/// Un listener dual-stack (`::`) primeste datagramele IPv4 de la adrese
+/// IPv4-mapped (`::ffff:10.0.0.1`). Fara normalizare, acestea nu s-ar potrivi
+/// cu `trusted_senders = ["10.0.0.1"]` si fiecare sursa ar avea doua
+/// rate limitere distincte.
+fn sender_ip(addr: std::net::SocketAddr) -> IpAddr {
+    addr.ip().to_canonical()
+}
+
 /// Asteapta urmatorul semnal livrat pe canal.
 ///
 /// Daca task-ul care asculta semnalul s-a oprit (canal inchis), `recv()` ar
@@ -269,7 +279,8 @@ async fn main() -> anyhow::Result<()> {
             .network
             .trusted_senders
             .iter()
-            .filter_map(|ip| ip.parse().ok())
+            .filter_map(|ip| ip.parse::<IpAddr>().ok())
+            .map(|ip| ip.to_canonical())
             .collect()
     }
 
@@ -626,7 +637,8 @@ async fn main() -> anyhow::Result<()> {
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, addr)) => {
-                        if !trusted_senders.is_empty() && !trusted_senders.contains(&addr.ip()) {
+                        let sender = sender_ip(addr);
+                        if !trusted_senders.is_empty() && !trusted_senders.contains(&sender) {
                             framing_dropped = framing_dropped.saturating_add(1);
                             continue;
                         }
@@ -671,7 +683,7 @@ async fn main() -> anyhow::Result<()> {
                             // datagram, so newline coalescing cannot bypass the limit.
                             if config.network.udp_per_sender_rate_limit > 0 {
                                 let sender_limiter = sender_rate_limiters
-                                    .entry(addr.ip())
+                                    .entry(sender)
                                     .or_insert_with(|| {
                                         TokenBucket::new(
                                             config.network.udp_per_sender_rate_limit,
@@ -779,8 +791,18 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::next_signal;
+    use super::{next_signal, sender_ip};
+    use std::net::{IpAddr, SocketAddr};
     use std::time::Duration;
+
+    #[test]
+    fn ipv4_mapped_sender_matches_plain_ipv4() {
+        let mapped: SocketAddr = "[::ffff:10.0.0.1]:514".parse().unwrap();
+        assert_eq!(sender_ip(mapped), "10.0.0.1".parse::<IpAddr>().unwrap());
+
+        let native: SocketAddr = "[2001:db8::1]:514".parse().unwrap();
+        assert_eq!(sender_ip(native), "2001:db8::1".parse::<IpAddr>().unwrap());
+    }
 
     #[tokio::test]
     async fn closed_signal_channel_never_fires() {
