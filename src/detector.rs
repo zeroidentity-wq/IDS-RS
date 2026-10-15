@@ -430,6 +430,11 @@ fn effective_threshold_value(
     (dynamic.ceil() as usize).clamp(floor.max(1), ceiling.max(1))
 }
 
+/// Cate fluxuri elibereaza o evictie cand o limita este atinsa.
+fn eviction_batch(limit: usize) -> usize {
+    (limit / 8).max(1)
+}
+
 fn count_unique_ports_in_hits(hits: &[PortHit], window: Duration, now: Instant) -> usize {
     let mut ports: Vec<u16> = hits
         .iter()
@@ -488,6 +493,11 @@ pub struct Detector {
     /// accept-urile ar contamina detectia. Un Fast Scan poate aparea simultan
     /// cu un Accept Scan de la acelasi IP, si vrem sa le detectam independent.
     accept_hits: DashMap<ScanPairKey, Vec<PortHit>>,
+
+    /// Index secundar peste `port_hits` + `accept_hits`: fluxurile fiecarei
+    /// surse, ca `(is_drop, dest_ip)`. Permite numararea si evictia per sursa
+    /// fara a parcurge toate fluxurile urmarite la fiecare flux nou.
+    source_flows: DashMap<IpAddr, HashSet<(bool, IpAddr)>>,
 
     /// Cooldown alerte Fast Scan per pereche (src, dst).
     /// Previne re-alertarea pentru aceeasi pereche inainte de expirarea cooldown-ului.
@@ -564,52 +574,72 @@ impl Detector {
             self.accept_hits.remove(&key);
             self.accept_cooldowns.remove(&key);
         }
+        self.unindex_scan_flow(is_drop, key);
     }
 
-    fn oldest_scan_flow(&self, source: Option<IpAddr>) -> Option<(bool, ScanPairKey, Instant)> {
-        let drop_candidate = self
-            .port_hits
-            .iter()
-            .filter(|entry| source.is_none_or(|src| entry.key().0 == src))
-            .filter_map(|entry| {
-                entry
-                    .value()
-                    .last()
-                    .map(|hit| (true, *entry.key(), hit.seen_at))
-            })
-            .min_by_key(|(_, _, seen_at)| *seen_at);
-        let accept_candidate = self
-            .accept_hits
-            .iter()
-            .filter(|entry| source.is_none_or(|src| entry.key().0 == src))
-            .filter_map(|entry| {
-                entry
-                    .value()
-                    .last()
-                    .map(|hit| (false, *entry.key(), hit.seen_at))
-            })
-            .min_by_key(|(_, _, seen_at)| *seen_at);
+    fn index_scan_flow(&self, is_drop: bool, key: ScanPairKey) {
+        self.source_flows
+            .entry(key.0)
+            .or_default()
+            .insert((is_drop, key.1));
+    }
 
-        match (drop_candidate, accept_candidate) {
-            (Some(a), Some(b)) => Some(if a.2 <= b.2 { a } else { b }),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+    fn unindex_scan_flow(&self, is_drop: bool, key: ScanPairKey) {
+        let now_empty = match self.source_flows.get_mut(&key.0) {
+            Some(mut flows) => {
+                flows.remove(&(is_drop, key.1));
+                flows.is_empty()
+            }
+            None => false,
+        };
+        if now_empty {
+            self.source_flows
+                .remove_if(&key.0, |_, flows| flows.is_empty());
         }
     }
 
     fn scan_flow_count_for_source(&self, source: IpAddr) -> usize {
-        self.port_hits
-            .iter()
-            .filter(|entry| entry.key().0 == source)
-            .count()
-            + self
-                .accept_hits
-                .iter()
-                .filter(|entry| entry.key().0 == source)
-                .count()
+        self.source_flows
+            .get(&source)
+            .map_or(0, |flows| flows.len())
     }
 
+    /// Elimina cele mai vechi `count` fluxuri dintre `candidates` (dupa
+    /// ultimul hit). Selectie partiala O(n), fara sortare completa.
+    fn evict_oldest_scan_flows(&self, candidates: Vec<(bool, ScanPairKey)>, count: usize) {
+        let count = count.min(candidates.len());
+        if count == 0 {
+            return;
+        }
+        let mut aged: Vec<(Option<Instant>, bool, ScanPairKey)> = candidates
+            .into_iter()
+            .map(|(is_drop, key)| {
+                let map = if is_drop {
+                    &self.port_hits
+                } else {
+                    &self.accept_hits
+                };
+                let last = map
+                    .get(&key)
+                    .and_then(|hits| hits.last().map(|hit| hit.seen_at));
+                (last, is_drop, key)
+            })
+            .collect();
+        if count < aged.len() {
+            aged.select_nth_unstable_by_key(count - 1, |(last, _, _)| *last);
+        }
+        for (_, is_drop, key) in aged.into_iter().take(count) {
+            self.remove_scan_flow(is_drop, key);
+        }
+    }
+
+    /// Face loc pentru un flux nou `(source, dest)` respectand
+    /// `max_flows_per_source` si `max_tracked_flows`.
+    ///
+    /// Gasirea celor mai vechi fluxuri cere o parcurgere O(n). Ca un sweep
+    /// orizontal (cate un flux nou la fiecare pachet) sa nu plateasca O(n)
+    /// per eveniment, evictia elibereaza un lot de ~1/8 din limita: costul
+    /// parcurgerii se amortizeaza la O(1) per flux nou.
     fn ensure_scan_flow_capacity(
         &self,
         source: IpAddr,
@@ -626,17 +656,38 @@ impl Detector {
             return;
         }
 
-        while self.scan_flow_count_for_source(source) >= cfg.max_flows_per_source {
-            let Some((drop_map, old_key, _)) = self.oldest_scan_flow(Some(source)) else {
-                break;
-            };
-            self.remove_scan_flow(drop_map, old_key);
+        let per_source = self.scan_flow_count_for_source(source);
+        if per_source >= cfg.max_flows_per_source {
+            let candidates: Vec<(bool, ScanPairKey)> = self
+                .source_flows
+                .get(&source)
+                .map(|flows| {
+                    flows
+                        .iter()
+                        .map(|(flow_is_drop, dest)| (*flow_is_drop, (source, *dest)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let excess = per_source + 1 - cfg.max_flows_per_source;
+            self.evict_oldest_scan_flows(
+                candidates,
+                excess.max(eviction_batch(cfg.max_flows_per_source)),
+            );
         }
-        while self.port_hits.len() + self.accept_hits.len() >= cfg.max_tracked_flows {
-            let Some((drop_map, old_key, _)) = self.oldest_scan_flow(None) else {
-                break;
-            };
-            self.remove_scan_flow(drop_map, old_key);
+
+        let total = self.port_hits.len() + self.accept_hits.len();
+        if total >= cfg.max_tracked_flows {
+            let candidates: Vec<(bool, ScanPairKey)> = self
+                .port_hits
+                .iter()
+                .map(|entry| (true, *entry.key()))
+                .chain(self.accept_hits.iter().map(|entry| (false, *entry.key())))
+                .collect();
+            let excess = total + 1 - cfg.max_tracked_flows;
+            self.evict_oldest_scan_flows(
+                candidates,
+                excess.max(eviction_batch(cfg.max_tracked_flows)),
+            );
         }
     }
 
@@ -657,6 +708,7 @@ impl Detector {
         Self {
             port_hits: DashMap::new(),
             accept_hits: DashMap::new(),
+            source_flows: DashMap::new(),
             fast_cooldowns: DashMap::new(),
             slow_cooldowns: DashMap::new(),
             accept_cooldowns: DashMap::new(),
@@ -800,6 +852,7 @@ impl Detector {
                 // Eliminam IP-ul LRU din TOATE structurile.
                 self.port_hits.retain(|(src, _), _| *src != old_ip);
                 self.accept_hits.retain(|(src, _), _| *src != old_ip);
+                self.source_flows.remove(&old_ip);
                 self.lateral_hits.remove(&old_ip);
                 self.last_seen.remove(&old_ip);
                 self.fast_cooldowns.retain(|(src, _), _| *src != old_ip);
@@ -851,7 +904,9 @@ impl Detector {
         };
         let scan_pair = event.dest_ip.map(|dst| (ip, dst));
         if let Some(key) = scan_pair {
-            self.ensure_scan_flow_capacity(ip, key, event.action == "drop", &cfg);
+            let is_drop = event.action == "drop";
+            self.ensure_scan_flow_capacity(ip, key, is_drop, &cfg);
+            self.index_scan_flow(is_drop, key);
             let mut hits = hits_map.entry(key).or_default();
             hits.push(PortHit {
                 port: event.dest_port,
@@ -1467,8 +1522,14 @@ impl Detector {
                 drop_empty.push(*entry.key());
             }
         }
-        for ip in &drop_empty {
-            self.port_hits.remove(ip);
+        for key in &drop_empty {
+            if self
+                .port_hits
+                .remove_if(key, |_, hits| hits.is_empty())
+                .is_some()
+            {
+                self.unindex_scan_flow(true, *key);
+            }
         }
 
         // --- Curatam accept_hits (accept-uri) ---
@@ -1484,8 +1545,14 @@ impl Detector {
                 accept_empty.push(*entry.key());
             }
         }
-        for ip in &accept_empty {
-            self.accept_hits.remove(ip);
+        for key in &accept_empty {
+            if self
+                .accept_hits
+                .remove_if(key, |_, hits| hits.is_empty())
+                .is_some()
+            {
+                self.unindex_scan_flow(false, *key);
+            }
         }
 
         // --- Curatam lateral_hits (Lateral Movement #22) ---
@@ -2936,6 +3003,61 @@ mod tests {
         detector.process_event(&make_event_with_dest("192.0.2.11", "10.0.1.1", 80));
         detector.process_event(&make_event_with_dest("192.0.2.12", "10.0.1.2", 80));
         assert!(detector.port_hits.len() + detector.accept_hits.len() <= 3);
+    }
+
+    #[test]
+    fn test_scan_flow_index_tracks_eviction_and_cleanup() {
+        let mut cfg = test_config();
+        cfg.max_flows_per_source = 80;
+        let detector = Detector::new(cfg);
+        let source: IpAddr = "192.0.2.10".parse().unwrap();
+
+        for i in 0..1_000u32 {
+            let target = format!("10.1.{}.{}", i / 256, i % 256);
+            detector.process_event(&make_event_with_dest("192.0.2.10", &target, 80));
+            let tracked = detector.scan_flow_count_for_source(source);
+            assert!(tracked <= 80);
+            assert_eq!(
+                tracked,
+                detector
+                    .port_hits
+                    .iter()
+                    .filter(|entry| entry.key().0 == source)
+                    .count()
+            );
+        }
+        // Fluxul cel mai recent nu este niciodata evacuat.
+        assert!(detector
+            .port_hits
+            .contains_key(&(source, "10.1.3.231".parse().unwrap())));
+
+        std::thread::sleep(Duration::from_millis(5));
+        detector.cleanup(Duration::ZERO);
+        assert_eq!(detector.scan_flow_count_for_source(source), 0);
+        assert!(detector.source_flows.is_empty());
+    }
+
+    #[test]
+    fn test_horizontal_sweep_at_flow_limit_is_not_quadratic() {
+        // Inainte: fiecare flux nou parcurgea toate fluxurile (de 2-4 ori),
+        // deci 40k evenimente x 10k fluxuri ~ 10^9 pasi. Acum evictia in lot
+        // amortizeaza parcurgerea; testul ar dura minute in varianta veche.
+        let mut cfg = test_config();
+        cfg.max_tracked_flows = 10_000;
+        cfg.max_flows_per_source = 10_000;
+        let detector = Detector::new(cfg);
+
+        let started = Instant::now();
+        for i in 0..40_000u32 {
+            let target = IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + i));
+            detector.process_event(&make_event_with_dest("192.0.2.10", &target.to_string(), 80));
+        }
+        assert!(detector.port_hits.len() + detector.accept_hits.len() <= 10_000);
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "sweep-ul a durat {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
