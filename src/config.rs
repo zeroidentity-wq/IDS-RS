@@ -1651,10 +1651,24 @@ mod tests {
                     .join("\n")
             })
             .collect::<Vec<_>>();
-        assert_eq!(examples.len(), 3);
-        for example in examples {
+        // Fiecare exemplu documentat parseaza sample-ul corespunzator din tester/:
+        // 20 drop-uri (Fast Scan) + 3 accept-uri, plus linii nemapate / ignorate.
+        let samples = [
+            (include_str!("../tester/sample_fast_fortigate.log"), 1, 1),
+            (include_str!("../tester/sample_fast_iptables.log"), 1, 1),
+            (include_str!("../tester/sample_fast_paloalto.log"), 0, 1),
+        ];
+        assert_eq!(examples.len(), samples.len());
+        for (example, (sample, unmapped, ignored)) in examples.iter().zip(samples) {
             let section = format!("[custom_parser]\n{example}");
-            with_custom_parser(&section).unwrap_or_else(|e| panic!("{e:#}\n{section}"));
+            let config =
+                with_custom_parser(&section).unwrap_or_else(|e| panic!("{e:#}\n{section}"));
+            let parser = crate::parser::create_parser(&config).unwrap();
+            let lines: Vec<String> = sample.lines().map(String::from).collect();
+            let report = crate::parser_tools::evaluate(parser.as_ref(), &lines);
+            assert_eq!((report.drop, report.accept), (20, 3), "{section}");
+            assert_eq!(report.unmapped_total(), unmapped, "{section}");
+            assert_eq!(report.ignored, ignored, "{section}");
         }
     }
 

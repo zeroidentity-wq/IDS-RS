@@ -27,6 +27,11 @@ Generare dinamica (avansat):
   python tester.py distributed-scan --sources 8 --target 10.0.0.100 --delay 0.1
   python tester.py distributed-scan --sources 8 --target 10.0.0.100 --format cef
   python tester.py presentation-wave --format gaia_cef --intensity 2
+
+Formate pentru parser-ul custom (config.toml: parser = "custom" + [custom_parser]):
+  python tester.py fast-scan --format fortigate --ports 20 --delay 0.1
+  python tester.py fast-scan --format iptables --ports 20 --delay 0.1
+  python tester.py fast-scan --format paloalto --ports 20 --delay 0.1
 """
 
 import argparse
@@ -86,8 +91,49 @@ def generate_gaia_cef_log(source_ip: str, dst_port: int, action: str = "drop", d
     )
 
 
+def generate_fortigate_log(source_ip: str, dst_port: int, action: str = "drop", dest_ip: str = "10.0.0.1") -> str:
+    """Genereaza un log FortiGate de trafic (key=value) — parser = "custom"."""
+    fg_action = "deny" if action == "drop" else "accept"
+    return (
+        f'<189>date={time.strftime("%Y-%m-%d")} time={time.strftime("%H:%M:%S")} '
+        f'devname="FG100F" devid="FG100FTK00000000" logid="0000000013" type="traffic" '
+        f'subtype="forward" level="notice" vd="root" srcip={source_ip} '
+        f'srcport={random.randint(1024, 65535)} srcintf="port1" dstip={dest_ip} '
+        f'dstport={dst_port} dstintf="port2" proto=6 action="{fg_action}" policyid=0'
+    )
+
+
+def generate_iptables_log(source_ip: str, dst_port: int, action: str = "drop", dest_ip: str = "10.0.0.1") -> str:
+    """Genereaza un log iptables (kernel LOG cu --log-prefix) — parser = "custom"."""
+    prefix = "FW-DROP" if action == "drop" else "FW-ACCEPT"
+    return (
+        f"{time.strftime('%b %d %H:%M:%S')} gw-linux kernel: [{random.uniform(1, 99999):.6f}] "
+        f"{prefix}: IN=eth0 OUT= MAC=00:11:22:33:44:55:66:77:88:99:aa:bb:08:00 "
+        f"SRC={source_ip} DST={dest_ip} LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=0 DF "
+        f"PROTO=TCP SPT={random.randint(1024, 65535)} DPT={dst_port} WINDOW=64240 RES=0x00 SYN URGP=0"
+    )
+
+
+def generate_paloalto_log(source_ip: str, dst_port: int, action: str = "drop", dest_ip: str = "10.0.0.1") -> str:
+    """Genereaza un log Palo Alto TRAFFIC (syslog CSV, PAN-OS) — parser = "custom".
+
+    Coloane (de la 0): 3 = tip, 7 = src, 8 = dst, 25 = port dst, 29 = protocol, 30 = actiune.
+    """
+    subtype, pa_action = ("drop", "deny") if action == "drop" else ("end", "allow")
+    now = time.strftime("%Y/%m/%d %H:%M:%S")
+    columns = [
+        f"<14>{time.strftime('%b %d %H:%M:%S')} PA-VM 1", now, "012801000001", "TRAFFIC", subtype,
+        "2561", now, source_ip, dest_ip, "0.0.0.0", "0.0.0.0", "rule-default", "", "",
+        "not-applicable", "vsys1", "trust", "untrust", "ethernet1/2", "ethernet1/1", "Forward", now,
+        str(random.randint(1, 999999)), "1", str(random.randint(1024, 65535)), str(dst_port),
+        "0", "0", "0x0", "tcp", pa_action, "74", "74", "0",
+    ]
+    return ",".join(columns)
+
+
 def generate_log(fmt: str, source_ip: str, dst_port: int, action: str = "drop", dest_ip: Optional[str] = None) -> str:
-    """Genereaza un log in formatul specificat (gaia, cef sau gaia_cef).
+    """Genereaza un log in formatul specificat (gaia, cef, gaia_cef sau unul
+    dintre formatele pentru parser-ul custom: fortigate, iptables, paloalto).
 
     dest_ip: IP destinatie optional. Daca None, se foloseste default-ul fiecarui format.
              Util pentru Lateral Movement unde destinatia variaza per eveniment.
@@ -96,6 +142,12 @@ def generate_log(fmt: str, source_ip: str, dst_port: int, action: str = "drop", 
         return generate_cef_log(source_ip, dst_port, action, dest_ip or "192.168.1.1")
     if fmt == "gaia_cef":
         return generate_gaia_cef_log(source_ip, dst_port, action, dest_ip or "192.168.1.1")
+    if fmt == "fortigate":
+        return generate_fortigate_log(source_ip, dst_port, action, dest_ip or "10.0.0.1")
+    if fmt == "iptables":
+        return generate_iptables_log(source_ip, dst_port, action, dest_ip or "10.0.0.1")
+    if fmt == "paloalto":
+        return generate_paloalto_log(source_ip, dst_port, action, dest_ip or "10.0.0.1")
     return generate_gaia_log(source_ip, dst_port, action, dest_ip or "10.0.0.1")
 
 
@@ -1174,18 +1226,17 @@ def _prompt_ip_source() -> list:
 
 
 def _ask_format() -> str:
-    """Intreaba utilizatorul formatul de log dorit. Returneaza 'gaia', 'cef' sau 'gaia_cef'."""
+    """Intreaba utilizatorul formatul de log dorit. Returneaza numele formatului."""
     print()
     print("  Format:")
     print("    1) GAIA")
     print("    2) CEF")
     print("    3) GAIA-CEF  (LEA blob in CEF Name)")
-    c = _prompt_choice(["1", "2", "3"], "1")
-    if c == "2":
-        return "cef"
-    if c == "3":
-        return "gaia_cef"
-    return "gaia"
+    print("    4) FortiGate (parser custom)")
+    print("    5) iptables  (parser custom)")
+    print("    6) Palo Alto (parser custom)")
+    c = _prompt_choice(["1", "2", "3", "4", "5", "6"], "1")
+    return {"2": "cef", "3": "gaia_cef", "4": "fortigate", "5": "iptables", "6": "paloalto"}.get(c, "gaia")
 
 
 def _print_summary(items: list) -> None:
@@ -1529,9 +1580,10 @@ def add_common_scan_args(parser: argparse.ArgumentParser) -> None:
     """Adauga argumentele comune pentru comenzile de scan."""
     parser.add_argument(
         "--format",
-        choices=["gaia", "cef", "gaia_cef"],
+        choices=["gaia", "cef", "gaia_cef", "fortigate", "iptables", "paloalto"],
         default="gaia",
-        help="Formatul log-urilor: gaia, cef sau gaia_cef (default: gaia)",
+        help="Formatul log-urilor: gaia, cef, gaia_cef sau fortigate/iptables/paloalto "
+        "(parser custom, vezi [custom_parser] in config.toml) (default: gaia)",
     )
     parser.add_argument(
         "--source",
