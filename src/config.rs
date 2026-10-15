@@ -34,9 +34,10 @@
 //
 // =============================================================================
 
+use crate::parser::Action;
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::path::Path;
 
@@ -61,6 +62,11 @@ pub struct AppConfig {
     /// config.toml, dashboard-ul este dezactivat (enabled = false).
     #[serde(default = "default_web_dashboard")]
     pub web_dashboard: WebDashboardConfig,
+
+    /// Descrierea formatului pentru `network.parser = "custom"`.
+    /// Ignorata pentru celelalte parsere.
+    #[serde(default)]
+    pub custom_parser: Option<CustomParserConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -702,6 +708,178 @@ fn default_web_dashboard() -> WebDashboardConfig {
     }
 }
 
+/// Formatul liniilor pentru parser-ul custom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CustomFormat {
+    /// Perechi `cheie=valoare` separate prin spatii; valorile pot fi intre
+    /// ghilimele (FortiGate, iptables, multe syslog-uri).
+    Kv,
+    /// Coloane separate de `delimiter`, cu ghilimele duble optionale (Palo Alto).
+    Csv,
+}
+
+/// Unde se afla un camp in linie: numele cheii (format kv) sau indexul
+/// coloanei, numarat de la 0 (format csv).
+///
+/// NOTA RUST: `#[serde(untagged)]` alege varianta dupa tipul valorii din
+/// TOML - un string devine `Key`, un intreg devine `Column`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum FieldRef {
+    Key(String),
+    Column(usize),
+}
+
+impl std::fmt::Display for FieldRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FieldRef::Key(key) => write!(f, "{key:?}"),
+            FieldRef::Column(index) => write!(f, "{index}"),
+        }
+    }
+}
+
+/// Maparea campurilor din log pe campurile LogEvent.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomFieldMap {
+    pub src_ip: FieldRef,
+    /// Obligatoriu: fara destinatie detectorul nu poate forma perechea
+    /// (sursa, destinatie) folosita de Fast/Slow/Accept Scan.
+    pub dst_ip: FieldRef,
+    pub dst_port: FieldRef,
+    /// Optional; lipsa → "tcp". Accepta nume ("TCP") sau numar IANA ("6").
+    #[serde(default)]
+    pub protocol: Option<FieldRef>,
+    /// Campul cu actiunea firewall-ului. Alternativa: `action_from_text`.
+    #[serde(default)]
+    pub action: Option<FieldRef>,
+}
+
+/// Parser declarativ pentru formate de log care nu au un parser dedicat.
+///
+/// Exemplu FortiGate:
+/// ```toml
+/// [custom_parser]
+/// format = "kv"
+/// require_text = 'type="traffic"'
+/// fields = { src_ip = "srcip", dst_ip = "dstip", dst_port = "dstport", protocol = "proto", action = "action" }
+/// drop_values = ["deny"]
+/// accept_values = ["accept", "close", "timeout"]
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomParserConfig {
+    pub format: CustomFormat,
+    /// Separatorul de coloane, doar pentru `format = "csv"`. Implicit: ",".
+    #[serde(default)]
+    pub delimiter: Option<char>,
+    /// Daca este setat, liniile care nu contin acest text sunt ignorate.
+    #[serde(default)]
+    pub require_text: Option<String>,
+    pub fields: CustomFieldMap,
+    /// Valorile campului `action` care inseamna drop / accept
+    /// (case-insensitive). Orice alta valoare este ignorata si raportata.
+    #[serde(default)]
+    pub drop_values: Vec<String>,
+    #[serde(default)]
+    pub accept_values: Vec<String>,
+    /// Pentru log-uri fara camp de actiune (ex: iptables, unde actiunea e in
+    /// `--log-prefix`): text cautat in linie → actiune.
+    /// Ex: `{ "FW-DROP" = "drop", "FW-ACCEPT" = "accept" }`.
+    #[serde(default)]
+    pub action_from_text: BTreeMap<String, Action>,
+}
+
+impl CustomParserConfig {
+    pub fn delimiter(&self) -> char {
+        self.delimiter.unwrap_or(',')
+    }
+
+    fn validate(&self, errors: &mut Vec<String>) {
+        let fields = &self.fields;
+        let mapped = [
+            ("src_ip", Some(&fields.src_ip)),
+            ("dst_ip", Some(&fields.dst_ip)),
+            ("dst_port", Some(&fields.dst_port)),
+            ("protocol", fields.protocol.as_ref()),
+            ("action", fields.action.as_ref()),
+        ];
+        for (name, field) in mapped {
+            match (self.format, field) {
+                (_, None) => {}
+                (CustomFormat::Kv, Some(FieldRef::Key(key))) if !key.trim().is_empty() => {}
+                (CustomFormat::Csv, Some(FieldRef::Column(_))) => {}
+                (CustomFormat::Kv, Some(_)) => errors.push(format!(
+                    "custom_parser.fields.{name}: format \"kv\" cere numele cheii (string nevid)"
+                )),
+                (CustomFormat::Csv, Some(_)) => errors.push(format!(
+                    "custom_parser.fields.{name}: format \"csv\" cere indexul coloanei (de la 0)"
+                )),
+            }
+        }
+
+        match (self.format, self.delimiter) {
+            (CustomFormat::Kv, Some(_)) => errors
+                .push("custom_parser.delimiter se foloseste doar cu format = \"csv\"".to_string()),
+            (CustomFormat::Csv, Some(delimiter)) if delimiter == '"' || delimiter == '\n' => errors
+                .push(format!(
+                    "custom_parser.delimiter = {delimiter:?} nu poate separa coloane"
+                )),
+            _ => {}
+        }
+
+        if self.require_text.as_deref().is_some_and(str::is_empty) {
+            errors.push("custom_parser.require_text nu poate fi gol".to_string());
+        }
+
+        // Actiunea vine dintr-o singura sursa, ca sa nu existe ambiguitate.
+        let has_values = !self.drop_values.is_empty() || !self.accept_values.is_empty();
+        match (fields.action.is_some(), self.action_from_text.is_empty()) {
+            (true, false) => errors.push(
+                "custom_parser: foloseste fie fields.action, fie action_from_text, nu ambele"
+                    .to_string(),
+            ),
+            (false, true) => errors.push(
+                "custom_parser: actiunea lipseste - seteaza fields.action (cu drop_values/accept_values) sau action_from_text"
+                    .to_string(),
+            ),
+            (true, true) if !has_values => errors.push(
+                "custom_parser: fields.action cere cel putin o valoare in drop_values sau accept_values"
+                    .to_string(),
+            ),
+            (false, false) if has_values => errors.push(
+                "custom_parser: drop_values/accept_values se folosesc doar impreuna cu fields.action"
+                    .to_string(),
+            ),
+            _ => {}
+        }
+
+        for value in self.drop_values.iter().chain(&self.accept_values) {
+            if value.trim().is_empty() {
+                errors.push(
+                    "custom_parser: drop_values/accept_values contin o valoare goala".to_string(),
+                );
+            }
+        }
+        for value in &self.drop_values {
+            if self
+                .accept_values
+                .iter()
+                .any(|accept| accept.eq_ignore_ascii_case(value))
+            {
+                errors.push(format!(
+                    "custom_parser: {value:?} apare si in drop_values si in accept_values"
+                ));
+            }
+        }
+        if self.action_from_text.keys().any(|text| text.is_empty()) {
+            errors.push("custom_parser.action_from_text contine un text gol".to_string());
+        }
+    }
+}
+
 impl AppConfig {
     /// Incarca si parseaza fisierul de configurare TOML.
     ///
@@ -772,6 +950,10 @@ impl AppConfig {
         self.network.listen_port = current.network.listen_port;
         self.network.listen_address = current.network.listen_address.clone();
         self.network.parser = current.network.parser.clone();
+        if self.custom_parser != current.custom_parser {
+            warnings.push("custom_parser modificat — necesita restart, ignorat".to_string());
+        }
+        self.custom_parser = current.custom_parser.clone();
 
         let web = &current.web_dashboard;
         if self.web_dashboard.enabled != web.enabled
@@ -842,11 +1024,21 @@ impl AppConfig {
                 None
             }
         };
-        if !matches!(self.network.parser.as_str(), "gaia" | "cef" | "gaia_cef") {
+        if !matches!(
+            self.network.parser.as_str(),
+            "gaia" | "cef" | "gaia_cef" | "custom"
+        ) {
             errors.push(format!(
-                "network.parser = {:?} este invalid. Valori acceptate: \"gaia\", \"cef\", \"gaia_cef\"",
+                "network.parser = {:?} este invalid. Valori acceptate: \"gaia\", \"cef\", \"gaia_cef\", \"custom\"",
                 self.network.parser
             ));
+        }
+        if self.network.parser == "custom" {
+            match &self.custom_parser {
+                Some(custom) => custom.validate(&mut errors),
+                None => errors
+                    .push("network.parser = \"custom\" cere sectiunea [custom_parser]".to_string()),
+            }
         }
         // Validare hostnames: cheile trebuie sa fie IP-uri valide.
         for (ip_str, hostname) in &self.network.hostnames {
@@ -1433,6 +1625,98 @@ mod tests {
     fn checked_in_configuration_is_valid() {
         let config: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
         config.validate().unwrap();
+    }
+
+    /// Config-ul inclus, comutat pe parser-ul custom cu sectiunea data.
+    fn with_custom_parser(section: &str) -> Result<AppConfig> {
+        let source =
+            include_str!("../config.toml").replace("parser = \"gaia_cef\"", "parser = \"custom\"");
+        let config: AppConfig = toml::from_str(&format!("{source}\n{section}"))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    #[test]
+    fn documented_custom_parser_examples_are_valid() {
+        let examples = include_str!("../config.toml")
+            .split("# [custom_parser]")
+            .skip(1)
+            .map(|example| {
+                example
+                    .lines()
+                    .skip(1)
+                    .take_while(|line| line.starts_with("# ") && !line.trim_end().eq("#"))
+                    .map(|line| &line[2..])
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(examples.len(), 3);
+        for example in examples {
+            let section = format!("[custom_parser]\n{example}");
+            with_custom_parser(&section).unwrap_or_else(|e| panic!("{e:#}\n{section}"));
+        }
+    }
+
+    #[test]
+    fn custom_parser_requires_its_section() {
+        let error = with_custom_parser("").unwrap_err();
+        assert!(format!("{error:#}").contains("[custom_parser]"));
+    }
+
+    #[test]
+    fn custom_parser_rejects_ambiguous_or_mismatched_settings() {
+        let cases = [
+            // Coloana numerica in format kv.
+            (
+                "format = \"kv\"\nfields = { src_ip = 1, dst_ip = \"d\", dst_port = \"p\", action = \"a\" }\ndrop_values = [\"deny\"]",
+                "cere numele cheii",
+            ),
+            // Ambele surse de actiune.
+            (
+                "format = \"kv\"\nfields = { src_ip = \"s\", dst_ip = \"d\", dst_port = \"p\", action = \"a\" }\ndrop_values = [\"deny\"]\naction_from_text = { \"X\" = \"drop\" }",
+                "nu ambele",
+            ),
+            // Nicio sursa de actiune.
+            (
+                "format = \"kv\"\nfields = { src_ip = \"s\", dst_ip = \"d\", dst_port = \"p\" }",
+                "actiunea lipseste",
+            ),
+            // Aceeasi valoare si drop si accept.
+            (
+                "format = \"kv\"\nfields = { src_ip = \"s\", dst_ip = \"d\", dst_port = \"p\", action = \"a\" }\ndrop_values = [\"deny\"]\naccept_values = [\"DENY\"]",
+                "apare si in drop_values",
+            ),
+            // Delimitator in format kv.
+            (
+                "format = \"kv\"\ndelimiter = \";\"\nfields = { src_ip = \"s\", dst_ip = \"d\", dst_port = \"p\" }\naction_from_text = { \"X\" = \"drop\" }",
+                "delimiter se foloseste doar",
+            ),
+        ];
+        for (body, expected) in cases {
+            let error = with_custom_parser(&format!("[custom_parser]\n{body}")).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(expected),
+                "{expected:?} lipseste din: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_parser_action_text_must_map_to_a_known_action() {
+        let section = "[custom_parser]\nformat = \"kv\"\nfields = { src_ip = \"s\", dst_ip = \"d\", dst_port = \"p\" }\naction_from_text = { \"X\" = \"deny\" }";
+        assert!(with_custom_parser(section).is_err());
+    }
+
+    #[test]
+    fn reload_pins_custom_parser_section() {
+        let section = "[custom_parser]\nformat = \"kv\"\nfields = { src_ip = \"s\", dst_ip = \"d\", dst_port = \"p\" }\naction_from_text = { \"X\" = \"drop\" }";
+        let current = with_custom_parser(section).unwrap();
+        let changed = with_custom_parser(&section.replace("\"X\"", "\"Y\"")).unwrap();
+        let (reloaded, warnings) = changed.prepare_reload(&current).unwrap();
+        assert_eq!(reloaded.custom_parser, current.custom_parser);
+        assert!(warnings.iter().any(|w| w.contains("custom_parser")));
     }
 
     #[test]

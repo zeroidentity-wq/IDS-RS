@@ -40,7 +40,7 @@
 //
 // =============================================================================
 
-use super::{split_cef_fields_lenient, Action, LogEvent, LogParser};
+use super::{normalize_protocol, split_cef_fields_lenient, Action, LogEvent, LogParser};
 use std::net::IpAddr;
 
 /// Parser pentru blob-uri LEA de la Checkpoint Gaia (via ArcSight).
@@ -100,19 +100,6 @@ impl GaiaCefParser {
         }
 
         None
-    }
-
-    /// Mapeaza numere de protocol IANA la nume standard.
-    ///
-    /// Log-urile LEA folosesc numere IANA (6, 17, 1) in loc de nume
-    /// (tcp, udp, icmp). Convertim la format lowercase standard.
-    fn map_protocol(proto_str: &str) -> String {
-        match proto_str {
-            "6" => "tcp".to_string(),
-            "17" => "udp".to_string(),
-            "1" => "icmp".to_string(),
-            other => other.to_lowercase(),
-        }
     }
 }
 
@@ -233,7 +220,7 @@ impl GaiaCefParser {
 
         // Extragem protocolul (optional, default tcp).
         let protocol = Self::extract_lea_field(blob, "proto")
-            .map(Self::map_protocol)
+            .map(normalize_protocol)
             .unwrap_or_else(|| "tcp".to_string());
 
         Some(LogEvent {

@@ -43,9 +43,11 @@
 // =============================================================================
 
 pub mod cef;
+pub mod custom;
 pub mod gaia;
 pub mod gaia_cef;
 
+use crate::config::AppConfig;
 use std::net::IpAddr;
 
 /// Split the eight CEF fields while respecting escaped header delimiters
@@ -83,7 +85,8 @@ pub(crate) fn split_cef_fields_lenient(input: &str) -> Vec<&str> {
 /// (ex: "deny", "Drop ") dupa parser - compilatorul obliga fiecare `match`
 /// sa trateze exact aceste doua cazuri. Normalizarea se face o singura data,
 /// la granita parser-ului.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Action {
     /// Conexiune BLOCATA de firewall → Fast/Slow Scan.
     Drop,
@@ -174,6 +177,24 @@ pub trait LogParser: Send + Sync {
 
     /// Returneaza un exemplu de format valid (pentru debug/diagnostic).
     fn expected_format(&self) -> &str;
+
+    /// Evenimente ignorate de la ultimul apel deoarece actiunea nu a putut fi
+    /// mapata pe drop/accept, plus un exemplu de valoare. Raportate periodic
+    /// ca o mapare incompleta sa nu piarda evenimente fara urma.
+    fn take_unmapped_actions(&self) -> Option<(u64, String)> {
+        None
+    }
+}
+
+/// Mapeaza numere de protocol IANA la nume standard (6 → tcp, 17 → udp,
+/// 1 → icmp); orice alt nume este doar convertit la lowercase.
+pub(crate) fn normalize_protocol(proto: &str) -> String {
+    match proto {
+        "6" => "tcp".to_string(),
+        "17" => "udp".to_string(),
+        "1" => "icmp".to_string(),
+        other => other.to_lowercase(),
+    }
 }
 
 /// Factory function - creeaza parser-ul potrivit pe baza configurarii.
@@ -187,15 +208,22 @@ pub trait LogParser: Send + Sync {
 /// Aceasta functie exemplifica POLIMORFISMUL in Rust:
 /// La compile-time nu stim ce tip concret vom returna (GaiaParser sau
 /// CefParser). Box<dyn LogParser> rezolva metoda corecta la runtime.
-pub fn create_parser(parser_type: &str) -> anyhow::Result<Box<dyn LogParser>> {
+pub fn create_parser(config: &AppConfig) -> anyhow::Result<Box<dyn LogParser>> {
+    let parser_type = config.network.parser.as_str();
     // `match` este EXHAUSTIV in Rust - compilatorul verifica ca toate
     // cazurile posibile sunt acoperite. Wildcard `_` prinde tot restul.
     match parser_type {
         "gaia" => Ok(Box::new(gaia::GaiaParser::new()?)),
         "cef" => Ok(Box::new(cef::CefParser::new())),
         "gaia_cef" => Ok(Box::new(gaia_cef::GaiaCefParser::new())),
+        "custom" => {
+            let custom = config.custom_parser.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("parser = \"custom\" cere sectiunea [custom_parser]")
+            })?;
+            Ok(Box::new(custom::CustomParser::new(custom)))
+        }
         _ => anyhow::bail!(
-            "Parser necunoscut: '{}'. Optiuni valide: gaia, cef, gaia_cef",
+            "Parser necunoscut: '{}'. Optiuni valide: gaia, cef, gaia_cef, custom",
             parser_type
         ),
     }

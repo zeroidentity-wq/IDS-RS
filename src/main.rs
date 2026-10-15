@@ -244,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
     // Alternativa (static dispatch cu generics) ar elimina acest cost
     // dar nu ar permite selectia parser-ului din config la runtime.
     //
-    let parser = parser::create_parser(&config.network.parser)?;
+    let parser = parser::create_parser(&config)?;
     display::log_info(&format!("Parser activ: {}", parser.name()));
 
     // NOTA RUST - Arc (Atomic Reference Counting):
@@ -627,6 +627,12 @@ async fn main() -> anyhow::Result<()> {
                     display::log_warning(&format!(
                         "{} evenimente UDP respinse de limitele de framing/sursa",
                         std::mem::take(&mut framing_dropped)
+                    ));
+                }
+                if let Some((count, sample)) = parser.take_unmapped_actions() {
+                    display::log_warning(&format!(
+                        "{} evenimente ignorate: actiune nemapata (ex: {:?}) — verifica [custom_parser]",
+                        count, sample
                     ));
                 }
             }

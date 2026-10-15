@@ -10,7 +10,8 @@ listen_address = "0.0.0.0"
 # Portul UDP pe care se primesc log-urile de la firewall.
 listen_port = 5555
 # Tipul de parser activ: "gaia" (Checkpoint Gaia Raw), "cef" (ArcSight CEF),
-# sau "gaia_cef" (Checkpoint Gaia LEA blob in CEF Name — via ArcSight).
+# "gaia_cef" (Checkpoint Gaia LEA blob in CEF Name — via ArcSight),
+# sau "custom" (format descris in sectiunea [custom_parser] de la final).
 parser = "gaia_cef"
 # Mod debug: afiseaza fiecare pachet primit cu validare parsare.
 # debug = true
@@ -281,3 +282,42 @@ bind = "127.0.0.1"
 max_alerts = 1000
 auth_token = ""
 max_concurrent_requests = 32
+
+# =============================================================================
+# Parser custom — folosit doar cu network.parser = "custom"
+# =============================================================================
+# Descrie formatul log-urilor unui firewall fara parser dedicat. Necesita restart.
+#
+#   format       = "kv"  → cheie=valoare separate prin spatii (FortiGate, iptables)
+#                  "csv" → coloane separate de `delimiter` (Palo Alto); implicit ","
+#   require_text = linia trebuie sa contina acest text, altfel este ignorata
+#   fields       = unde se afla fiecare camp: numele cheii (kv) sau indexul
+#                  coloanei numarat de la 0 (csv). Obligatorii: src_ip, dst_ip,
+#                  dst_port. Optional: protocol (implicit "tcp").
+#
+# Actiunea (exact una dintre variante):
+#   fields.action + drop_values / accept_values  (comparare case-insensitive)
+#   action_from_text = { "TEXT" = "drop" | "accept" }  (cauta textul in linie)
+# Evenimentele cu actiune nemapata sunt ignorate si raportate la 30 de secunde.
+#
+# Exemplu FortiGate:
+# [custom_parser]
+# format = "kv"
+# require_text = 'type="traffic"'
+# fields = { src_ip = "srcip", dst_ip = "dstip", dst_port = "dstport", protocol = "proto", action = "action" }
+# drop_values = ["deny"]
+# accept_values = ["accept", "close", "timeout"]
+#
+# Exemplu iptables (actiunea vine din --log-prefix):
+# [custom_parser]
+# format = "kv"
+# fields = { src_ip = "SRC", dst_ip = "DST", dst_port = "DPT", protocol = "PROTO" }
+# action_from_text = { "FW-DROP" = "drop", "FW-ACCEPT" = "accept" }
+#
+# Exemplu Palo Alto (syslog CSV, log TRAFFIC):
+# [custom_parser]
+# format = "csv"
+# require_text = ",TRAFFIC,"
+# fields = { src_ip = 7, dst_ip = 8, dst_port = 25, protocol = 29, action = 30 }
+# drop_values = ["deny", "drop", "reset-both", "reset-client", "reset-server"]
+# accept_values = ["allow"]
