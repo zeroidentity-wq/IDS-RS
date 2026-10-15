@@ -568,12 +568,7 @@ pub fn log_debug_parse_fail(line: &str, parser_name: &str, expected: &str) {
     );
     println!(
         "                              Primit:   \"{}\"",
-        if line.len() > 120 {
-            format!("{}...", &line[..120])
-        } else {
-            line.to_string()
-        }
-        .yellow()
+        truncate_for_display(line, 120).yellow()
     );
     println!(
         "                              Asteptat: \"{}\"",
@@ -587,6 +582,18 @@ pub fn log_debug_parse_fail(line: &str, parser_name: &str, expected: &str) {
 // `-> String` inseamna ca functia returneaza un String owned (alocat pe heap)
 // `Local::now()` returneaza data/ora locala, `.format(...)` o formateaza
 // ---------------------------------------------------------------------------
+/// Primele `max_chars` caractere din `line`, cu "..." daca a fost taiata.
+///
+/// Taie dupa caractere, nu dupa bytes: `&line[..120]` intra in panica daca
+/// byte-ul 120 cade in mijlocul unui caracter UTF-8 (ex: U+FFFD, pe care
+/// `from_utf8_lossy` il pune in locul oricarui byte invalid din datagrama).
+fn truncate_for_display(line: &str, max_chars: usize) -> String {
+    match line.char_indices().nth(max_chars) {
+        Some((cut, _)) => format!("{}...", &line[..cut]),
+        None => line.to_string(),
+    }
+}
+
 fn timestamp() -> String {
     Local::now().format("[%Y-%m-%d %H:%M:%S]").to_string()
 }
@@ -602,4 +609,20 @@ fn format_ip(ip: &IpAddr, hostnames: &HashMap<IpAddr, String>, subnets: &[Subnet
         .map(|l| format!(" [{}]", l))
         .unwrap_or_default();
     format!("{}{}{}", ip, hostname, location)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_for_display;
+
+    #[test]
+    fn truncation_respects_utf8_boundaries() {
+        // 119 bytes ASCII + U+FFFD (3 bytes): byte-ul 120 e in mijlocul lui.
+        let line = format!("{}\u{FFFD}{}", "a".repeat(119), "b".repeat(10));
+        let shown = truncate_for_display(&line, 120);
+        assert_eq!(shown, format!("{}\u{FFFD}...", "a".repeat(119)));
+
+        assert_eq!(truncate_for_display("scurt", 120), "scurt");
+        assert_eq!(truncate_for_display(&"x".repeat(120), 120), "x".repeat(120));
+    }
 }
