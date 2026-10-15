@@ -384,6 +384,19 @@ fn build_mailer(cfg: &EmailConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>>
     Ok(mailer)
 }
 
+/// Canalul de livrare nu poate trimite acum (dezactivat sau mailer
+/// neinitializat). Alerta NU a fost livrata si trebuie pastrata in spool.
+#[derive(Debug)]
+pub struct SinkUnavailable(pub &'static str);
+
+impl std::fmt::Display for SinkUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for SinkUnavailable {}
+
 /// Componenta de alertare - trimite notificari catre SIEM si email.
 ///
 /// NOTA RUST: Acest struct DETINE (owns) configurarea. Clonarea s-a facut
@@ -475,7 +488,7 @@ impl Alerter {
         if self.config.load().siem.enabled {
             self.send_siem_alert(alert).await
         } else {
-            Ok(())
+            Err(SinkUnavailable("SIEM dezactivat").into())
         }
     }
 
@@ -485,7 +498,10 @@ impl Alerter {
         if let Some(ref mailer) = **mailer_guard {
             self.send_email_alert(alert, mailer).await
         } else {
-            Ok(())
+            Err(SinkUnavailable(
+                "mailer SMTP indisponibil (email dezactivat sau eroare la initializare)",
+            )
+            .into())
         }
     }
 
@@ -1167,7 +1183,7 @@ impl Alerter {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_cef_extension, sanitize_cef_header, Alerter};
+    use super::{sanitize_cef_extension, sanitize_cef_header, Alerter, SinkUnavailable};
     use crate::config::{AppConfig, SubnetEntry};
     use crate::detector::{Alert, ScanType};
     use chrono::Local;
@@ -1271,5 +1287,37 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(length <= 60_000);
+    }
+
+    #[tokio::test]
+    async fn disabled_sinks_report_unavailable_instead_of_success() {
+        let mut app = AppConfig::load("config.toml").unwrap();
+        app.alerting.email.enabled = false;
+        app.alerting.siem.enabled = false;
+        let alerter = Alerter::new(
+            app.alerting,
+            app.detection,
+            HashMap::new(),
+            SubnetEntry::parse_subnets(&HashMap::new()),
+        )
+        .unwrap();
+        let alert = Alert {
+            scan_type: ScanType::Fast,
+            source_ip: "192.0.2.1".parse().unwrap(),
+            dest_ip: Some("198.51.100.1".parse().unwrap()),
+            unique_ports: vec![22, 80],
+            unique_dests: Vec::new(),
+            unique_sources: Vec::new(),
+            timestamp: Local::now(),
+            beacon_port: None,
+            mean_interval_secs: None,
+            cv: None,
+            event_count: None,
+        };
+
+        let siem = alerter.send_siem(&alert).await.unwrap_err();
+        assert!(siem.downcast_ref::<SinkUnavailable>().is_some());
+        let email = alerter.send_email(&alert).await.unwrap_err();
+        assert!(email.downcast_ref::<SinkUnavailable>().is_some());
     }
 }

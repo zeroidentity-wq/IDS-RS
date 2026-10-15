@@ -1,4 +1,4 @@
-use crate::alerter::Alerter;
+use crate::alerter::{Alerter, SinkUnavailable};
 use crate::config::AlertingConfig;
 use crate::detector::Alert;
 use crate::display;
@@ -181,6 +181,7 @@ async fn run_worker(
     retry_max: Duration,
 ) {
     let mut backoff = retry_initial;
+    let mut unavailable_reported = false;
     loop {
         match spool.oldest() {
             Ok(Some((path, alert))) => match deliver(sink, &alerter, &alert).await {
@@ -193,15 +194,11 @@ async fn run_worker(
                         ));
                     }
                     backoff = retry_initial;
+                    unavailable_reported = false;
                     continue;
                 }
                 Err(error) => {
-                    display::log_error(&format!(
-                        "Livrare {} esuata; retry in {}s: {:#}",
-                        sink.name(),
-                        backoff.as_secs(),
-                        error
-                    ));
+                    report_failure(sink, &error, &mut unavailable_reported);
                     tokio::time::sleep(backoff).await;
                     backoff = backoff.saturating_mul(2).min(retry_max);
                     continue;
@@ -220,7 +217,7 @@ async fn run_worker(
             break;
         };
         if let Err(error) = deliver(sink, &alerter, &alert).await {
-            display::log_error(&format!("Livrare {} esuata: {:#}", sink.name(), error));
+            report_failure(sink, &error, &mut unavailable_reported);
             if let Err(spool_error) = spool.persist(&alert) {
                 display::log_error(&format!(
                     "FATAL: nu pot salva alerta {} in spool: {:#}",
@@ -230,7 +227,26 @@ async fn run_worker(
             }
         } else {
             backoff = retry_initial;
+            unavailable_reported = false;
         }
+    }
+}
+
+/// Logheaza o livrare esuata. Un canal indisponibil (dezactivat/fara mailer)
+/// este raportat o singura data pana la urmatoarea livrare reusita, ca sa nu
+/// inunde log-ul la fiecare retry; alertele raman in spool.
+fn report_failure(sink: Sink, error: &anyhow::Error, unavailable_reported: &mut bool) {
+    if error.downcast_ref::<SinkUnavailable>().is_some() {
+        if !*unavailable_reported {
+            display::log_warning(&format!(
+                "Canal {} indisponibil ({}); alertele raman in spool pana la reactivare",
+                sink.name(),
+                error
+            ));
+            *unavailable_reported = true;
+        }
+    } else {
+        display::log_error(&format!("Livrare {} esuata: {:#}", sink.name(), error));
     }
 }
 
@@ -279,6 +295,45 @@ mod tests {
             recovered.source_ip,
             "192.0.2.1".parse::<std::net::IpAddr>().unwrap()
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn spooled_alert_is_kept_while_sink_is_unavailable() {
+        let unique = format!(
+            "ids-rs-spool-test-{}-{}",
+            std::process::id(),
+            SPOOL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let base = std::env::temp_dir().join(unique);
+        let spool = Spool::new(&base, Sink::Siem).unwrap();
+        spool.persist(&alert()).unwrap();
+
+        let mut app = crate::config::AppConfig::load("config.toml").unwrap();
+        app.alerting.siem.enabled = false;
+        app.alerting.email.enabled = false;
+        let alerter = Arc::new(
+            Alerter::new(
+                app.alerting,
+                app.detection,
+                std::collections::HashMap::new(),
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        let (_sender, receiver) = mpsc::channel(4);
+        let worker = tokio::spawn(run_worker(
+            Sink::Siem,
+            receiver,
+            alerter,
+            spool.clone(),
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        worker.abort();
+
+        assert!(spool.oldest().unwrap().is_some());
         fs::remove_dir_all(base).unwrap();
     }
 }
