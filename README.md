@@ -894,7 +894,7 @@ src: 192.168.11.7:443   parse()         → LogEvent
 ```
 
 Fiecare componenta face un singur lucru bine:
-`main.rs` orchestreaza, `parser/` intelege formatele, `detector.rs` decide,
+`main.rs` orchestreaza, `parser/` intelege formatele, `detector/` decide,
 `alerter.rs` comunica cu lumea exterioara.
 
 ---
@@ -1390,7 +1390,18 @@ ids-rs/
 │   ├── main.rs             # Entry point: UDP listener, orchestrare async
 │   ├── config.rs           # Structuri de configurare (serde + toml)
 │   ├── display.rs          # Output CLI colorat (ANSI): banner, alerte, stats
-│   ├── detector.rs         # Motor detectie: DashMap, Fast/Slow Scan, cleanup
+│   ├── detector/           # Motor detectie (API public: Detector, Alert, ScanType)
+│   │   ├── mod.rs          # Detector: orchestrare, whitelist, praguri, LRU pe IP-uri, cleanup
+│   │   ├── port_scan.rs    # Fast / Slow / Accept Scan (porturi unice per pereche)
+│   │   ├── lateral.rs      # Lateral Movement
+│   │   ├── distributed.rs  # Distributed Scan
+│   │   ├── beaconing.rs    # Beaconing C2 (CV pe intervale)
+│   │   ├── alert.rs        # Alert, ScanType
+│   │   ├── baseline.rs     # Praguri dinamice EWMA
+│   │   ├── capacity.rs     # Evictie in lot si retentie
+│   │   ├── cooldown.rs     # Cooldown alerte
+│   │   ├── whitelist.rs    # Whitelist IP / CIDR
+│   │   └── tests.rs        # Testele detectorului
 │   ├── alerter.rs          # Trimitere alerte: SIEM (UDP) + Email (SMTP async)
 │   ├── delivery.rs         # Cozi de livrare, spool pe disc, dead-letter, retry
 │   ├── web.rs              # Dashboard web embedded (axum): API alerte/graf/dosar IP
@@ -1443,25 +1454,25 @@ Codul este comentat extensiv in romana, explicand fiecare concept la prima utili
 
 | Concept                | Unde in cod                          |
 |------------------------|--------------------------------------|
-| Ownership si Borrowing | `parser/gaia.rs`, `detector.rs`      |
+| Ownership si Borrowing | `parser/gaia.rs`, `detector/`        |
 | Traits si impl         | `parser/mod.rs`, `parser/gaia.rs`    |
 | Trait Objects (dyn)     | `parser/mod.rs`, `main.rs`           |
 | Generics               | `config.rs` (`AsRef<Path>`)          |
-| Enums si Pattern Match  | `detector.rs` (`ScanType`, `match`) |
+| Enums si Pattern Match  | `detector/alert.rs` (`ScanType`, `match`) |
 | Option si Result       | toate fisierele                      |
 | Operatorul ?           | `config.rs`, `parser/gaia.rs`        |
 | Arc (shared ownership)  | `main.rs`                           |
-| Interior Mutability    | `detector.rs` (`DashMap`)            |
-| Send + Sync            | `parser/mod.rs`, `detector.rs`       |
+| Interior Mutability    | `detector/` (`DashMap`)              |
+| Send + Sync            | `parser/mod.rs`, `detector/`         |
 | Async / Await          | `main.rs`, `alerter.rs`             |
 | tokio::spawn           | `main.rs` (cleanup task)            |
 | tokio::select!         | `main.rs` (main loop)               |
 | Move Closures          | `main.rs` (spawn)                   |
-| Iteratori              | `detector.rs`, `display.rs`         |
+| Iteratori              | `detector/`, `display.rs`           |
 | Derive Macros          | `config.rs`                          |
 | Modules                | `parser/mod.rs`, `main.rs`          |
 | Lifetime-uri           | `parser/gaia.rs` (`extract_field`)  |
-| Unit Tests             | `parser/gaia.rs`, `parser/cef.rs`, `parser/gaia_cef.rs`, `detector.rs` |
+| Unit Tests             | `parser/gaia.rs`, `parser/cef.rs`, `parser/gaia_cef.rs`, `detector/tests.rs` |
 
 ---
 
@@ -1578,12 +1589,14 @@ In `config.toml`:
 max_hits_per_ip = 10000   # maxim port-hits in memorie per IP sursa
 ```
 
-In `detector.rs`, dupa fiecare `push()`:
+In `detector/`, dupa fiecare `push()` se apeleaza `keep_newest(&mut hits, cfg.max_hits_per_ip)`
+(`detector/capacity.rs`):
 ```rust
-let max_hits = self.config.max_hits_per_ip;
-if hits.len() > max_hits {
-    let overflow = hits.len() - max_hits;
-    hits.drain(..overflow);   // sterge de la inceput (oldest first)
+pub(super) fn keep_newest<T>(hits: &mut Vec<T>, max: usize) {
+    if hits.len() > max {
+        let overflow = hits.len() - max;
+        hits.drain(..overflow);   // sterge de la inceput (oldest first)
+    }
 }
 ```
 
