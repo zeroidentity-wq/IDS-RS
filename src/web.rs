@@ -327,7 +327,10 @@ async fn get_graph(
     // Snapshot rapid sub lock; eliberam lock-ul inainte de constructia grafului.
     let buffer = snapshot_alerts(&state);
     let filter_ip: Option<IpAddr> = params.ip.as_deref().and_then(|s| s.parse::<IpAddr>().ok());
+    Json(build_graph(&buffer, filter_ip))
+}
 
+fn build_graph(buffer: &[Alert], filter_ip: Option<IpAddr>) -> GraphResponse {
     let mut attackers: HashMap<IpAddr, NodeAccum> = HashMap::new();
     let mut targets: HashMap<IpAddr, NodeAccum> = HashMap::new();
     // Deduplicam muchiile: (src, dst, scan_type) → count + porturi
@@ -370,9 +373,16 @@ async fn get_graph(
         // LateralMovement: fiecare unique_dest e o tinta separata
         match alert.scan_type {
             ScanType::LateralMovement => {
-                for dest in &alert.unique_dests {
+                // `dest_ip` (destinatia evenimentului declansator) este si in
+                // `unique_dests` si a fost deja numarat mai sus.
+                for dest in alert
+                    .unique_dests
+                    .iter()
+                    .filter(|dest| Some(**dest) != alert.dest_ip)
+                {
                     let t = targets.entry(*dest).or_default();
                     t.alert_count += 1;
+                    t.scan_types.insert(stype.clone());
                     t.last_seen = ts.clone();
 
                     let key = (alert.source_ip.to_string(), dest.to_string(), stype.clone());
@@ -458,11 +468,11 @@ async fn get_graph(
         unique_targets: targets.len(),
     };
 
-    Json(GraphResponse {
+    GraphResponse {
         nodes,
         edges,
         stats,
-    })
+    }
 }
 
 /// Raspuns IP Dossier — istoric complet al unui IP din alerte.
@@ -618,7 +628,41 @@ const DASHBOARD_HTML: &str = include_str!("../static/dashboard.html");
 
 #[cfg(test)]
 mod tests {
-    use super::constant_time_eq;
+    use super::{build_graph, constant_time_eq};
+    use crate::detector::{Alert, ScanType};
+    use chrono::Local;
+
+    #[test]
+    fn lateral_movement_counts_each_contacted_host_once() {
+        let source = "10.0.0.5".parse().unwrap();
+        let first = "10.0.1.1".parse().unwrap();
+        let alert = Alert {
+            scan_type: ScanType::LateralMovement,
+            source_ip: source,
+            dest_ip: Some(first),
+            unique_ports: Vec::new(),
+            unique_dests: vec![first, "10.0.1.2".parse().unwrap()],
+            unique_sources: Vec::new(),
+            timestamp: Local::now(),
+            beacon_port: None,
+            mean_interval_secs: None,
+            cv: None,
+            event_count: None,
+        };
+
+        let graph = build_graph(&[alert], None);
+        assert_eq!(graph.edges.len(), 2);
+        assert!(graph.edges.iter().all(|edge| edge.count == 1));
+        let targets: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.role == "target")
+            .collect();
+        assert_eq!(targets.len(), 2);
+        assert!(targets
+            .iter()
+            .all(|node| node.alert_count == 1 && node.scan_types == ["Lateral Movement"]));
+    }
 
     #[test]
     fn token_comparison_handles_equal_and_different_lengths() {
