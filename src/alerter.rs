@@ -97,15 +97,17 @@ fn sanitize_cef_header(input: &str) -> String {
 
 /// Escape dedicat pentru valorile din CEF extensions (`key=value`).
 ///
-/// Aici separatorii relevanti sunt spatiul dintre perechi si `=` dintre cheie
-/// si valoare, nu separatorul `|` din header.
+/// Standardul CEF cere escape in extensii doar pentru `\`, `=` si newline.
+/// Spatiile sunt permise in valori: parserul recunoaste inceputul perechii
+/// urmatoare dupa ` cheie=`, iar `=` din valoare este deja escapat, deci un
+/// spatiu nu poate introduce o pereche falsa. `\ ` nu este o secventa CEF
+/// definita si ar aparea literal in SIEM (`Fast\ Scan\ detectat`).
 fn sanitize_cef_extension(input: &str) -> String {
     input
         .replace('\\', "\\\\")
         .replace('=', "\\=")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
-        .replace(' ', "\\ ")
 }
 
 fn sorted_ip_list(ips: &[IpAddr]) -> String {
@@ -1357,9 +1359,11 @@ mod tests {
 
     #[test]
     fn test_sanitize_extension_value_separators() {
+        // Spatiile raman (permise de CEF); `=` este escapat, deci "key=value"
+        // din valoare nu poate deveni o pereche noua.
         assert_eq!(
             sanitize_cef_extension("host name key=value"),
-            "host\\ name\\ key\\=value"
+            "host name key\\=value"
         );
     }
 
@@ -1542,5 +1546,49 @@ mod tests {
             sorted_ip_sample(&sources, None, 2),
             "203.0.113.1,203.0.113.2"
         );
+    }
+
+    #[tokio::test]
+    async fn cef_extension_values_keep_plain_spaces() {
+        let mut app = AppConfig::load("config.toml").unwrap();
+        app.alerting.email.enabled = false;
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        app.alerting.siem.host = "127.0.0.1".to_string();
+        app.alerting.siem.port = receiver.local_addr().unwrap().port();
+        let subnets = SubnetEntry::parse_subnets(&HashMap::from([(
+            "192.0.2.0/24".to_string(),
+            "Etaj 2".to_string(),
+        )]));
+        let alerter = Alerter::new(app.alerting, app.detection, HashMap::new(), subnets).unwrap();
+        let alert = Alert {
+            scan_type: ScanType::Fast,
+            source_ip: "192.0.2.1".parse().unwrap(),
+            dest_ip: Some("198.51.100.1".parse().unwrap()),
+            unique_ports: vec![22, 80],
+            unique_dests: Vec::new(),
+            unique_sources: Vec::new(),
+            timestamp: Local::now(),
+            beacon_port: None,
+            mean_interval_secs: None,
+            cv: None,
+            event_count: None,
+        };
+
+        alerter.send_siem(&alert).await.unwrap();
+        let mut buffer = vec![0u8; 65_507];
+        let (length, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            receiver.recv_from(&mut buffer),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let message = String::from_utf8_lossy(&buffer[..length]);
+        assert!(message.contains("cs2=Etaj 2 "), "{message}");
+        assert!(
+            message.contains("msg=Fast Scan detectat: 2 porturi"),
+            "{message}"
+        );
+        assert!(!message.contains("\\ "), "{message}");
     }
 }
