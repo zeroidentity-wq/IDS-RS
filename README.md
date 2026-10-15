@@ -1,50 +1,8 @@
-
-WebDashboard IDS-RS – Funcționalități principale
-
-WebDashboard-ul IDS-RS oferă o vizualizare operațională, în timp real, a alertelor de securitate generate de detector. Scopul lui este să reducă timpul de analiză și să permită
-trierea rapidă a incidentelor, fără a înlocui SIEM-ul.
-
-Platforma afișează o hartă interactivă a rețelei (graph) cu noduri și conexiuni între surse și destinații, colorate pe tipuri de detecție (Fast, Slow, Accept, Lateral Movement,
-Distributed, Beaconing C2). Operatorul poate face zoom, fit, freeze, pin/unpin noduri, izolare pe selecție și grupare pe subnet pentru înțelegerea rapidă a pattern-urilor de atac.
-
-În partea de monitorizare, dashboard-ul include:
-
-- statistici live (total alerte, atacatori unici, ținte unice),
-- actualizare periodică automată,
-- search după IP (omnisearch),
-- filtre pe tip de alertă și severitate,
-- vizualizări predefinite (critical, scans only, distributed only etc.).
-
-Zona de alerte oferă un tabel cu:
-
-- timestamp, tip alertă, sursă, destinație și detalii,
-- clustering pentru evenimente repetitive,
-- triage operațional (Ack / Dismiss / Escalate),
-- sumar de status și opțiune de ascundere a alertelor dismissed,
-- densitate configurabilă și panou colapsabil pentru a lăsa mai mult spațiu grafului.
-
-Pentru investigații, dashboard-ul are:
-
-- IP Dossier (context per IP: rol, tipuri de scan, timeline, peer-uri),
-- etichete MITRE ATT&CK pentru contextualizare tactică,
-- Investigation Workspace (IP-uri pinned + notițe, export JSON),
-- Replay Mode pe fereastră de timp, cu control de viteză și slider temporal.
-
-Pentru prezentare și raportare:
-
-- export al grafului în PNG,
-- mod fullscreen,
-- suport dark/light theme,
-- command palette și shortcut-uri de tastatură,
-- notificări vizuale/audio pentru evenimente critice.
-
-Tehnic, WebDashboard-ul este un server web embedded, read-only, care expune endpoint-uri API pentru alerte și graf, funcționează local/offline (inclusiv în medii izolate) și este
-construit să aibă impact minim asupra fluxului principal de detecție.
-
 # IDS-RS — Intrusion Detection System
 
 Sistem de detectie a intruziunilor bazat pe analiza log-urilor de firewall, scris in Rust.
-Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite alerte catre SIEM si email.
+Detecteaza scanari de retea (Fast Scan, Slow Scan, Accept Scan, Distributed Scan), Lateral Movement
+si Beaconing C2, si trimite alerte catre SIEM si email.
 
 ---
 
@@ -59,6 +17,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [Loguri de la alte firewall-uri — Parser custom](#loguri-de-la-alte-firewall-uri--parser-custom)
 - [Calatoria unui eveniment — De la firewall la SIEM](#calatoria-unui-eveniment--de-la-firewall-la-siem)
 - [Rulare](#rulare)
+- [Web Dashboard](#web-dashboard)
 - [Testare](#testare)
 - [Structura proiect](#structura-proiect)
 - [Protectie memorie — MAX\_HITS\_PER\_IP](#protectie-memorie--max_hits_per_ip)
@@ -76,7 +35,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 
 | Categorie | Detalii |
 |-----------|---------|
-| **Detectie** | Fast Scan, Slow Scan, Accept Scan, Lateral Movement — toate funcționale |
+| **Detectie** | Fast Scan, Slow Scan, Accept Scan, Lateral Movement, Distributed Scan, Beaconing C2 — toate funcționale |
 | **Parseri** | Checkpoint Gaia, CEF/ArcSight, Gaia-CEF (LEA blob in CEF Name), Custom configurabil (cheie=valoare / CSV — FortiGate, iptables, Palo Alto etc.) |
 | **Alertare** | SIEM (UDP CEF), Email (SMTP async) |
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
@@ -991,6 +950,50 @@ Output-ul arata fiecare pachet primit (RAW), rezultatul parsarii (OK/FAIL) si, i
   Porturi: 21, 22, 23, 25, 53, 80, 110, 143, 443, 993, ...
 --------------------------------------------------------------
 ```
+
+---
+
+## Web Dashboard
+
+WebDashboard-ul IDS-RS oferă o vizualizare operațională, în timp real, a alertelor de securitate generate de detector. Scopul lui este să reducă timpul de analiză și să permită
+trierea rapidă a incidentelor, fără a înlocui SIEM-ul.
+
+Platforma afișează o hartă interactivă a rețelei (graph) cu noduri și conexiuni între surse și destinații, colorate pe tipuri de detecție (Fast, Slow, Accept, Lateral Movement,
+Distributed, Beaconing C2). Operatorul poate face zoom, fit, freeze, pin/unpin noduri, izolare pe selecție și grupare pe subnet pentru înțelegerea rapidă a pattern-urilor de atac.
+
+În partea de monitorizare, dashboard-ul include:
+
+- statistici live (total alerte, atacatori unici, ținte unice),
+- actualizare periodică automată,
+- search după IP (omnisearch),
+- filtre pe tip de alertă și severitate,
+- vizualizări predefinite (critical, scans only, distributed only etc.).
+
+Zona de alerte oferă un tabel cu:
+
+- timestamp, tip alertă, sursă, destinație și detalii,
+- clustering pentru evenimente repetitive,
+- triage operațional (Ack / Dismiss / Escalate),
+- sumar de status și opțiune de ascundere a alertelor dismissed,
+- densitate configurabilă și panou colapsabil pentru a lăsa mai mult spațiu grafului.
+
+Pentru investigații, dashboard-ul are:
+
+- IP Dossier (context per IP: rol, tipuri de scan, timeline, peer-uri),
+- etichete MITRE ATT&CK pentru contextualizare tactică,
+- Investigation Workspace (IP-uri pinned + notițe, export JSON),
+- Replay Mode pe fereastră de timp, cu control de viteză și slider temporal.
+
+Pentru prezentare și raportare:
+
+- export al grafului în PNG,
+- mod fullscreen,
+- suport dark/light theme,
+- command palette și shortcut-uri de tastatură,
+- notificări vizuale/audio pentru evenimente critice.
+
+Tehnic, WebDashboard-ul este un server web embedded, read-only, care expune endpoint-uri API pentru alerte și graf, funcționează local/offline (inclusiv în medii izolate) și este
+construit să aibă impact minim asupra fluxului principal de detecție.
 
 ---
 
