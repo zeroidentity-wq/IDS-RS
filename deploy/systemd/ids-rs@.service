@@ -1,0 +1,65 @@
+# =============================================================================
+# IDS-RS - serviciu systemd (sablon), instalat in /etc/systemd/system/
+# =============================================================================
+#
+# O instanta per sursa de log-uri / departament:
+#   ids-rs@<nume>  →  config /etc/ids-rs/<nume>.toml
+#                     director de lucru /var/lib/ids-rs/<nume>/ (spool-ul relativ)
+#
+#   systemctl enable --now ids-rs@fortigate
+#   systemctl reload ids-rs@fortigate        # SIGHUP: reincarca config-ul
+#   journalctl -u ids-rs@fortigate -f
+#
+# Fiecare instanta are nevoie de listen_port si web_dashboard.port proprii.
+# =============================================================================
+
+[Unit]
+Description=IDS-RS intrusion detection (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ids-rs
+Group=ids-rs
+ExecStart=/usr/local/bin/ids-rs /etc/ids-rs/%i.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+# La oprire cozile de alerte sunt golite in spool (timeout intern 10s per worker).
+TimeoutStopSec=30
+
+# spool_directory = "spool" (relativ) ajunge in /var/lib/ids-rs/<nume>/spool.
+# Restul sistemului de fisiere este read-only pentru serviciu (ProtectSystem).
+StateDirectory=ids-rs/%i
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/ids-rs/%i
+UMask=0027
+
+# Singurul privilegiu: bind pe porturi < 1024 (ex: syslog 514) fara root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

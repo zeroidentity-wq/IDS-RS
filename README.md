@@ -17,6 +17,7 @@ si Beaconing C2, si trimite alerte catre SIEM si email.
 - [Loguri de la alte firewall-uri — Parser custom](#loguri-de-la-alte-firewall-uri--parser-custom)
 - [Calatoria unui eveniment — De la firewall la SIEM](#calatoria-unui-eveniment--de-la-firewall-la-siem)
 - [Rulare](#rulare)
+- [Instalare ca serviciu (RHEL 9)](#instalare-ca-serviciu-rhel-9)
 - [Web Dashboard](#web-dashboard)
 - [Testare](#testare)
 - [Structura proiect](#structura-proiect)
@@ -192,6 +193,11 @@ source ~/.cargo/env
 # Dependente sistem (pentru native-tls / OpenSSL)
 sudo dnf install -y gcc openssl-devel pkg-config
 ```
+
+Comenzile de mai sus cer internet. Pentru serverele din reteaua izolata,
+binarul se compileaza pe o masina conectata cu `deploy/build-rhel9.sh` (un binar
+compilat pe Fedora nu porneste pe RHEL 9: `GLIBC_2.38 not found`) si se transfera
+ca arhiva — vezi [Instalare ca serviciu](#instalare-ca-serviciu-rhel-9).
 
 ### Windows 10/11
 
@@ -959,6 +965,121 @@ Output-ul arata fiecare pachet primit (RAW), rezultatul parsarii (OK/FAIL) si, i
 
 ---
 
+## Instalare ca serviciu (RHEL 9)
+
+IDS-RS ruleaza ca serviciu systemd sablon, `ids-rs@<nume>`: **o instanta per sursa
+de log-uri** (ex: `ids-rs@checkpoint`, `ids-rs@fortigate`), fiecare cu config-ul,
+portul si spool-ul ei.
+
+Serverele sunt in retea izolata (fara internet), deci compilarea si impachetarea
+se fac pe o **masina conectata**, iar pe server ajunge o singura arhiva:
+
+```
+masina conectata                         transfer            server RHEL 9 (air-gapped)
+deploy/build-rhel9.sh  →  binar RHEL 9                       sha256sum -c
+deploy/package.sh      →  ids-rs-…-rhel9.tar.gz  ───────►    tar xzf, sudo ./install.sh
+```
+
+| Fisier | Unde ruleaza | Rol |
+|--------|--------------|-----|
+| `deploy/build-rhel9.sh` | masina conectata | Compileaza binarul release intr-un container UBI 9 (podman) → `target/rhel9/release/ids-rs` |
+| `deploy/package.sh` | masina conectata | Verifica glibc-ul cerut si creeaza `target/dist/ids-rs-<versiune>-<commit>-rhel9.tar.gz` + `.sha256` |
+| `deploy/install.sh` | server, offline | Creeaza utilizatorul `ids-rs`, instaleaza binarul, unit-ul si `/etc/ids-rs/` |
+| `deploy/systemd/ids-rs@.service` | server | Unit-ul sablon, cu hardening systemd |
+
+Pe server binarul are nevoie doar de `glibc`, `openssl-libs`, `zlib` si `libgcc`, toate
+din instalarea de baza RHEL 9; nu descarca nimic. Dashboard-ul web are D3.js inclus in binar.
+Fluxul complet (arhiva → `install.sh` → serviciu → alerta → reload → stop) a fost
+validat intr-un container RHEL 9.6 (UBI) fara retea; `systemd-analyze security`: 1.9 OK.
+
+### 1. Compilare si impachetare (masina conectata)
+
+Binarul trebuie compilat pentru glibc 2.34 (RHEL 9) — un binar compilat pe Fedora
+nu porneste pe server. Cu podman:
+
+```bash
+deploy/build-rhel9.sh        # prima rulare descarca imaginea UBI 9, Rust 1.85 si crate-urile
+deploy/package.sh            # → target/dist/ids-rs-0.1.0-<commit>-rhel9.tar.gz (+ .sha256)
+```
+
+Arhiva contine `ids-rs`, `install.sh`, `systemd/ids-rs@.service`, `example.toml`,
+`README.md` si `SHA256SUMS`. Numele include commit-ul (cu `-dirty` daca exista
+modificari necomise), ca sa stiti exact ce versiune ruleaza pe server.
+
+### 2. Instalare pe server (offline, idempotent la upgrade)
+
+Dupa transferul arhivei si al fisierului `.sha256` prin canalul aprobat:
+
+```bash
+sha256sum -c ids-rs-0.1.0-<commit>-rhel9.tar.gz.sha256
+tar xzf ids-rs-0.1.0-<commit>-rhel9.tar.gz
+cd ids-rs-0.1.0-<commit>-rhel9
+sha256sum -c SHA256SUMS
+sudo ./install.sh
+```
+
+Scriptul verifica intai ca binarul porneste pe sistem, apoi:
+- creeaza utilizatorul de sistem `ids-rs` (fara shell, fara home);
+- instaleaza `/usr/local/bin/ids-rs` si `/etc/systemd/system/ids-rs@.service`
+  (cu `install` + `restorecon`, ca etichetele SELinux sa fie corecte);
+- creeaza `/etc/ids-rs/` (`root:ids-rs`, `0750`) cu `example.toml`;
+- nu suprascrie config-uri existente si nu porneste nicio instanta.
+
+### 3. O instanta noua
+
+```bash
+sudo cp /etc/ids-rs/example.toml /etc/ids-rs/fortigate.toml
+sudo chown root:ids-rs /etc/ids-rs/fortigate.toml
+sudo chmod 0640 /etc/ids-rs/fortigate.toml      # contine parola SMTP / auth_token
+sudoedit /etc/ids-rs/fortigate.toml
+ids-rs test-parser /etc/ids-rs/fortigate.toml sample.log
+sudo firewall-cmd --permanent --add-port=5556/udp && sudo firewall-cmd --reload
+sudo systemctl enable --now ids-rs@fortigate
+```
+
+In config-ul fiecarei instante:
+- `listen_port` si `web_dashboard.port` trebuie sa fie **unice** pe masina;
+- `trusted_senders` = IP-urile firewall-urilor care trimit log-uri (obligatoriu
+  cand `listen_address` nu este loopback);
+- `spool_directory` ramane **relativ** (implicit `"spool"`): ajunge in
+  `/var/lib/ids-rs/<nume>/spool`, singurul director in care serviciul poate scrie.
+
+Pentru a accepta log-uri doar de la firewall, in loc de `--add-port` se poate
+folosi o regula cu sursa:
+```bash
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="10.0.0.1" port port="5556" protocol="udp" accept'
+```
+
+### Operare
+
+```bash
+systemctl status ids-rs@fortigate
+journalctl -u ids-rs@fortigate -f          # alerte, rezumatul de parsare, avertismente
+sudo systemctl reload ids-rs@fortigate     # SIGHUP: reincarca config-ul (praguri, whitelist...)
+sudo systemctl restart ids-rs@fortigate    # necesar pentru parser, porturi, spool
+```
+
+`systemctl stop` trimite SIGTERM: cozile de alerte sunt golite in spool si
+retrimise la pornirea urmatoare. La o oprire neasteptata, serviciul este repornit
+dupa 5 secunde (`Restart=on-failure`).
+
+Unit-ul ruleaza fara root, cu sistemul de fisiere read-only in afara
+`/var/lib/ids-rs/<nume>` (`ProtectSystem=strict`), fara acces la `/home`, cu
+filtru de apeluri de sistem si doar capabilitatea `CAP_NET_BIND_SERVICE`
+(pentru porturi sub 1024, ex: syslog pe 514).
+
+### Upgrade
+
+Pe masina conectata: `deploy/build-rhel9.sh && deploy/package.sh`. Pe server,
+dupa transfer si verificarea sumelor ca mai sus:
+
+```bash
+sudo ./install.sh                          # config-urile din /etc/ids-rs raman neatinse
+sudo systemctl restart 'ids-rs@*'
+```
+
+---
+
 ## Web Dashboard
 
 WebDashboard-ul IDS-RS oferă o vizualizare operațională, în timp real, a alertelor de securitate generate de detector. Scopul lui este să reducă timpul de analiză și să permită
@@ -1258,6 +1379,12 @@ ids-rs/
 ├── config.toml             # Fisier de configurare
 ├── README.md               # Acest fisier
 ├── rust-toolchain.toml     # Toolchain fixat (Rust 1.85, MSRV)
+├── deploy/
+│   ├── build-rhel9.sh      # Compilare release pentru RHEL 9 (container UBI 9)
+│   ├── package.sh          # Arhiva de livrare pentru reteaua izolata (+ SHA256SUMS)
+│   ├── install.sh          # Instalare serviciu offline: utilizator, binar, unit, /etc/ids-rs
+│   └── systemd/
+│       └── ids-rs@.service # Unit systemd sablon, o instanta per sursa de log-uri
 ├── static/                 # dashboard.html + d3.v7.min.js (incluse in binar)
 ├── src/
 │   ├── main.rs             # Entry point: UDP listener, orchestrare async
