@@ -81,7 +81,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
 | **Livrare** | Cozi separate SIEM/email, spool durabil pe disc, dead-letter, retry per destinatar |
-| **Teste** | 110 teste (107 biblioteca + 3 binar) — toate trec |
+| **Teste** | 117 teste (114 biblioteca + 3 binar) — toate trec |
 | **Clippy** | 0 warnings (`cargo clippy --all-targets -- -D warnings` in CI) |
 
 ### Implementat
@@ -102,7 +102,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Web Dashboard (#25) — server HTTP embedded cu graf D3.js force-directed, API JSON, auto-refresh 5s
 - [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
 - [x] Livrare durabila: spool pe disc, dead-letter pentru esecuri permanente, retry email doar catre destinatarii ramasi, golirea cozilor in spool la oprire
-- [x] Teste: 110 passed (parseri, detector, livrare/spool cu server SMTP fals, config strict, reload, web auth, whitelist si toate detectiile)
+- [x] Teste: 117 passed (parseri, detector, livrare/spool cu server SMTP fals, config strict, reload, web auth, whitelist si toate detectiile)
 
 ### Hardening operational
 
@@ -368,7 +368,7 @@ password = "changeme"
 
 [cleanup]
 interval_secs = 60            # Frecventa task cleanup
-max_entry_age_secs = 600      # Sterge date mai vechi de N secunde
+max_entry_age_secs = 600      # Sterge date mai vechi de N secunde (dar nu mai noi decat fereastra fiecarei detectii, ex: beaconing)
 ```
 
 ### Formate de log suportate
@@ -900,7 +900,7 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 107 passed` (biblioteca) si `test result: ok. 3 passed` (binar).
+Rezultat asteptat: `test result: ok. 114 passed` (biblioteca) si `test result: ok. 3 passed` (binar).
 
 Pentru verificarea completa, ca in CI:
 
