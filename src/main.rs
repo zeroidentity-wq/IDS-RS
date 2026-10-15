@@ -591,16 +591,14 @@ async fn main() -> anyhow::Result<()> {
                             };
                         }
                         if trusted_senders_changed
-                            || new_config.network.udp_per_sender_rate_limit
-                                != config.network.udp_per_sender_rate_limit
-                            || new_config.network.udp_per_sender_burst_size
-                                != config.network.udp_per_sender_burst_size
+                            || new_config.network.per_sender_limits()
+                                != config.network.per_sender_limits()
                         {
                             sender_rate_limiters.clear();
                             display::log_reload(&format!(
                                 "Rate limiting per sender: {} evenimente/s, burst {}",
-                                new_config.network.udp_per_sender_rate_limit,
-                                new_config.network.udp_per_sender_burst_size
+                                new_config.network.per_sender_limits().0,
+                                new_config.network.per_sender_limits().1
                             ));
                         }
 
@@ -681,13 +679,15 @@ async fn main() -> anyhow::Result<()> {
                             }
                             // The token budget is charged per logical event, not per
                             // datagram, so newline coalescing cannot bypass the limit.
-                            if config.network.udp_per_sender_rate_limit > 0 {
+                            let (per_sender_rate, per_sender_burst) =
+                                config.network.per_sender_limits();
+                            if per_sender_rate > 0 {
                                 let sender_limiter = sender_rate_limiters
                                     .entry(sender)
                                     .or_insert_with(|| {
                                         TokenBucket::new(
-                                            config.network.udp_per_sender_rate_limit,
-                                            config.network.udp_per_sender_burst_size,
+                                            per_sender_rate,
+                                            per_sender_burst,
                                         )
                                     });
                                 if !sender_limiter.try_consume() {

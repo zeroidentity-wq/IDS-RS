@@ -83,11 +83,14 @@ pub struct NetworkConfig {
     pub udp_burst_size: u64,
 
     /// Per-sender token bucket prevents one trusted source from exhausting the
-    /// global budget shared by all firewalls.
-    #[serde(default = "default_udp_per_sender_rate_limit")]
-    pub udp_per_sender_rate_limit: u64,
-    #[serde(default = "default_udp_per_sender_burst_size")]
-    pub udp_per_sender_burst_size: u64,
+    /// global budget shared by all firewalls. Read through
+    /// [`NetworkConfig::per_sender_limits`]: when omitted, the defaults are
+    /// capped to the global limit so older configs with a low
+    /// `udp_rate_limit` stay valid.
+    #[serde(default)]
+    pub udp_per_sender_rate_limit: Option<u64>,
+    #[serde(default)]
+    pub udp_per_sender_burst_size: Option<u64>,
 
     /// Allowlist for the actual UDP sender address. It is mandatory whenever
     /// the listener is exposed on a non-loopback interface.
@@ -121,12 +124,28 @@ fn default_udp_burst_size() -> u64 {
     10_000
 }
 
-fn default_udp_per_sender_rate_limit() -> u64 {
-    2_500
-}
+const DEFAULT_UDP_PER_SENDER_RATE_LIMIT: u64 = 2_500;
+const DEFAULT_UDP_PER_SENDER_BURST_SIZE: u64 = 5_000;
 
-fn default_udp_per_sender_burst_size() -> u64 {
-    5_000
+impl NetworkConfig {
+    /// Limitele efective per sender: `(rata, burst)`. Valorile setate explicit
+    /// sunt folosite ca atare; cele omise primesc default-ul, plafonat la
+    /// limita globala cand aceasta este activa.
+    pub fn per_sender_limits(&self) -> (u64, u64) {
+        let cap = |default: u64, global: u64| {
+            if self.udp_rate_limit > 0 {
+                default.min(global)
+            } else {
+                default
+            }
+        };
+        (
+            self.udp_per_sender_rate_limit
+                .unwrap_or_else(|| cap(DEFAULT_UDP_PER_SENDER_RATE_LIMIT, self.udp_rate_limit)),
+            self.udp_per_sender_burst_size
+                .unwrap_or_else(|| cap(DEFAULT_UDP_PER_SENDER_BURST_SIZE, self.udp_burst_size)),
+        )
+    }
 }
 
 fn default_max_lines_per_datagram() -> usize {
@@ -899,16 +918,14 @@ impl AppConfig {
                 self.network.udp_burst_size, self.network.udp_rate_limit
             ));
         }
-        if self.network.udp_per_sender_rate_limit > 0 && self.network.udp_per_sender_burst_size == 0
-        {
+        let (per_sender_rate, per_sender_burst) = self.network.per_sender_limits();
+        if per_sender_rate > 0 && per_sender_burst == 0 {
             errors.push(
                 "network.udp_per_sender_burst_size trebuie sa fie > 0 cand limita per sender este activa"
                     .to_string(),
             );
         }
-        if self.network.udp_rate_limit > 0
-            && self.network.udp_per_sender_rate_limit > self.network.udp_rate_limit
-        {
+        if self.network.udp_rate_limit > 0 && per_sender_rate > self.network.udp_rate_limit {
             errors.push(
                 "network.udp_per_sender_rate_limit nu poate depasi udp_rate_limit".to_string(),
             );
@@ -1473,5 +1490,31 @@ mod tests {
             current.detection.fast_scan.port_threshold + 1
         );
         assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
+    fn omitted_per_sender_limits_follow_a_low_global_limit() {
+        let mut config: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        config.network.udp_rate_limit = 1_000;
+        config.network.udp_burst_size = 2_000;
+        config.network.udp_per_sender_rate_limit = None;
+        config.network.udp_per_sender_burst_size = None;
+
+        config.validate().unwrap();
+        assert_eq!(config.network.per_sender_limits(), (1_000, 2_000));
+
+        config.network.udp_rate_limit = 0;
+        assert_eq!(config.network.per_sender_limits(), (2_500, 5_000));
+    }
+
+    #[test]
+    fn explicit_per_sender_limit_above_global_is_still_rejected() {
+        let mut config: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        config.network.udp_rate_limit = 1_000;
+        config.network.udp_burst_size = 2_000;
+        config.network.udp_per_sender_rate_limit = Some(2_500);
+
+        let error = config.validate().unwrap_err();
+        assert!(error.to_string().contains("udp_per_sender_rate_limit"));
     }
 }
