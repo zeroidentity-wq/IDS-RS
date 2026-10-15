@@ -427,7 +427,12 @@ fn effective_threshold_value(
     let dynamic = baseline.mean + dt.sensitivity_multiplier * baseline.stddev();
     let floor = (static_threshold as f64 * dt.min_threshold_ratio).ceil() as usize;
     let ceiling = (static_threshold as f64 * dt.max_threshold_ratio).floor() as usize;
-    (dynamic.ceil() as usize).clamp(floor.max(1), ceiling.max(1))
+    // Rotunjirea poate inversa limitele cand intervalul [min, max] nu contine
+    // niciun intreg (ex: prag 3, ratii 0.5..0.6 -> floor 2, ceiling 1);
+    // `clamp` ar intra in panica si ar opri tot procesul.
+    let floor = floor.max(1);
+    let ceiling = ceiling.max(floor);
+    (dynamic.ceil() as usize).clamp(floor, ceiling)
 }
 
 /// Cate intrari elibereaza o evictie cand o limita este atinsa.
@@ -3274,5 +3279,24 @@ mod tests {
         inject_beacon_history(&detector, key, 10, 110, 0.0);
         detector.cleanup(Duration::from_secs(600));
         assert_eq!(detector.beacon_hits.get(&key).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn test_dynamic_threshold_bounds_without_integer_between_them() {
+        let dt = DynamicThresholdConfig {
+            enabled: true,
+            ewma_alpha: 0.1,
+            sensitivity_multiplier: 3.0,
+            min_samples: 1,
+            min_threshold_ratio: 0.5,
+            max_threshold_ratio: 0.6,
+        };
+        let mut baseline = BaselineEwma::new();
+        baseline.update(1.0, dt.ewma_alpha);
+        // ceil(3 * 0.5) = 2 > floor(3 * 0.6) = 1: inainte, panica in clamp.
+        assert_eq!(effective_threshold_value(3, &baseline, &dt), 2);
+
+        baseline.update(100.0, dt.ewma_alpha);
+        assert_eq!(effective_threshold_value(3, &baseline, &dt), 2);
     }
 }
