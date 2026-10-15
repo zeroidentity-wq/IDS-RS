@@ -117,7 +117,8 @@ impl Action {
 
 impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        // `pad` respecta latimea si alinierea ceruta (ex: `{:<6}` in rapoarte).
+        f.pad(self.as_str())
     }
 }
 
@@ -240,5 +241,10 @@ mod tests {
         assert_eq!(Action::from_firewall("reject"), None);
         assert_eq!(Action::from_firewall("Log"), None);
         assert_eq!(Action::from_firewall(""), None);
+    }
+
+    #[test]
+    fn display_respects_width() {
+        assert_eq!(format!("[{:<6}]", Action::Drop), "[drop  ]");
     }
 }
