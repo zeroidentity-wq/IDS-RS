@@ -1,4 +1,4 @@
-use crate::alerter::{Alerter, SinkUnavailable};
+use crate::alerter::{Alerter, PermanentFailure, SinkUnavailable};
 use crate::config::AlertingConfig;
 use crate::detector::Alert;
 use crate::display;
@@ -32,25 +32,48 @@ impl Sink {
 #[derive(Clone)]
 struct Spool {
     directory: PathBuf,
+    /// Alertele care au esuat definitiv. Nu sunt reincercate automat, dar
+    /// raman pe disc pentru inspectie / reinjectare manuala.
+    dead_letter: PathBuf,
 }
 
 impl Spool {
     fn new(base: &Path, sink: Sink) -> Result<Self> {
         let directory = base.join(sink.name());
-        fs::create_dir_all(&directory)
-            .with_context(|| format!("nu pot crea spool-ul {}", directory.display()))?;
-        Ok(Self { directory })
+        let dead_letter = directory.join("dead");
+        fs::create_dir_all(&dead_letter)
+            .with_context(|| format!("nu pot crea spool-ul {}", dead_letter.display()))?;
+        Ok(Self {
+            directory,
+            dead_letter,
+        })
     }
 
     fn persist(&self, alert: &Alert) -> Result<()> {
+        Self::persist_into(&self.directory, alert)
+    }
+
+    /// Salveaza direct in dead-letter o alerta care a esuat definitiv.
+    fn bury(&self, alert: &Alert) -> Result<()> {
+        Self::persist_into(&self.dead_letter, alert)
+    }
+
+    /// Muta in dead-letter un fisier existent din spool.
+    fn bury_file(&self, path: &Path) -> Result<()> {
+        let name = path.file_name().context("cale spool fara nume de fisier")?;
+        fs::rename(path, self.dead_letter.join(name))?;
+        Ok(())
+    }
+
+    fn persist_into(directory: &Path, alert: &Alert) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let sequence = SPOOL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let stem = format!("{now:020}-{:010}-{sequence:020}", std::process::id());
-        let temporary = self.directory.join(format!(".{stem}.tmp"));
-        let final_path = self.directory.join(format!("{stem}.json"));
+        let temporary = directory.join(format!(".{stem}.tmp"));
+        let final_path = directory.join(format!("{stem}.json"));
         let payload = serde_json::to_vec(alert).context("nu pot serializa alerta pentru spool")?;
 
         let mut file = OpenOptions::new()
@@ -197,6 +220,19 @@ async fn run_worker(
                     unavailable_reported = false;
                     continue;
                 }
+                Err(error) if is_permanent(&error) => {
+                    report_permanent(sink, &error);
+                    if let Err(bury_error) = spool.bury_file(&path) {
+                        display::log_error(&format!(
+                            "FATAL: nu pot muta {} in dead-letter: {:#}",
+                            path.display(),
+                            bury_error
+                        ));
+                        tokio::time::sleep(backoff).await;
+                        backoff = backoff.saturating_mul(2).min(retry_max);
+                    }
+                    continue;
+                }
                 Err(error) => {
                     report_failure(sink, &error, &mut unavailable_reported);
                     tokio::time::sleep(backoff).await;
@@ -217,8 +253,14 @@ async fn run_worker(
             break;
         };
         if let Err(error) = deliver(sink, &alerter, &alert).await {
-            report_failure(sink, &error, &mut unavailable_reported);
-            if let Err(spool_error) = spool.persist(&alert) {
+            let saved = if is_permanent(&error) {
+                report_permanent(sink, &error);
+                spool.bury(&alert)
+            } else {
+                report_failure(sink, &error, &mut unavailable_reported);
+                spool.persist(&alert)
+            };
+            if let Err(spool_error) = saved {
                 display::log_error(&format!(
                     "FATAL: nu pot salva alerta {} in spool: {:#}",
                     sink.name(),
@@ -248,6 +290,18 @@ fn report_failure(sink: Sink, error: &anyhow::Error, unavailable_reported: &mut 
     } else {
         display::log_error(&format!("Livrare {} esuata: {:#}", sink.name(), error));
     }
+}
+
+fn is_permanent(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<PermanentFailure>())
+}
+
+fn report_permanent(sink: Sink, error: &anyhow::Error) {
+    display::log_error(&format!(
+        "Livrare {} esuata definitiv; alerta mutata in dead-letter: {:#}",
+        sink.name(),
+        error
+    ));
 }
 
 async fn deliver(sink: Sink, alerter: &Alerter, alert: &Alert) -> Result<()> {
@@ -334,6 +388,56 @@ mod tests {
         worker.abort();
 
         assert!(spool.oldest().unwrap().is_some());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn permanently_failing_alert_does_not_block_the_spool() {
+        let unique = format!(
+            "ids-rs-spool-test-{}-{}",
+            std::process::id(),
+            SPOOL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let base = std::env::temp_dir().join(unique);
+        let spool = Spool::new(&base, Sink::Siem).unwrap();
+
+        // Un hostname urias face mesajul CEF al primei alerte sa depaseasca
+        // limita de 60 KB: esec permanent, aflat in capul spool-ului.
+        let poisoned = alert();
+        let mut healthy = alert();
+        healthy.source_ip = "192.0.2.2".parse().unwrap();
+        spool.persist(&poisoned).unwrap();
+        spool.persist(&healthy).unwrap();
+
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut app = crate::config::AppConfig::load("config.toml").unwrap();
+        app.alerting.email.enabled = false;
+        app.alerting.siem.host = "127.0.0.1".to_string();
+        app.alerting.siem.port = receiver.local_addr().unwrap().port();
+        let hostnames = std::collections::HashMap::from([(poisoned.source_ip, "h".repeat(70_000))]);
+        let alerter =
+            Arc::new(Alerter::new(app.alerting, app.detection, hostnames, Vec::new()).unwrap());
+        let (_sender, channel) = mpsc::channel(4);
+        let worker = tokio::spawn(run_worker(
+            Sink::Siem,
+            channel,
+            alerter,
+            spool.clone(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+
+        let mut buffer = vec![0u8; 65_507];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut buffer))
+                .await
+                .expect("alerta sanatoasa trebuie livrata fara a astepta retry-ul")
+                .unwrap();
+        assert!(String::from_utf8_lossy(&buffer[..length]).contains("192.0.2.2"));
+        worker.abort();
+
+        assert!(spool.oldest().unwrap().is_none());
+        assert_eq!(fs::read_dir(&spool.dead_letter).unwrap().count(), 1);
         fs::remove_dir_all(base).unwrap();
     }
 }

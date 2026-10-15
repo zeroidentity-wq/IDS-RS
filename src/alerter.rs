@@ -397,6 +397,20 @@ impl std::fmt::Display for SinkUnavailable {
 
 impl std::error::Error for SinkUnavailable {}
 
+/// Alerta nu va putea fi livrata niciodata in forma actuala (ex: mesaj CEF
+/// prea mare, adresa respinsa definitiv de serverul SMTP). Reincercarea ar
+/// bloca la nesfarsit coada, deci alerta este mutata in dead-letter.
+#[derive(Debug)]
+pub struct PermanentFailure(pub String);
+
+impl std::fmt::Display for PermanentFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for PermanentFailure {}
+
 /// Componenta de alertare - trimite notificari catre SIEM si email.
 ///
 /// NOTA RUST: Acest struct DETINE (owns) configurarea. Clonarea s-a facut
@@ -907,10 +921,11 @@ impl Alerter {
         // above are sampled, so reaching this limit indicates an unexpectedly
         // large administrator-controlled label rather than attack cardinality.
         if message.len() > 60_000 {
-            anyhow::bail!(
+            return Err(PermanentFailure(format!(
                 "mesajul SIEM are {} bytes si depaseste limita sigura de 60000",
                 message.len()
-            );
+            ))
+            .into());
         }
 
         // Cream un socket UDP efemer (port 0 = OS alege automat).
