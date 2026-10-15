@@ -484,7 +484,7 @@ pub fn log_firewall_event(
         badge,
         format_ip(ip, hostnames, subnets).bright_blue(),
         format!("{}", port).bright_blue(),
-        protocol.bright_blue(),
+        printable(protocol).bright_blue(),
         action.bright_blue()
     );
 }
@@ -539,7 +539,7 @@ pub fn log_debug_raw(line: &str) {
         "{} {} {}",
         ts.bold().white(),
         " RAW  ".on_magenta().white().bold(),
-        line.dimmed()
+        printable(line).dimmed()
     );
 }
 
@@ -552,7 +552,7 @@ pub fn log_debug_parse_ok(event: &LogEvent) {
         "  OK  ".on_green().black().bold(),
         event.source_ip.to_string().green(),
         event.dest_port.to_string().green(),
-        event.protocol.green(),
+        printable(&event.protocol).green(),
         event.action.green()
     );
 }
@@ -568,7 +568,7 @@ pub fn log_debug_parse_fail(line: &str, parser_name: &str, expected: &str) {
     );
     println!(
         "                              Primit:   \"{}\"",
-        truncate_for_display(line, 120).yellow()
+        truncate_for_display(&printable(line), 120).yellow()
     );
     println!(
         "                              Asteptat: \"{}\"",
@@ -582,6 +582,28 @@ pub fn log_debug_parse_fail(line: &str, parser_name: &str, expected: &str) {
 // `-> String` inseamna ca functia returneaza un String owned (alocat pe heap)
 // `Local::now()` returneaza data/ora locala, `.format(...)` o formateaza
 // ---------------------------------------------------------------------------
+/// Inlocuieste caracterele de control cu escape-uri vizibile (`\u{1b}`).
+///
+/// Liniile vin direct din datagrame UDP: un expeditor ar putea trimite
+/// secvente ANSI/OSC care muta cursorul, sterg ecranul sau rescriu titlul
+/// terminalului operatorului. Afisate escapate, raman doar text.
+fn printable(line: &str) -> std::borrow::Cow<'_, str> {
+    if !line.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    std::borrow::Cow::Owned(
+        line.chars()
+            .map(|c| {
+                if c.is_control() {
+                    c.escape_unicode().to_string()
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Primele `max_chars` caractere din `line`, cu "..." daca a fost taiata.
 ///
 /// Taie dupa caractere, nu dupa bytes: `&line[..120]` intra in panica daca
@@ -613,7 +635,16 @@ fn format_ip(ip: &IpAddr, hostnames: &HashMap<IpAddr, String>, subnets: &[Subnet
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_for_display;
+    use super::{printable, truncate_for_display};
+
+    #[test]
+    fn control_characters_are_escaped() {
+        assert_eq!(printable("ok\u{1b}[2J\u{7}fin"), "ok\\u{1b}[2J\\u{7}fin");
+        assert!(matches!(
+            printable("fara control"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
 
     #[test]
     fn truncation_respects_utf8_boundaries() {
