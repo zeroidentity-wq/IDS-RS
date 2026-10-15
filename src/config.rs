@@ -728,6 +728,75 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// Pregateste un config reincarcat la SIGHUP: campurile care necesita
+    /// restart sunt fixate la valorile din `current`, apoi config-ul rezultat
+    /// este validat din nou. Returneaza config-ul efectiv si avertismentele
+    /// pentru campurile ignorate.
+    ///
+    /// Validarea dupa fixare este obligatorie: `load()` a validat config-ul
+    /// cu valorile din fisier (ex: listen_address loopback, unde
+    /// trusted_senders poate lipsi), dar procesul ruleaza in continuare cu
+    /// valorile vechi (ex: 0.0.0.0), unde aceleasi setari sunt invalide.
+    pub fn prepare_reload(mut self, current: &AppConfig) -> Result<(AppConfig, Vec<String>)> {
+        let mut warnings = Vec::new();
+
+        if self.network.listen_port != current.network.listen_port
+            || self.network.listen_address != current.network.listen_address
+        {
+            warnings.push(
+                "listen_address/listen_port modificate — necesita restart, ignorat".to_string(),
+            );
+        }
+        if self.network.parser != current.network.parser {
+            warnings.push("parser modificat — necesita restart, ignorat".to_string());
+        }
+        self.network.listen_port = current.network.listen_port;
+        self.network.listen_address = current.network.listen_address.clone();
+        self.network.parser = current.network.parser.clone();
+
+        let web = &current.web_dashboard;
+        if self.web_dashboard.enabled != web.enabled
+            || self.web_dashboard.bind != web.bind
+            || self.web_dashboard.port != web.port
+            || self.web_dashboard.auth_token != web.auth_token
+            || self.web_dashboard.max_concurrent_requests != web.max_concurrent_requests
+        {
+            warnings.push(
+                "web_dashboard enabled/bind/port/auth/concurrency necesita restart, ignorat"
+                    .to_string(),
+            );
+        }
+        self.web_dashboard.enabled = web.enabled;
+        self.web_dashboard.bind = web.bind.clone();
+        self.web_dashboard.port = web.port;
+        self.web_dashboard.auth_token = web.auth_token.clone();
+        self.web_dashboard.max_concurrent_requests = web.max_concurrent_requests;
+
+        if self.cleanup.interval_secs != current.cleanup.interval_secs
+            || self.cleanup.max_entry_age_secs != current.cleanup.max_entry_age_secs
+        {
+            warnings.push("cleanup interval/max age necesita restart, ignorat".to_string());
+        }
+        self.cleanup = current.cleanup.clone();
+
+        let alerting = &current.alerting;
+        if self.alerting.queue_capacity != alerting.queue_capacity
+            || self.alerting.retry_initial_secs != alerting.retry_initial_secs
+            || self.alerting.retry_max_secs != alerting.retry_max_secs
+            || self.alerting.spool_directory != alerting.spool_directory
+        {
+            warnings.push("alerting queue/retry/spool necesita restart, ignorat".to_string());
+        }
+        self.alerting.queue_capacity = alerting.queue_capacity;
+        self.alerting.retry_initial_secs = alerting.retry_initial_secs;
+        self.alerting.retry_max_secs = alerting.retry_max_secs;
+        self.alerting.spool_directory = alerting.spool_directory.clone();
+
+        self.validate()
+            .context("config-ul reincarcat este invalid pentru setarile care raman active")?;
+        Ok((self, warnings))
+    }
+
     /// Valideaza constrangerile semantice ale configuratiei.
     ///
     /// NOTA RUST: Colectam TOATE erorile intr-un Vec<String> inainte de a esua,
@@ -1365,5 +1434,44 @@ mod tests {
         config.network.trusted_senders.clear();
 
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn reload_cannot_drop_trusted_senders_on_exposed_listener() {
+        let mut current: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        current.network.listen_address = "0.0.0.0".to_string();
+        current.network.trusted_senders = vec!["10.0.0.1".to_string()];
+        current.validate().unwrap();
+
+        // Fisierul nou e valid in sine (loopback fara trusted_senders), dar
+        // listen_address necesita restart, deci procesul ramane pe 0.0.0.0.
+        let mut reloaded = current.clone();
+        reloaded.network.listen_address = "127.0.0.1".to_string();
+        reloaded.network.trusted_senders.clear();
+        reloaded.validate().unwrap();
+
+        let error = reloaded.prepare_reload(&current).unwrap_err();
+        assert!(format!("{error:#}").contains("trusted_senders"));
+    }
+
+    #[test]
+    fn reload_pins_restart_only_fields_and_reports_them() {
+        let current: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        let mut reloaded = current.clone();
+        reloaded.network.parser = "cef".to_string();
+        reloaded.cleanup.interval_secs += 1;
+        reloaded.detection.fast_scan.port_threshold += 1;
+
+        let (effective, warnings) = reloaded.prepare_reload(&current).unwrap();
+        assert_eq!(effective.network.parser, current.network.parser);
+        assert_eq!(
+            effective.cleanup.interval_secs,
+            current.cleanup.interval_secs
+        );
+        assert_eq!(
+            effective.detection.fast_scan.port_threshold,
+            current.detection.fast_scan.port_threshold + 1
+        );
+        assert_eq!(warnings.len(), 2);
     }
 }

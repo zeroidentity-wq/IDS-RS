@@ -516,24 +516,15 @@ async fn main() -> anyhow::Result<()> {
             // Branch: Hot reload config la SIGHUP (#16).
             _ = sighup_rx.recv() => {
                 display::log_reload("SIGHUP primit — reincarc config.toml...");
-                match AppConfig::load(&config_path) {
-                    Ok(mut new_config) => {
-                        // Verificam campurile care NU pot fi reincarcate (necesita restart).
-                        if new_config.network.listen_port != config.network.listen_port
-                            || new_config.network.listen_address != config.network.listen_address
-                        {
-                            display::log_warning(
-                                "SIGHUP: listen_address/listen_port modificate — necesita restart, ignorat"
-                            );
+                match AppConfig::load(&config_path)
+                    .and_then(|loaded| loaded.prepare_reload(&config))
+                {
+                    Ok((new_config, warnings)) => {
+                        // Campurile care necesita restart au fost fixate la
+                        // valorile curente, iar rezultatul a fost revalidat.
+                        for warning in &warnings {
+                            display::log_warning(&format!("SIGHUP: {warning}"));
                         }
-                        if new_config.network.parser != config.network.parser {
-                            display::log_warning(
-                                "SIGHUP: parser modificat — necesita restart, ignorat"
-                            );
-                        }
-                        new_config.network.listen_port = config.network.listen_port;
-                        new_config.network.listen_address = config.network.listen_address.clone();
-                        new_config.network.parser = config.network.parser.clone();
 
                         // Aplicam noile valori la componentele reincarcabile.
                         debug_mode = new_config.network.debug;
@@ -557,53 +548,6 @@ async fn main() -> anyhow::Result<()> {
                         // Hostnames si subnets partajate (folosite in main loop pentru display).
                         hostnames.store(Arc::new(new_hostnames));
                         subnets.store(Arc::new(new_subnets));
-
-                        // Web dashboard: bind/port necesita restart.
-                        if new_config.web_dashboard.enabled != config.web_dashboard.enabled
-                            || new_config.web_dashboard.bind != config.web_dashboard.bind
-                            || new_config.web_dashboard.port != config.web_dashboard.port
-                            || new_config.web_dashboard.auth_token != config.web_dashboard.auth_token
-                            || new_config.web_dashboard.max_concurrent_requests
-                                != config.web_dashboard.max_concurrent_requests
-                        {
-                            display::log_warning(
-                                "SIGHUP: web_dashboard enabled/bind/port/auth/concurrency necesita restart, ignorat"
-                            );
-                        }
-                        new_config.web_dashboard.enabled = config.web_dashboard.enabled;
-                        new_config.web_dashboard.bind = config.web_dashboard.bind.clone();
-                        new_config.web_dashboard.port = config.web_dashboard.port;
-                        new_config.web_dashboard.auth_token = config.web_dashboard.auth_token.clone();
-                        new_config.web_dashboard.max_concurrent_requests =
-                            config.web_dashboard.max_concurrent_requests;
-
-                        if new_config.cleanup.interval_secs != config.cleanup.interval_secs
-                            || new_config.cleanup.max_entry_age_secs
-                                != config.cleanup.max_entry_age_secs
-                        {
-                            display::log_warning(
-                                "SIGHUP: cleanup interval/max age necesita restart, ignorat"
-                            );
-                        }
-                        new_config.cleanup = config.cleanup.clone();
-
-                        if new_config.alerting.queue_capacity != config.alerting.queue_capacity
-                            || new_config.alerting.retry_initial_secs
-                                != config.alerting.retry_initial_secs
-                            || new_config.alerting.retry_max_secs != config.alerting.retry_max_secs
-                            || new_config.alerting.spool_directory
-                                != config.alerting.spool_directory
-                        {
-                            display::log_warning(
-                                "SIGHUP: alerting queue/retry/spool necesita restart, ignorat"
-                            );
-                        }
-                        new_config.alerting.queue_capacity = config.alerting.queue_capacity;
-                        new_config.alerting.retry_initial_secs =
-                            config.alerting.retry_initial_secs;
-                        new_config.alerting.retry_max_secs = config.alerting.retry_max_secs;
-                        new_config.alerting.spool_directory =
-                            config.alerting.spool_directory.clone();
 
                         // Rate limiter: recream daca s-a schimbat.
                         if new_config.network.udp_rate_limit != config.network.udp_rate_limit
