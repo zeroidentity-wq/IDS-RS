@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, watch};
 
 static SPOOL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -165,6 +165,7 @@ impl Spool {
 }
 
 pub struct DeliveryManager {
+    shutdown_tx: watch::Sender<bool>,
     siem_tx: mpsc::Sender<Alert>,
     email_tx: mpsc::Sender<Alert>,
     siem_spool: Spool,
@@ -185,6 +186,7 @@ impl DeliveryManager {
         let email_spool = Spool::new(base, Sink::Email)?;
         let retry_initial = Duration::from_secs(config.retry_initial_secs);
         let retry_max = Duration::from_secs(config.retry_max_secs);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let handles = vec![
             tokio::spawn(run_worker(
@@ -194,6 +196,7 @@ impl DeliveryManager {
                 siem_spool.clone(),
                 retry_initial,
                 retry_max,
+                shutdown_rx.clone(),
             )),
             tokio::spawn(run_worker(
                 Sink::Email,
@@ -202,11 +205,13 @@ impl DeliveryManager {
                 email_spool.clone(),
                 retry_initial,
                 retry_max,
+                shutdown_rx,
             )),
         ];
 
         Ok((
             Self {
+                shutdown_tx,
                 siem_tx,
                 email_tx,
                 siem_spool,
@@ -224,6 +229,14 @@ impl DeliveryManager {
         if self.alerter.email_enabled() {
             enqueue_or_spool(&self.email_tx, &self.email_spool, alert.clone(), "email");
         }
+    }
+
+    /// Opreste workerii: livrarile in curs sunt abandonate, iar tot ce era
+    /// inca in cozile din memorie este salvat in spool, pentru a fi livrat
+    /// la urmatoarea pornire. Workerii se termina rapid chiar daca SIEM-ul
+    /// sau serverul SMTP nu raspund.
+    pub fn shutdown(self) {
+        let _ = self.shutdown_tx.send(true);
     }
 }
 
@@ -253,13 +266,23 @@ async fn run_worker(
     spool: Spool,
     retry_initial: Duration,
     retry_max: Duration,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     let mut backoff = retry_initial;
     let mut unavailable_reported = false;
+    // Fiecare punct de asteptare (livrare, backoff, coada) e intrerupt de
+    // shutdown; dupa bucla, ce a ramas in coada este mutat in spool.
     loop {
+        if *shutdown.borrow() {
+            break;
+        }
         match spool.oldest() {
             Ok(Some((path, record))) => {
-                let result = deliver(sink, &alerter, &record).await;
+                // Livrare intrerupta: fisierul ramane in spool.
+                let result = tokio::select! {
+                    _ = shutdown.changed() => break,
+                    result = deliver(sink, &alerter, &record) => result,
+                };
                 let delivered = result.is_ok();
                 match settle(
                     sink,
@@ -275,7 +298,10 @@ async fn run_worker(
                         }
                     }
                     Settled::Retry => {
-                        tokio::time::sleep(backoff).await;
+                        tokio::select! {
+                            _ = shutdown.changed() => break,
+                            _ = tokio::time::sleep(backoff) => {}
+                        }
                         backoff = backoff.saturating_mul(2).min(retry_max);
                     }
                 }
@@ -284,17 +310,31 @@ async fn run_worker(
             Ok(None) => {}
             Err(error) => {
                 display::log_error(&format!("Eroare citire spool {}: {:#}", sink.name(), error));
-                tokio::time::sleep(backoff).await;
+                tokio::select! {
+                    _ = shutdown.changed() => break,
+                    _ = tokio::time::sleep(backoff) => {}
+                }
                 backoff = backoff.saturating_mul(2).min(retry_max);
                 continue;
             }
         }
 
-        let Some(alert) = receiver.recv().await else {
-            break;
+        let alert = tokio::select! {
+            _ = shutdown.changed() => break,
+            alert = receiver.recv() => match alert {
+                Some(alert) => alert,
+                None => break,
+            },
         };
         let record = SpoolRecord::new(alert);
-        let result = deliver(sink, &alerter, &record).await;
+        let result = tokio::select! {
+            _ = shutdown.changed() => {
+                // Livrare intrerupta: alerta exista doar in memorie.
+                log_save_error(sink, spool.persist(&record));
+                break;
+            }
+            result = deliver(sink, &alerter, &record) => result,
+        };
         if result.is_ok() {
             backoff = retry_initial;
         }
@@ -306,6 +346,20 @@ async fn run_worker(
             result,
             &mut unavailable_reported,
         );
+    }
+
+    receiver.close();
+    let mut saved = 0usize;
+    while let Ok(alert) = receiver.try_recv() {
+        log_save_error(sink, spool.persist(&SpoolRecord::new(alert)));
+        saved += 1;
+    }
+    if saved > 0 {
+        display::log_info(&format!(
+            "Oprire: {} alerte {} din coada salvate in spool",
+            saved,
+            sink.name()
+        ));
     }
 }
 
@@ -509,6 +563,7 @@ mod tests {
             .unwrap(),
         );
         let (_sender, receiver) = mpsc::channel(4);
+        let (_shutdown, shutdown_rx) = watch::channel(false);
         let worker = tokio::spawn(run_worker(
             Sink::Siem,
             receiver,
@@ -516,6 +571,7 @@ mod tests {
             spool.clone(),
             Duration::from_millis(10),
             Duration::from_millis(10),
+            shutdown_rx,
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
         worker.abort();
@@ -551,6 +607,7 @@ mod tests {
         let alerter =
             Arc::new(Alerter::new(app.alerting, app.detection, hostnames, Vec::new()).unwrap());
         let (_sender, channel) = mpsc::channel(4);
+        let (_shutdown, shutdown_rx) = watch::channel(false);
         let worker = tokio::spawn(run_worker(
             Sink::Siem,
             channel,
@@ -558,6 +615,7 @@ mod tests {
             spool.clone(),
             Duration::from_secs(60),
             Duration::from_secs(60),
+            shutdown_rx,
         ));
 
         let mut buffer = vec![0u8; 65_507];
@@ -665,6 +723,66 @@ mod tests {
             *delivered.lock().unwrap(),
             vec!["ok@test.local".to_string()]
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_spools_queued_alerts_when_sink_hangs() {
+        let unique = format!(
+            "ids-rs-spool-test-{}-{}",
+            std::process::id(),
+            SPOOL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let base = std::env::temp_dir().join(unique);
+
+        // Server SMTP care accepta conexiunea dar nu raspunde niciodata.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hang = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                open.push(stream);
+            }
+        });
+
+        let mut app = crate::config::AppConfig::load("config.toml").unwrap();
+        app.alerting.siem.enabled = false;
+        app.alerting.email.enabled = true;
+        app.alerting.email.smtp_server = "127.0.0.1".to_string();
+        app.alerting.email.smtp_port = port;
+        app.alerting.email.smtp_tls = false;
+        app.alerting.spool_directory = base.to_string_lossy().into_owned();
+        let alerter = Arc::new(
+            Alerter::new(
+                app.alerting.clone(),
+                app.detection,
+                std::collections::HashMap::new(),
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        let (manager, workers) = DeliveryManager::start(&app.alerting, alerter).unwrap();
+        for _ in 0..3 {
+            manager.enqueue(&alert());
+        }
+        // Prima alerta e blocata in livrare, celelalte doua asteapta in coada.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        manager.shutdown();
+        for worker in workers {
+            tokio::time::timeout(Duration::from_secs(2), worker)
+                .await
+                .expect("workerul trebuie sa se opreasca rapid")
+                .unwrap();
+        }
+
+        let spooled = fs::read_dir(base.join("email"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .count();
+        assert_eq!(spooled, 3);
+        hang.abort();
         fs::remove_dir_all(base).unwrap();
     }
 }

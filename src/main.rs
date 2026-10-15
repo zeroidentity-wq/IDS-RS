@@ -750,13 +750,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    drop(delivery);
+    // Workerii salveaza in spool alertele inca nelivrate si se opresc.
+    delivery.shutdown();
     for worker in delivery_workers {
         if tokio::time::timeout(Duration::from_secs(10), worker)
             .await
             .is_err()
         {
-            display::log_warning("Timeout la oprirea unui worker; alertele ramase sunt in spool");
+            display::log_error(
+                "Timeout la oprirea unui worker de livrare; alertele din coada sale pot fi pierdute",
+            );
         }
     }
 
