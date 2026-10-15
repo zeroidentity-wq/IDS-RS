@@ -1606,3 +1606,101 @@ fn test_dynamic_threshold_bounds_without_integer_between_them() {
     baseline.update(100.0, dt.ewma_alpha);
     assert_eq!(effective_threshold_value(3, &baseline, &dt), 2);
 }
+
+/// Generator determinist pentru testele cu evenimente pseudo-aleatoare.
+struct Lcg(u64);
+
+impl Lcg {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) % n
+    }
+
+    fn event(&mut self) -> LogEvent {
+        LogEvent {
+            source_ip: format!("10.0.0.{}", self.below(40)).parse().unwrap(),
+            dest_ip: (self.below(20) != 0)
+                .then(|| format!("10.1.0.{}", self.below(10)).parse().unwrap()),
+            dest_port: [22, 53, 80, 443, 3389][self.below(5) as usize] + self.below(3) as u16,
+            protocol: "tcp".to_string(),
+            action: if self.below(2) == 0 {
+                Action::Drop
+            } else {
+                Action::Accept
+            },
+            raw_log: String::new(),
+        }
+    }
+}
+
+/// Alerta fara campurile dependente de timpul exact (CV, timestamp) si cu
+/// listele in ordine stabila.
+fn comparable(alert: &Alert) -> String {
+    let mut dests = alert.unique_dests.clone();
+    dests.sort();
+    let mut sources = alert.unique_sources.clone();
+    sources.sort();
+    format!(
+        "{:?} {} {:?} {:?} {dests:?} {sources:?} {:?} {:?}",
+        alert.scan_type,
+        alert.source_ip,
+        alert.dest_ip,
+        alert.unique_ports,
+        alert.beacon_port,
+        alert.event_count
+    )
+}
+
+#[test]
+fn restored_detector_behaves_like_the_original() {
+    let mut config = lateral_config();
+    config.alert_cooldown_secs = 300;
+    config.max_tracked_ips = 30;
+    config.max_tracked_flows = 60;
+    config.max_flows_per_source = 8;
+    config.fast_scan.port_threshold = 4;
+    config.slow_scan.port_threshold = 6;
+    config.accept_scan.port_threshold = 3;
+    config.lateral_movement.unique_dest_threshold = 3;
+    config.distributed_scan = distributed_config().distributed_scan;
+    config.distributed_scan.unique_sources_threshold = 3;
+    config.beaconing = beaconing_config().beaconing;
+    config.beaconing.min_events = 3;
+    config.beaconing.min_interval_secs = 0;
+
+    for seed in 1..=5 {
+        let mut rng = Lcg(seed);
+        let original = Detector::new(config.clone());
+        for _ in 0..3_000 {
+            original.process_event(&rng.event());
+        }
+
+        let json = serde_json::to_string(&original.snapshot()).unwrap();
+        let restored = Detector::new(config.clone());
+        restored.restore(serde_json::from_str(&json).unwrap(), Duration::ZERO);
+        assert_eq!(restored.tracked_ips(), original.tracked_ips());
+        assert_eq!(
+            restored.port_scan.source_flows.len(),
+            original.port_scan.source_flows.len()
+        );
+
+        for index in 0..3_000 {
+            let event = rng.event();
+            let expected: Vec<String> = original
+                .process_event(&event)
+                .iter()
+                .map(comparable)
+                .collect();
+            let actual: Vec<String> = restored
+                .process_event(&event)
+                .iter()
+                .map(comparable)
+                .collect();
+            assert_eq!(actual, expected, "seed {seed}, event {index}: {event:?}");
+            assert_eq!(restored.tracked_ips(), original.tracked_ips());
+        }
+    }
+}

@@ -24,10 +24,15 @@
 use super::alert::{Alert, ScanType};
 use super::capacity::{keep_newest, make_room, prune};
 use super::cooldown::Cooldowns;
+use super::snapshot::{
+    restore_cooldowns, restore_table, snapshot_cooldowns, snapshot_table, Clock, TableSnapshot,
+    Timestamped,
+};
 use super::ParsedExceptions;
 use crate::config::DetectionConfig;
 use crate::parser::{Action, LogEvent};
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -42,6 +47,22 @@ pub(super) type FlowKey = (IpAddr, IpAddr, u16);
 /// `seen_at`-uri sunt intervalele pe care le analizam statistic.
 pub(super) struct BeaconHit {
     pub(super) seen_at: Instant,
+}
+
+impl Timestamped for BeaconHit {
+    type Data = ();
+    fn split(&self) -> ((), Instant) {
+        ((), self.seen_at)
+    }
+    fn join((): (), seen_at: Instant) -> Self {
+        Self { seen_at }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(super) struct BeaconingSnapshot {
+    hits: TableSnapshot<FlowKey, ()>,
+    cooldowns: Vec<(FlowKey, u64)>,
 }
 
 /// Statisticile unui flow in fereastra de analiza.
@@ -175,6 +196,18 @@ impl Beaconing {
             .retain(|(source, _, _), _| !victims.contains(source));
         self.cooldowns
             .retain_keys(|(source, _, _)| !victims.contains(source));
+    }
+
+    pub(super) fn snapshot(&self, clock: &Clock) -> BeaconingSnapshot {
+        BeaconingSnapshot {
+            hits: snapshot_table(&self.hits, clock),
+            cooldowns: snapshot_cooldowns(&self.cooldowns, clock),
+        }
+    }
+
+    pub(super) fn restore(&self, snapshot: BeaconingSnapshot, clock: &Clock) {
+        restore_table(&self.hits, snapshot.hits, clock);
+        restore_cooldowns(&self.cooldowns, snapshot.cooldowns, clock);
     }
 
     pub(super) fn cleanup(&self, now: Instant, max_age: Duration, cooldown: Duration) {

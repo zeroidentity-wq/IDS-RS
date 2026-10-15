@@ -20,8 +20,10 @@
 // =============================================================================
 
 use crate::config::DynamicThresholdConfig;
+use serde::{Deserialize, Serialize};
 
 /// Starea EWMA pentru un singur tip de scan.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(super) struct BaselineEwma {
     mean: f64,
     variance: f64,
@@ -56,6 +58,9 @@ impl BaselineEwma {
 }
 
 /// Stare baseline pentru toate tipurile de scan cu praguri dinamice.
+/// Salvata ca atare in snapshot (#32): fara ea, pragurile dinamice ar
+/// reveni la cele statice pana la `min_samples` cicluri dupa restart.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(super) struct BaselineState {
     pub(super) fast_scan: BaselineEwma,
     pub(super) slow_scan: BaselineEwma,
@@ -94,3 +99,5 @@ pub(super) fn effective_threshold_value(
     let ceiling = ceiling.max(floor);
     (dynamic.ceil() as usize).clamp(floor, ceiling)
 }
+
+pub(super) type BaselineSnapshot = BaselineState;

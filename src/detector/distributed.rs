@@ -16,10 +16,15 @@
 use super::alert::{Alert, ScanType};
 use super::capacity::{keep_newest, make_room, prune};
 use super::cooldown::Cooldowns;
+use super::snapshot::{
+    restore_cooldowns, restore_table, snapshot_cooldowns, snapshot_table, Clock, TableSnapshot,
+    Timestamped,
+};
 use super::ParsedExceptions;
 use crate::config::DetectionConfig;
 use crate::parser::LogEvent;
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -31,6 +36,26 @@ pub(super) struct DistributedHit {
     pub(super) source_ip: IpAddr,
     pub(super) port: u16,
     pub(super) seen_at: Instant,
+}
+
+impl Timestamped for DistributedHit {
+    type Data = (IpAddr, u16);
+    fn split(&self) -> ((IpAddr, u16), Instant) {
+        ((self.source_ip, self.port), self.seen_at)
+    }
+    fn join((source_ip, port): (IpAddr, u16), seen_at: Instant) -> Self {
+        Self {
+            source_ip,
+            port,
+            seen_at,
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(super) struct DistributedSnapshot {
+    hits: TableSnapshot<IpAddr, (IpAddr, u16)>,
+    cooldowns: Vec<(IpAddr, u64)>,
 }
 
 pub(super) struct DistributedScan {
@@ -137,6 +162,18 @@ impl DistributedScan {
                 .value_mut()
                 .retain(|hit| !victims.contains(&hit.source_ip));
         }
+    }
+
+    pub(super) fn snapshot(&self, clock: &Clock) -> DistributedSnapshot {
+        DistributedSnapshot {
+            hits: snapshot_table(&self.hits, clock),
+            cooldowns: snapshot_cooldowns(&self.cooldowns, clock),
+        }
+    }
+
+    pub(super) fn restore(&self, snapshot: DistributedSnapshot, clock: &Clock) {
+        restore_table(&self.hits, snapshot.hits, clock);
+        restore_cooldowns(&self.cooldowns, snapshot.cooldowns, clock);
     }
 
     pub(super) fn cleanup(&self, now: Instant, max_age: Duration, cooldown: Duration) {

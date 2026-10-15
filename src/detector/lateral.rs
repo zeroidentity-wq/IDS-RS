@@ -14,10 +14,15 @@
 use super::alert::{Alert, ScanType};
 use super::capacity::{keep_newest, prune};
 use super::cooldown::Cooldowns;
+use super::snapshot::{
+    restore_cooldowns, restore_table, snapshot_cooldowns, snapshot_table, Clock, TableSnapshot,
+    Timestamped,
+};
 use super::ParsedExceptions;
 use crate::config::DetectionConfig;
 use crate::parser::{Action, LogEvent};
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -30,6 +35,22 @@ use std::time::{Duration, Instant};
 pub(super) struct DestHit {
     dest_ip: IpAddr,
     pub(super) seen_at: Instant,
+}
+
+impl Timestamped for DestHit {
+    type Data = IpAddr;
+    fn split(&self) -> (IpAddr, Instant) {
+        (self.dest_ip, self.seen_at)
+    }
+    fn join(dest_ip: IpAddr, seen_at: Instant) -> Self {
+        Self { dest_ip, seen_at }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(super) struct LateralSnapshot {
+    hits: TableSnapshot<IpAddr, IpAddr>,
+    cooldowns: Vec<(IpAddr, u64)>,
 }
 
 pub(super) struct LateralMovement {
@@ -125,6 +146,18 @@ impl LateralMovement {
             now.saturating_duration_since(hit.seen_at) <= max_age
         });
         self.cooldowns.prune(now, cooldown);
+    }
+
+    pub(super) fn snapshot(&self, clock: &Clock) -> LateralSnapshot {
+        LateralSnapshot {
+            hits: snapshot_table(&self.hits, clock),
+            cooldowns: snapshot_cooldowns(&self.cooldowns, clock),
+        }
+    }
+
+    pub(super) fn restore(&self, snapshot: LateralSnapshot, clock: &Clock) {
+        restore_table(&self.hits, snapshot.hits, clock);
+        restore_cooldowns(&self.cooldowns, snapshot.cooldowns, clock);
     }
 
     /// Adauga sursele care mai au hit-uri (pentru sincronizarea `last_seen`).

@@ -16,9 +16,14 @@
 use super::alert::{Alert, ScanType};
 use super::capacity::{eviction_count, keep_newest, oldest_keys, prune};
 use super::cooldown::Cooldowns;
+use super::snapshot::{
+    restore_cooldowns, restore_table, snapshot_cooldowns, snapshot_table, Clock, TableSnapshot,
+    Timestamped,
+};
 use crate::config::DetectionConfig;
 use crate::parser::{Action, LogEvent};
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -33,6 +38,27 @@ use std::time::{Duration, Instant};
 pub(super) struct PortHit {
     pub(super) port: u16,
     pub(super) seen_at: Instant,
+}
+
+impl Timestamped for PortHit {
+    type Data = u16;
+    fn split(&self) -> (u16, Instant) {
+        (self.port, self.seen_at)
+    }
+    fn join(port: u16, seen_at: Instant) -> Self {
+        Self { port, seen_at }
+    }
+}
+
+/// Starea Fast/Slow/Accept Scan in snapshot. Indexul `source_flows` nu se
+/// salveaza: se reconstruieste din cheile tabelelor.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(super) struct PortScanSnapshot {
+    drop_hits: TableSnapshot<ScanPairKey, u16>,
+    accept_hits: TableSnapshot<ScanPairKey, u16>,
+    fast_cooldowns: Vec<(ScanPairKey, u64)>,
+    slow_cooldowns: Vec<(ScanPairKey, u64)>,
+    accept_cooldowns: Vec<(ScanPairKey, u64)>,
 }
 
 /// Cheie de corelare pentru detectiile Fast/Slow/Accept: perechea (sursa, destinatie).
@@ -362,6 +388,29 @@ impl PortScan {
             &self.accept_cooldowns,
         ] {
             cooldowns.prune(now, cooldown);
+        }
+    }
+
+    pub(super) fn snapshot(&self, clock: &Clock) -> PortScanSnapshot {
+        PortScanSnapshot {
+            drop_hits: snapshot_table(&self.drop_hits, clock),
+            accept_hits: snapshot_table(&self.accept_hits, clock),
+            fast_cooldowns: snapshot_cooldowns(&self.fast_cooldowns, clock),
+            slow_cooldowns: snapshot_cooldowns(&self.slow_cooldowns, clock),
+            accept_cooldowns: snapshot_cooldowns(&self.accept_cooldowns, clock),
+        }
+    }
+
+    pub(super) fn restore(&self, snapshot: PortScanSnapshot, clock: &Clock) {
+        restore_table(&self.drop_hits, snapshot.drop_hits, clock);
+        restore_table(&self.accept_hits, snapshot.accept_hits, clock);
+        restore_cooldowns(&self.fast_cooldowns, snapshot.fast_cooldowns, clock);
+        restore_cooldowns(&self.slow_cooldowns, snapshot.slow_cooldowns, clock);
+        restore_cooldowns(&self.accept_cooldowns, snapshot.accept_cooldowns, clock);
+        for is_drop in [true, false] {
+            for entry in self.hits(is_drop).iter() {
+                self.index_flow(is_drop, *entry.key());
+            }
         }
     }
 

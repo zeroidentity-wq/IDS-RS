@@ -55,9 +55,11 @@ mod cooldown;
 mod distributed;
 mod lateral;
 mod port_scan;
+mod snapshot;
 mod whitelist;
 
 pub use alert::{Alert, ScanType};
+pub use snapshot::DetectorSnapshot;
 
 use crate::config::{DetectionConfig, DetectionExceptions};
 use crate::parser::LogEvent;
@@ -69,6 +71,7 @@ use dashmap::DashMap;
 use distributed::DistributedScan;
 use lateral::LateralMovement;
 use port_scan::{PortScan, Thresholds};
+use snapshot::Clock;
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -371,6 +374,50 @@ impl Detector {
         self.port_scan.collect_active_sources(&mut active_sources);
         self.lateral.collect_active_sources(&mut active_sources);
         self.last_seen.retain(|ip, _| active_sources.contains(ip));
+    }
+
+    /// Copia starii curente, pentru salvarea pe disc (#32).
+    ///
+    /// Tabelele sunt parcurse una cate una, fara un lock global: evenimentele
+    /// procesate in paralel pot ajunge partial in snapshot, ceea ce e
+    /// acceptabil pentru o stare de reluare (cel mult cateva hit-uri).
+    pub fn snapshot(&self) -> DetectorSnapshot {
+        let clock = Clock::for_snapshot(Instant::now());
+        DetectorSnapshot {
+            last_seen: self
+                .last_seen
+                .iter()
+                .map(|entry| (*entry.key(), clock.age_ns(*entry.value())))
+                .collect(),
+            port_scan: self.port_scan.snapshot(&clock),
+            lateral: self.lateral.snapshot(&clock),
+            distributed: self.distributed.snapshot(&clock),
+            beaconing: self.beaconing.snapshot(&clock),
+            baseline: self
+                .baseline
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        }
+    }
+
+    /// Reface starea dintr-un snapshot salvat acum `elapsed`. Se apeleaza la
+    /// pornire, pe un detector gol, inainte de primul eveniment.
+    ///
+    /// Hit-urile iesite intre timp din ferestre sunt eliminate de urmatorul
+    /// cleanup, la fel ca in functionarea normala.
+    pub fn restore(&self, snapshot: DetectorSnapshot, elapsed: Duration) {
+        let clock = Clock::for_restore(Instant::now(), elapsed);
+        for (ip, age_ns) in snapshot.last_seen {
+            if let Some(seen) = clock.instant(age_ns) {
+                self.last_seen.insert(ip, seen);
+            }
+        }
+        self.port_scan.restore(snapshot.port_scan, &clock);
+        self.lateral.restore(snapshot.lateral, &clock);
+        self.distributed.restore(snapshot.distributed, &clock);
+        self.beaconing.restore(snapshot.beaconing, &clock);
+        *self.baseline.lock().unwrap_or_else(|e| e.into_inner()) = snapshot.baseline;
     }
 
     /// Returneaza numarul total de IP-uri urmarite in memorie (drop + accept).

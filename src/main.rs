@@ -54,7 +54,7 @@ use ids_rs::config::{AppConfig, SubnetEntry};
 use ids_rs::delivery;
 use ids_rs::detector::Detector;
 use ids_rs::stats::{self, ParseCounts, ParseSamples, ParseStats};
-use ids_rs::{display, parser, parser_tools, web};
+use ids_rs::{display, parser, parser_tools, persistence, web};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -158,6 +158,28 @@ impl TokenBucket {
 ///
 /// IP-ul expeditorului unei datagrame, in forma canonica.
 ///
+/// Salveaza starea pe un thread de blocking (serializarea si fsync-ul pot
+/// dura) ca sa nu blocheze runtime-ul async. Erorile sunt doar raportate:
+/// IDS-ul continua sa functioneze fara persistenta.
+async fn save_state(
+    path: &std::path::Path,
+    detector: &Arc<Detector>,
+    alerts: &web::AlertBuffer,
+) -> bool {
+    let (path, detector, alerts) = (path.to_path_buf(), Arc::clone(detector), Arc::clone(alerts));
+    match tokio::task::spawn_blocking(move || persistence::save(&path, &detector, &alerts)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            display::log_warning(&format!("Starea nu a putut fi salvata: {:#}", e));
+            false
+        }
+        Err(e) => {
+            display::log_error(&format!("Salvarea starii a esuat: {}", e));
+            false
+        }
+    }
+}
+
 /// Intervalul raportului periodic de parsare si rate limiting.
 const PARSE_REPORT_SECS: u64 = 30;
 
@@ -372,6 +394,51 @@ async fn main() -> anyhow::Result<()> {
     let alert_buffer: web::AlertBuffer = Arc::new(Mutex::new(VecDeque::new()));
     // Contorii de parsare: incrementati in bucla UDP, cititi de /api/stats.
     let parse_stats = Arc::new(ParseStats::default());
+
+    // =========================================================================
+    // PERSISTENTA (#32): restauram starea inainte de primul eveniment si
+    // inainte de pornirea dashboard-ului, apoi o salvam periodic.
+    // =========================================================================
+    let state_path = std::path::PathBuf::from(&config.persistence.path);
+    if config.persistence.enabled {
+        match persistence::load(
+            &state_path,
+            &detector,
+            &alert_buffer,
+            config.web_dashboard.max_alerts,
+        ) {
+            Ok(Some(restored)) => display::log_info(&format!(
+                "Stare restaurata din {}: {} IP-uri urmarite, {} alerte (salvata acum {}s)",
+                state_path.display(),
+                restored.tracked_ips,
+                restored.alerts,
+                restored.age.as_secs()
+            )),
+            Ok(None) => display::log_info(&format!(
+                "Nicio stare salvata in {} — pornesc fara istoric",
+                state_path.display()
+            )),
+            Err(e) => display::log_warning(&format!(
+                "Starea salvata nu poate fi folosita, pornesc fara istoric: {:#}",
+                e
+            )),
+        }
+
+        let (detector, alerts, path) = (
+            Arc::clone(&detector),
+            Arc::clone(&alert_buffer),
+            state_path.clone(),
+        );
+        let interval = Duration::from_secs(config.persistence.save_interval_secs);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                save_state(&path, &detector, &alerts).await;
+            }
+        });
+    }
 
     if config.web_dashboard.enabled {
         let web_alerts = Arc::clone(&alert_buffer);
@@ -849,6 +916,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+    }
+
+    // Starea detectorului si alertele din dashboard, pentru pornirea urmatoare.
+    if config.persistence.enabled && save_state(&state_path, &detector, &alert_buffer).await {
+        display::log_info(&format!("Stare salvata in {}", state_path.display()));
     }
 
     // Workerii salveaza in spool alertele inca nelivrate si se opresc.

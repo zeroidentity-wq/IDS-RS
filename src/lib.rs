@@ -5,5 +5,6 @@ pub mod detector;
 pub mod display;
 pub mod parser;
 pub mod parser_tools;
+pub mod persistence;
 pub mod stats;
 pub mod web;

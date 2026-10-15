@@ -26,6 +26,7 @@ si Beaconing C2, si trimite alerte catre SIEM si email.
 - [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection)
 - [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket)
 - [Livrare alerte — Cozi, spool si dead-letter](#livrare-alerte--cozi-spool-si-dead-letter)
+- [Persistenta la restart](#persistenta-la-restart)
 - [Hostname Resolve — Mapping Static IP→Hostname](#hostname-resolve--mapping-static-iphostname)
 - [Subnet Mapping — Mapping CIDR→Locatie](#subnet-mapping--mapping-cidrlocatie)
 - [Concepte Rust acoperite](#concepte-rust-acoperite)
@@ -42,7 +43,7 @@ si Beaconing C2, si trimite alerte catre SIEM si email.
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
 | **Livrare** | Cozi separate SIEM/email, spool durabil pe disc, dead-letter, retry per destinatar |
-| **Teste** | 151 teste (146 biblioteca + 5 binar) — toate trec |
+| **Teste** | 162 teste (157 biblioteca + 5 binar) — toate trec |
 | **Clippy** | 0 warnings (`cargo clippy --all-targets -- -D warnings` in CI) |
 
 ### Implementat
@@ -63,8 +64,9 @@ si Beaconing C2, si trimite alerte catre SIEM si email.
 - [x] Beaconing C2 detection (#24) — flow periodic (CV pe intervale), SigID 1006, severitate CEF 9
 - [x] Web Dashboard (#25) — server HTTP embedded cu graf D3.js force-directed, API JSON, auto-refresh 5s
 - [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
+- [x] Persistenta la restart (#32) — starea detectorului si alertele din dashboard salvate la oprire si periodic — vezi [Persistenta la restart](#persistenta-la-restart)
 - [x] Livrare durabila: spool pe disc, dead-letter pentru esecuri permanente, retry email doar catre destinatarii ramasi, golirea cozilor in spool la oprire
-- [x] Teste: 151 passed (parser custom, statistici de parsare, learn/test-parser, parseri, detector, livrare/spool cu server SMTP fals, config strict, reload, web auth, whitelist si toate detectiile)
+- [x] Teste: 162 passed (persistenta la restart, parser custom, statistici de parsare, learn/test-parser, parseri, detector, livrare/spool cu server SMTP fals, config strict, reload, web auth, whitelist si toate detectiile)
 
 ### Hardening operational
 
@@ -128,7 +130,7 @@ procesul nu porneste (in loc sa ruleze fara semnale functionale).
 - [ ] File watcher (tail -f echivalent) — citire din fisiere log locale, nu doar UDP (#31)
 
 #### Operational / Rezilienta
-- [ ] Persistenta stare la restart — detectorul nu pierde contextul la repornire (#32)
+- [x] Persistenta stare la restart — detectorul nu pierde contextul la repornire (#32)
 - [ ] Dump statistici la SIGUSR1 — top atacatori si counteri la semnal, fara restart (#33)
 - [ ] Blacklist locala de IP-uri (IOC offline) — fiser CSV/JSON cu IP-uri rele, alerta la primul pachet (#34)
 - [ ] Threshold dinamic / baseline — prag adaptat la traficul normal al retelei (#35)
@@ -1042,7 +1044,8 @@ In config-ul fiecarei instante:
 - `trusted_senders` = IP-urile firewall-urilor care trimit log-uri (obligatoriu
   cand `listen_address` nu este loopback);
 - `spool_directory` ramane **relativ** (implicit `"spool"`): ajunge in
-  `/var/lib/ids-rs/<nume>/spool`, singurul director in care serviciul poate scrie.
+  `/var/lib/ids-rs/<nume>/spool`, singurul director in care serviciul poate scrie;
+- la fel `persistence.path` (implicit `"state.json"` → `/var/lib/ids-rs/<nume>/state.json`).
 
 Pentru a accepta log-uri doar de la firewall, in loc de `--add-port` se poate
 folosi o regula cu sursa:
@@ -1147,7 +1150,7 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 146 passed` (biblioteca) si `test result: ok. 5 passed` (binar).
+Rezultat asteptat: `test result: ok. 157 passed` (biblioteca) si `test result: ok. 5 passed` (binar).
 
 Pentru verificarea completa, ca in CI:
 
@@ -1400,12 +1403,14 @@ ids-rs/
 │   │   ├── baseline.rs     # Praguri dinamice EWMA
 │   │   ├── capacity.rs     # Evictie in lot si retentie
 │   │   ├── cooldown.rs     # Cooldown alerte
+│   │   ├── snapshot.rs     # Starea salvata pe disc (varste in loc de Instant)
 │   │   ├── whitelist.rs    # Whitelist IP / CIDR
 │   │   └── tests.rs        # Testele detectorului
 │   ├── alerter.rs          # Trimitere alerte: SIEM (UDP) + Email (SMTP async)
 │   ├── delivery.rs         # Cozi de livrare, spool pe disc, dead-letter, retry
 │   ├── web.rs              # Dashboard web embedded (axum): API alerte/graf/dosar IP
 │   ├── parser_tools.rs     # Subcomenzile learn si test-parser
+│   ├── persistence.rs      # Fisierul de stare: salvare atomica, restaurare la pornire
 │   ├── lib.rs              # Exporta modulele pentru binar si teste
 │   └── parser/
 │       ├── mod.rs          # Trait LogParser, LogEvent, factory function
@@ -1999,6 +2004,47 @@ validare. Valorile omise sunt plafonate automat, deci un config mai vechi cu
 - **Fara rate limiting** (`udp_rate_limit = 0`): comportament identic cu versiunile anterioare.
 - **Cu rate limiting activ**: la pornire se afiseaza rata si burst-ul configurat. Periodic (la 30s), daca au existat drop-uri, se afiseaza numarul de pachete dropate cu badge-ul `[ RATE ]`.
 - **Validare config**: daca `udp_rate_limit > 0` si `udp_burst_size = 0`, configuratia este respinsa. Daca `udp_burst_size < udp_rate_limit`, se emite un warning (burst prea mic pentru a absorbi varfuri).
+
+---
+
+## Persistenta la restart
+
+La un restart (upgrade, `systemctl restart`, crash) detectorul ar pierde tot
+contextul: Slow Scan (fereastra de minute) si Beaconing (fereastra de o ora) ar
+reincepe numaratoarea, iar cooldown-urile ar disparea — o scanare in desfasurare
+ar trimite **din nou aceeasi alerta** catre SIEM si email.
+
+```toml
+[persistence]
+enabled = true                # lipsa sectiunii = dezactivat (config-uri vechi)
+path = "state.json"           # relativ la directorul de lucru
+save_interval_secs = 300      # salvare periodica; un crash pierde cel mult acest interval
+```
+
+**Ce se salveaza:** hit-urile din ferestrele active ale tuturor detectiilor,
+cooldown-urile, IP-urile urmarite, baseline-ul pragurilor dinamice si alertele
+din dashboard (ultimele `web_dashboard.max_alerts`).
+
+**Cand:** la oprire (SIGTERM / Ctrl+C, inainte de golirea cozilor de livrare)
+si la fiecare `save_interval_secs`, pe un thread separat, fara a bloca procesarea.
+
+**La pornire:** starea este restaurata inainte de primul eveniment:
+```
+[INFO] Stare restaurata din state.json: 42 IP-uri urmarite, 17 alerte (salvata acum 8s)
+```
+Momentele sunt salvate ca varste relative la salvare (nanosecunde) si refacute
+tinand cont de timpul scurs; ce a iesit intre timp din ferestre nu mai conteaza.
+Dupa un reboot recent, momentele mai vechi decat pornirea sistemului nu pot fi
+reprezentate si sunt ignorate.
+
+**Siguranta fisierului:**
+- scriere atomica (`state.json.tmp` + rename) — un crash in timpul scrierii lasa
+  intact fisierul anterior;
+- permisiuni `0600` — fisierul contine IP-uri si alerte;
+- format versionat; un fisier corupt sau incompatibil este mutat in
+  `state.json.invalid` (pentru diagnostic) si IDS-ul porneste fara istoric.
+
+Setarile `[persistence]` necesita restart (la `SIGHUP` sunt raportate si ignorate).
 
 ---
 

@@ -63,6 +63,11 @@ pub struct AppConfig {
     #[serde(default = "default_web_dashboard")]
     pub web_dashboard: WebDashboardConfig,
 
+    /// Salvarea starii detectorului si a alertelor din dashboard (#32).
+    /// Retrocompatibil: lipsa sectiunii = persistenta dezactivata.
+    #[serde(default)]
+    pub persistence: PersistenceConfig,
+
     /// Descrierea formatului pentru `network.parser = "custom"`.
     /// Ignorata pentru celelalte parsere.
     #[serde(default)]
@@ -708,6 +713,40 @@ fn default_web_dashboard() -> WebDashboardConfig {
     }
 }
 
+/// Persistenta starii la restart (#32).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistenceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Fisierul de stare. O cale relativa e fata de directorul de lucru
+    /// (sub systemd: /var/lib/ids-rs/<instanta>/).
+    #[serde(default = "default_state_path")]
+    pub path: String,
+    /// Salvare periodica, pe langa cea de la oprire: un crash pierde cel
+    /// mult acest interval. Implicit: 300 secunde.
+    #[serde(default = "default_save_interval_secs")]
+    pub save_interval_secs: u64,
+}
+
+fn default_state_path() -> String {
+    "state.json".to_string()
+}
+
+fn default_save_interval_secs() -> u64 {
+    300
+}
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: default_state_path(),
+            save_interval_secs: default_save_interval_secs(),
+        }
+    }
+}
+
 /// Formatul liniilor pentru parser-ul custom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -992,6 +1031,11 @@ impl AppConfig {
         self.alerting.retry_initial_secs = alerting.retry_initial_secs;
         self.alerting.retry_max_secs = alerting.retry_max_secs;
         self.alerting.spool_directory = alerting.spool_directory.clone();
+
+        if self.persistence != current.persistence {
+            warnings.push("persistence necesita restart, ignorat".to_string());
+        }
+        self.persistence = current.persistence.clone();
 
         self.validate()
             .context("config-ul reincarcat este invalid pentru setarile care raman active")?;
@@ -1485,6 +1529,16 @@ impl AppConfig {
         }
 
         // Raportam toate erorile dintr-o singura data.
+        // --- Persistence ---
+        if self.persistence.enabled {
+            if self.persistence.path.trim().is_empty() {
+                errors.push("persistence.path nu poate fi gol".to_string());
+            }
+            if self.persistence.save_interval_secs == 0 {
+                errors.push("persistence.save_interval_secs trebuie sa fie > 0".to_string());
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -1731,6 +1785,34 @@ mod tests {
         let (reloaded, warnings) = changed.prepare_reload(&current).unwrap();
         assert_eq!(reloaded.custom_parser, current.custom_parser);
         assert!(warnings.iter().any(|w| w.contains("custom_parser")));
+    }
+
+    #[test]
+    fn persistence_is_optional_and_validated() {
+        let without: AppConfig = toml::from_str(&include_str!("../config.toml").replace(
+            "[persistence]\nenabled = true",
+            "[persistence]\nenabled = false",
+        ))
+        .unwrap();
+        without.validate().unwrap();
+
+        let mut config: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        assert!(config.persistence.enabled);
+        config.persistence.path = " ".to_string();
+        config.persistence.save_interval_secs = 0;
+        let message = format!("{:#}", config.validate().unwrap_err());
+        assert!(message.contains("persistence.path"));
+        assert!(message.contains("persistence.save_interval_secs"));
+    }
+
+    #[test]
+    fn reload_pins_persistence_settings() {
+        let current: AppConfig = toml::from_str(include_str!("../config.toml")).unwrap();
+        let mut changed = current.clone();
+        changed.persistence.path = "other.json".to_string();
+        let (reloaded, warnings) = changed.prepare_reload(&current).unwrap();
+        assert_eq!(reloaded.persistence, current.persistence);
+        assert!(warnings.iter().any(|w| w.contains("persistence")));
     }
 
     #[test]

@@ -41,6 +41,17 @@ impl<K: Eq + Hash> Cooldowns<K> {
         self.0.retain(|key, _| keep(key));
     }
 
+    /// Cheile si momentele ultimei alerte (pentru snapshot).
+    pub(super) fn entries(&self) -> Vec<(K, Instant)>
+    where
+        K: Clone,
+    {
+        self.0
+            .iter()
+            .map(|entry| (entry.key().clone(), *entry.value()))
+            .collect()
+    }
+
     /// Sterge cooldown-urile expirate.
     pub(super) fn prune(&self, now: Instant, cooldown: Duration) {
         self.0

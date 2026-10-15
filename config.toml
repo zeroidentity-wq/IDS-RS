@@ -284,6 +284,20 @@ auth_token = ""
 max_concurrent_requests = 32
 
 # =============================================================================
+# Persistenta la restart
+# =============================================================================
+# Starea detectorului (ferestrele Slow Scan / Beaconing, cooldown-urile, pragurile
+# dinamice) si alertele din dashboard sunt salvate la oprire si periodic, si
+# restaurate la pornire. Fara ea, un restart in timpul unei scanari ar retrimite
+# aceeasi alerta catre SIEM si email. Necesita restart.
+[persistence]
+enabled = true
+# Relativ la directorul de lucru (sub systemd: /var/lib/ids-rs/<instanta>/state.json).
+path = "state.json"
+# Salvare periodica: un crash pierde cel mult acest interval.
+save_interval_secs = 300
+
+# =============================================================================
 # Parser custom — folosit doar cu network.parser = "custom"
 # =============================================================================
 # Descrie formatul log-urilor unui firewall fara parser dedicat. Necesita restart.
