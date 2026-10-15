@@ -603,7 +603,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Branch: Hot reload config la SIGHUP (#16).
             _ = next_signal(&mut sighup_rx) => {
-                display::log_reload("SIGHUP primit — reincarc config.toml...");
+                display::log_reload(&format!("SIGHUP primit — reincarc {config_path}..."));
                 match AppConfig::load(&config_path)
                     .and_then(|loaded| loaded.prepare_reload(&config))
                 {
