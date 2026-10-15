@@ -109,6 +109,8 @@ procesul nu porneste (in loc sa ruleze fara semnale functionale).
 
 ### De implementat
 
+Lista curenta, prioritizata, este in [`TODO.md`](TODO.md).
+
 - [x] Parser FortiGate (format Fortinet) — prin parser-ul custom
 - [ ] Raport zilnic email cu clasificare subretele
 - [x] Hot reload config la SIGHUP
@@ -122,7 +124,7 @@ procesul nu porneste (in loc sa ruleze fara semnale functionale).
 - [ ] Brute Force detection — accept scan repetate pe porturi critice (22, 3389, 445) de la acelasi IP (#39)
 - [ ] Port Knock detection — secvente de porturi accesate in ordine specifica (#26)
 - [ ] Exfiltration detection — volume mari de trafic outbound neobisnuit de la IP intern (#27)
-- [ ] Supresie/deduplicare alerte — cooldown per IP per tip alerta, previne flood de emailuri (#28)
+- [x] Supresie/deduplicare alerte — cooldown per IP per tip alerta, previne flood de emailuri (#28)
 
 #### Parseri noi
 - [x] Parser iptables/nftables — firewall Linux (#29) — prin parser-ul custom
@@ -133,7 +135,7 @@ procesul nu porneste (in loc sa ruleze fara semnale functionale).
 - [x] Persistenta stare la restart — detectorul nu pierde contextul la repornire (#32)
 - [ ] Dump statistici la SIGUSR1 — top atacatori si counteri la semnal, fara restart (#33)
 - [ ] Blacklist locala de IP-uri (IOC offline) — fiser CSV/JSON cu IP-uri rele, alerta la primul pachet (#34)
-- [ ] Threshold dinamic / baseline — prag adaptat la traficul normal al retelei (#35)
+- [x] Threshold dinamic / baseline — prag adaptat la traficul normal al retelei (#35) — `[detection.dynamic_threshold]`
 
 #### Raportare / Vizibilitate
 - [x] Web Dashboard embedded cu graf D3.js force-directed (#25/#36)
