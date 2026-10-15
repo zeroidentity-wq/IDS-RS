@@ -64,6 +64,7 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [Protectie DashMap — MAX\_TRACKED\_IPS si LRU Eviction](#protectie-dashmap--max_tracked_ips-si-lru-eviction)
 - [Securitate — Sanitizare campuri CEF anti-injection](#securitate--sanitizare-campuri-cef-anti-injection)
 - [Rate Limiting UDP — Token Bucket](#rate-limiting-udp--token-bucket)
+- [Livrare alerte — Cozi, spool si dead-letter](#livrare-alerte--cozi-spool-si-dead-letter)
 - [Hostname Resolve — Mapping Static IP→Hostname](#hostname-resolve--mapping-static-iphostname)
 - [Subnet Mapping — Mapping CIDR→Locatie](#subnet-mapping--mapping-cidrlocatie)
 - [Concepte Rust acoperite](#concepte-rust-acoperite)
@@ -79,8 +80,9 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 | **Alertare** | SIEM (UDP CEF), Email (SMTP async) |
 | **Securitate** | Sanitizare CEF, Rate Limiting UDP, MAX_HITS_PER_IP, MAX_TRACKED_IPS LRU |
 | **Validare** | 16 constrângeri semantice la startup |
-| **Teste** | 87 teste unitare — toate trec |
-| **Clippy** | 7 warnings pre-existente (cosmetice, niciuna funcțională) |
+| **Livrare** | Cozi separate SIEM/email, spool durabil pe disc, dead-letter, retry per destinatar |
+| **Teste** | 110 teste (107 biblioteca + 3 binar) — toate trec |
+| **Clippy** | 0 warnings (`cargo clippy --all-targets -- -D warnings` in CI) |
 
 ### Implementat
 
@@ -99,20 +101,27 @@ Detecteaza scanari de retea (Fast Scan, Slow Scan si Accept Scan) si trimite ale
 - [x] Beaconing C2 detection (#24) — flow periodic (CV pe intervale), SigID 1006, severitate CEF 9
 - [x] Web Dashboard (#25) — server HTTP embedded cu graf D3.js force-directed, API JSON, auto-refresh 5s
 - [x] Graceful shutdown SIGTERM + Hot reload SIGHUP
-- [x] Teste unitare: 89 passed (parseri, detector, delivery spool, config strict, web auth, whitelist si toate detectiile)
+- [x] Livrare durabila: spool pe disc, dead-letter pentru esecuri permanente, retry email doar catre destinatarii ramasi, golirea cozilor in spool la oprire
+- [x] Teste: 110 passed (parseri, detector, livrare/spool cu server SMTP fals, config strict, reload, web auth, whitelist si toate detectiile)
 
 ### Hardening operational
 
 Versiunea curenta aplica limite si controale explicite pe toate fluxurile critice:
 
 - `trusted_senders` este obligatoriu pe un listener non-loopback; configuratia
-  inclusa accepta doar localhost si trebuie completata cu IP-urile firewall/relay;
+  inclusa accepta doar localhost si trebuie completata cu IP-urile firewall/relay.
+  Pe un listener dual-stack (`::`), adresele IPv4-mapped (`::ffff:10.0.0.1`) sunt
+  normalizate, deci intrarile IPv4 din lista se potrivesc;
 - rate limiting-ul global si per sender este taxat per eveniment/linie, nu per
   datagrama, iar numarul de linii si lungimea unei linii sunt limitate;
-- `max_tracked_flows` si `max_flows_per_source` limiteaza cardinalitatea cheilor
-  `(source, destination)`, pe langa limitele per IP si per vector;
+- `max_tracked_flows`, `max_flows_per_source` si `max_tracked_ips` limiteaza
+  cardinalitatea starii; la atingerea unei limite se evacueaza in lot ~1/8 din
+  cele mai vechi intrari, ca un flood (sweep orizontal, IP-uri spoofed) sa coste
+  O(1) amortizat per eveniment, nu O(n);
 - SIEM si email au cozi independente; erorile si saturarea sunt salvate atomic
-  in `alerting.spool_directory` si redate cu exponential backoff;
+  in `alerting.spool_directory` si redate cu exponential backoff. Esecurile
+  permanente ajung in dead-letter, iar la oprire cozile sunt golite in spool —
+  vezi [Livrare alerte](#livrare-alerte--cozi-spool-si-dead-letter);
 - listele CEF sunt esantionate, iar datagrama SIEM are o limita stricta de 60 KB;
 - campurile TOML necunoscute sunt respinse, pentru ca typo-urile sa nu dezactiveze
   silentios o protectie;
@@ -124,6 +133,15 @@ Versiunea curenta aplica limite si controale explicite pe toate fluxurile critic
 Setarile de listener, parser, cleanup, spool/queue/retry si securitate web necesita
 restart. La `SIGHUP`, modificarile acestor campuri sunt raportate si ignorate; pragurile,
 whitelist-ul, destinatarii si rate limiter-ul raman hot-reloadable.
+
+Dupa ce campurile care necesita restart sunt fixate la valorile curente, config-ul
+rezultat este **validat din nou**. Exemplu: un fisier care trece pe
+`listen_address = "127.0.0.1"` cu `trusted_senders = []` este valid in sine, dar
+procesul ramane pe adresa veche (ex: `0.0.0.0`), unde lista goala ar accepta
+evenimente de la orice host — reload-ul este respins si config-ul vechi ramane activ.
+
+Handler-ele SIGTERM/SIGHUP sunt inregistrate la pornire; daca inregistrarea esueaza,
+procesul nu porneste (in loc sa ruleze fara semnale functionale).
 
 ### De implementat
 
@@ -882,7 +900,15 @@ Ruleaza testele unitare Rust pentru a verifica parserii si detectorul:
 cargo test
 ```
 
-Rezultat asteptat: `test result: ok. 53 passed`
+Rezultat asteptat: `test result: ok. 107 passed` (biblioteca) si `test result: ok. 3 passed` (binar).
+
+Pentru verificarea completa, ca in CI:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+```
 
 Testele acopera:
 - Parser GAIA: drop valid, accept parsat (nu ignorat), broadcast fara src, ICMP fara service, format invalid
@@ -892,7 +918,11 @@ Testele acopera:
 - Detector Slow Scan: alert dedicat, cooldown, independenta fata de Fast Scan (`slow_test_config()`)
 - Detector Accept Scan: alert accept, drop nu declanseaza accept scan, accept nu declanseaza fast scan, cooldown accept
 - Detector Whitelist: IP individual blocheaza alerta, CIDR blocheaza subnet, IP ne-whitelistat genereaza alerta, CIDR boundary corect, Accept Scan blocat de whitelist
-- Alerter: 7 teste sanitize_cef (anti-injection CEF)
+- Alerter: 7 teste sanitize_cef (anti-injection CEF), esantionare CEF sub 60 KB, IP-ul principal mereu in esantion, canale indisponibile, esec email partial (server SMTP fals)
+- Livrare: spool durabil, intrari vechi (format anterior) citite, alerta pastrata cat canalul e indisponibil, dead-letter fara blocarea cozii, retry doar catre destinatarii ramasi, golirea cozilor la oprire cu SMTP blocat
+- Config: campuri necunoscute respinse, `trusted_senders` obligatoriu pe listener expus, revalidare la reload, limite per sender implicite
+- Detector capacitate: limite pe fluxuri si IP-uri, evictie in lot, sweep orizontal si flood cu IP-uri spoofed fara cost patratic
+- Binar: adrese IPv4-mapped normalizate, canal de semnal inchis nu declanseaza oprirea
 
 ---
 
@@ -1091,12 +1121,17 @@ ids-rs/
 ├── Cargo.lock              # Versiuni exacte blocate (generat automat)
 ├── config.toml             # Fisier de configurare
 ├── README.md               # Acest fisier
+├── rust-toolchain.toml     # Toolchain fixat (Rust 1.85, MSRV)
+├── static/                 # dashboard.html + d3.v7.min.js (incluse in binar)
 ├── src/
 │   ├── main.rs             # Entry point: UDP listener, orchestrare async
 │   ├── config.rs           # Structuri de configurare (serde + toml)
 │   ├── display.rs          # Output CLI colorat (ANSI): banner, alerte, stats
 │   ├── detector.rs         # Motor detectie: DashMap, Fast/Slow Scan, cleanup
 │   ├── alerter.rs          # Trimitere alerte: SIEM (UDP) + Email (SMTP async)
+│   ├── delivery.rs         # Cozi de livrare, spool pe disc, dead-letter, retry
+│   ├── web.rs              # Dashboard web embedded (axum): API alerte/graf/dosar IP
+│   ├── lib.rs              # Exporta modulele pentru binar si teste
 │   └── parser/
 │       ├── mod.rs          # Trait LogParser, LogEvent, factory function
 │       ├── gaia.rs         # Parser Checkpoint Gaia (format real syslog)
@@ -1129,6 +1164,8 @@ ids-rs/
 | `chrono`             | Timestamps formatate                            |
 | `tracing`            | Logging structurat (debug/diagnostic)           |
 | `anyhow`             | Error handling ergonomic                        |
+| `arc-swap`           | Swap atomic al config-ului la SIGHUP            |
+| `axum` + `serde_json`| Server HTTP si API JSON pentru dashboard        |
 
 ---
 
@@ -1389,9 +1426,13 @@ Situatie: max_tracked_ips = 3, avem deja IP-urile A, B, C.
 
 Soseste IP nou D (t=10s):
   1. Detectam: D nu exista AND len(3) >= max(3)  → evictie necesara
-  2. Gasim minimul din last_seen: A (t=1s)
-  3. Stergem A din port_hits, last_seen, fast_cooldowns, slow_cooldowns
+  2. Selectam cele mai vechi max(1, max_tracked_ips / 8) IP-uri: aici A (t=1s)
+  3. Stergem lotul din toate structurile (fluxuri, cooldown-uri, lateral,
+     distributed, beacon, last_seen)
   4. Inseram D
+
+Cu max_tracked_ips = 100.000, o evictie elibereaza 12.500 de locuri: urmatoarele
+12.499 de IP-uri noi intra fara nicio parcurgere.
 
 Rezultat:
   B → t=5s
@@ -1416,23 +1457,13 @@ In `process_event()`:
 // Verificam dupa last_seen (nu port_hits) — acopera si IP-urile care trimit
 // exclusiv "accept" (care nu apar in port_hits, dar sunt urmarite in last_seen).
 let is_new_ip = !self.last_seen.contains_key(&ip);
-if is_new_ip && self.last_seen.len() >= self.config.max_tracked_ips {
-
-    // Gasim IP-ul cu cel mai vechi last_seen (LRU)
-    let lru_ip: Option<IpAddr> = self.last_seen
-        .iter()
-        .min_by_key(|e| *e.value())
-        .map(|e| *e.key());
-
-    if let Some(old_ip) = lru_ip {
-        // Evictam din TOATE structurile: drop hits, accept hits, cooldowns
-        self.port_hits.remove(&old_ip);
-        self.accept_hits.remove(&old_ip);
-        self.last_seen.remove(&old_ip);
-        self.fast_cooldowns.remove(&old_ip);
-        self.slow_cooldowns.remove(&old_ip);
-        self.accept_cooldowns.remove(&old_ip);
-    }
+if is_new_ip && self.last_seen.len() >= cfg.max_tracked_ips {
+    // Selectie partiala O(n) a celor mai vechi ~1/8 IP-uri (select_nth_unstable)
+    let aged = self.last_seen.iter().map(|e| (*e.value(), *e.key())).collect();
+    let count = eviction_count(self.last_seen.len(), cfg.max_tracked_ips);
+    let victims: HashSet<IpAddr> = oldest_keys(aged, count).into_iter().collect();
+    // O singura trecere prin fiecare tabela pentru tot lotul
+    self.evict_sources(&victims);
 }
 // Actualizam last_seen pentru IP-ul curent (drop sau accept)
 self.last_seen.insert(ip, now);
@@ -1462,10 +1493,11 @@ self.last_seen
     .map(|entry| *entry.key())      // extrage cheia (IpAddr este Copy → * copiaza)
 ```
 
-`min_by_key` parcurge **tot** DashMap-ul — O(n). Dar:
-- Se apeleaza **rar**: doar cand `port_hits.len() >= max_tracked_ips` SI soseste IP nou
-- In functionare normala (trafic real, nu flood), limita nu este atinsa
-- Chiar si la flood: O(100.000) operatii atomice DashMap < 1ms pe hardware modern
+*Nota: varianta curenta nu mai foloseste `min_by_key`, ci evictie in lot (vezi mai jos).*
+Gasirea minimului parcurge **tot** DashMap-ul — O(n). Facuta la **fiecare** IP nou peste
+limita, plus stergerea prin `retain` pe ~10 tabele, un flood cu IP-uri spoofed ajungea la
+O(n) per pachet (30.000 de evenimente la limita de 5.000: ~17s). De aceea evictia
+elibereaza un lot intreg o data, iar costul se amortizeaza.
 
 #### De ce `last_seen` este o structura separata?
 
@@ -1509,10 +1541,15 @@ ar putea selecta IP-uri deja sterse.
 O implementare LRU "perfecta" ar folosi o structura dedicata (ex: `linked_hash_map`,
 crate `lru`) cu O(1) pentru get/insert/evict. Avantaj major la volume mari.
 
-Am ales O(n) scan pentru simplitate si fara dependente noi:
-- La 100.000 IP-uri, `min_by_key` = ~100k comparatii de `Instant` (< 1ms)
-- Evictia apare **cel mult** o data per pachet, si doar dupa atingerea limitei
-- Codul ramane simplu, usor de inteles si de testat
+Am ales scan O(n) + **evictie in lot**, fara dependente noi:
+- O evictie elibereaza `max(1, limita / 8)` intrari, selectate cu `select_nth_unstable`
+  (O(n), fara sortare completa); costul per IP nou devine O(1) amortizat
+- Stergerea se face intr-o singura trecere per tabela pentru tot lotul; fluxurile
+  de scan sunt gasite direct prin indexul per sursa (`source_flows`)
+- Acelasi mecanism limiteaza `distributed_hits`, `beacon_hits` si fluxurile
+  `(src, dst)` (`max_tracked_flows`, `max_flows_per_source`)
+- Compromis: la atingerea limitei se uita deodata ~12% din cele mai vechi intrari,
+  nu doar una
 
 Daca in viitor se doreste O(1) LRU: se poate adauga crate-ul `lru` si inlocui
 `DashMap<IpAddr, Instant>` cu `LruCache<IpAddr, ()>` (thread-safe cu Mutex).
@@ -1659,6 +1696,9 @@ Algoritmul **Token Bucket** permite burst-uri scurte legitime dar limiteaza rata
 udp_rate_limit = 5000
 # Capacitate burst: permite varfuri scurte peste rata medie.
 udp_burst_size = 10000
+# Limita per expeditor (optional): un singur firewall nu poate consuma tot bugetul.
+udp_per_sender_rate_limit = 2500
+udp_per_sender_burst_size = 5000
 ```
 
 | Parametru | Efect |
@@ -1666,12 +1706,83 @@ udp_burst_size = 10000
 | `udp_rate_limit = 0` | Rate limiting dezactivat (backward compatible) |
 | `udp_rate_limit = 5000` | Maxim 5.000 pachete/secunda in medie |
 | `udp_burst_size = 10000` | Permite burst de 10.000 pachete imediat |
+| `udp_per_sender_rate_limit` | Rata per IP expeditor. Omis: 2.500, plafonat la `udp_rate_limit` cand acesta e activ |
+| `udp_per_sender_burst_size` | Burst per IP expeditor. Omis: 5.000, plafonat la `udp_burst_size` cand limita globala e activa |
+
+Un `udp_per_sender_rate_limit` setat **explicit** peste `udp_rate_limit` este respins la
+validare. Valorile omise sunt plafonate automat, deci un config mai vechi cu
+`udp_rate_limit = 1000` porneste fara modificari.
 
 ### Comportament
 
 - **Fara rate limiting** (`udp_rate_limit = 0`): comportament identic cu versiunile anterioare.
 - **Cu rate limiting activ**: la pornire se afiseaza rata si burst-ul configurat. Periodic (la 30s), daca au existat drop-uri, se afiseaza numarul de pachete dropate cu badge-ul `[ RATE ]`.
 - **Validare config**: daca `udp_rate_limit > 0` si `udp_burst_size = 0`, configuratia este respinsa. Daca `udp_burst_size < udp_rate_limit`, se emite un warning (burst prea mic pentru a absorbi varfuri).
+
+---
+
+## Livrare alerte — Cozi, spool si dead-letter
+
+Fiecare alerta este trimisa independent catre SIEM si catre email, prin cate o coada
+in memorie (`alerting.queue_capacity`) si un worker dedicat. Un canal lent sau cazut
+nu blocheaza detectia si nici celalalt canal.
+
+### Spool-ul
+
+```
+spool/                      # alerting.spool_directory
+├── siem/
+│   ├── <timestamp>-<pid>-<seq>.json   # alerte in asteptare, livrate in ordine
+│   └── dead/                          # esecuri permanente (nu se reincearca)
+└── email/
+    ├── <timestamp>-<pid>-<seq>.json
+    └── dead/
+```
+
+O alerta ajunge in spool cand:
+- coada din memorie este plina;
+- livrarea esueaza tranzitoriu (SIEM inaccesibil, SMTP 4xx, timeout);
+- canalul este indisponibil (dezactivat sau mailer-ul SMTP nu a putut fi construit) —
+  alerta **nu** este considerata livrata si asteapta reactivarea canalului;
+- procesul se opreste (SIGTERM / Ctrl+C) — vezi mai jos.
+
+Workerul livreaza intai ce este in spool (cel mai vechi primul), cu exponential backoff
+intre `retry_initial_secs` si `retry_max_secs`. Scrierile sunt atomice (fisier temporar +
+`rename`), deci un crash nu lasa intrari partiale. Fisierele corupte sunt redenumite in
+`.bad` si sarite.
+
+### Dead-letter
+
+O alerta care nu va putea fi livrata niciodata in forma actuala este mutata in
+`<canal>/dead/`, ca sa nu blocheze restul cozii:
+- mesajul CEF depaseste limita sigura de 60 KB (ex: hostname/locatie configurate foarte lungi);
+- serverul SMTP respinge definitiv un destinatar (cod 5xx).
+
+Alertele din `dead/` raman pe disc pentru inspectie. Dupa corectarea cauzei, pot fi
+reinjectate manual prin mutarea fisierului inapoi in directorul canalului:
+
+```bash
+mv spool/email/dead/*.json spool/email/
+```
+
+### Email catre mai multi destinatari
+
+Fiecare destinatar primeste un email separat. Daca unii esueaza:
+- destinatarii care au primit deja alerta **nu** o mai primesc la retry;
+- cei cu esec tranzitoriu raman in spool, doar ei fiind reincercati;
+- cei respinsi definitiv ajung in `dead/`, cu lista lor de destinatari.
+
+Intrarile din spool retin lista destinatarilor ramasi (`recipients`). Un destinatar
+scos intre timp din config (SIGHUP) este sarit. Intrarile salvate de versiunile
+anterioare (doar alerta, fara lista) sunt citite in continuare, ca destinate tuturor.
+
+### Oprirea
+
+La SIGTERM / Ctrl+C, workerii abandoneaza livrarile in curs si asteptarile de backoff,
+salveaza in spool alerta in curs de trimitere si tot ce era in coada, apoi se opresc —
+chiar daca SIEM-ul sau serverul SMTP nu raspund. La urmatoarea pornire, spool-ul este
+livrat primul. O livrare de email intrerupta la jumatate poate fi retrimisa unor
+destinatari care o primisera deja.
 
 ---
 
@@ -2194,6 +2305,9 @@ Aceasta permite ierarhii: `/16` pentru cladire, `/24` pentru etaj.
 | #7 | Validare config — 16 constrangeri | [Validare automata](#validare-automata-la-pornire) |
 | #8 | Sanitizare CEF anti-injection | [Securitate CEF](#securitate--sanitizare-campuri-cef-anti-injection) |
 | #9 | Rate Limiting UDP — Token Bucket | [Rate Limiting](#rate-limiting-udp--token-bucket) |
+| — | Reload SIGHUP revalidat dupa fixarea campurilor care cer restart (nu mai poate goli `trusted_senders` pe un listener expus) | [Hardening operational](#hardening-operational) |
+| — | Adrese IPv4-mapped normalizate pentru `trusted_senders` si rate limiting per sender | [Hardening operational](#hardening-operational) |
+| — | Evictie in lot (fluxuri, IP-uri, distributed, beacon): fara cost O(n) per eveniment la flood | [Protectie DashMap](#protectie-dashmap--max_tracked_ips-si-lru-eviction) |
 
 ### Functionalitati
 
@@ -2207,10 +2321,14 @@ Aceasta permite ierarhii: `/16` pentru cladire, `/24` pentru etaj.
 | #22 | Lateral Movement — 1 IP → N destinatii unice pe conexiuni acceptate (orice port), SignatureID 1004, CLI bright_red, severitate CEF 8 (Critical) |
 | #23 | Distributed Scan — N surse → aceeasi tinta, perspectiva inversata, SignatureID 1005, CLI cyan, severitate CEF 7 (High) |
 | #24 | Beaconing C2 — flow periodic (src, dst, dport) detectat prin Coefficient of Variation (CV) pe inter-arrival times. SignatureID 1006, CLI red, severitate CEF 9 (Critical). Praguri default: min_events=8, time_window=1h, cv_threshold=0.30 |
-| — | Graceful shutdown SIGTERM — handler `tokio::signal::unix::signal(SignalKind::terminate())` in `select!`; alerta in curs de `.await` se finalizeaza complet inainte de iesire |
+| — | Graceful shutdown SIGTERM — handler inregistrat la pornire (esecul opreste pornirea); la oprire, workerii de livrare salveaza in spool alertele nelivrate si cozile din memorie |
 | #21 | Hostname resolve — mapping static `[network.hostnames]`, afisare in CLI/SIEM/email |
 | — | Subnet mapping — `[network.subnets]` CIDR→locatie, afisare in CLI `[Etaj 1]`, SIEM (cs2/cs3), email. Longest prefix match, hot-reload SIGHUP, validare CIDR |
 | — | `dest_ip` in LogEvent/Alert, `dst=` in CEF, porturi in `msg` |
+| — | Livrare: dead-letter pentru esecuri permanente, retry email per destinatar, cozi golite in spool la oprire, canal indisponibil nu mai sterge alerte din spool |
+| — | Parser Gaia-CEF accepta din nou inregistrari CEF trunchiate cu blob LEA in Name |
+| — | IP-ul principal al alertei este mereu inclus in listele CEF esantionate |
+| — | Limitele per sender omise sunt plafonate la limita globala (config-uri vechi raman valide) |
 
 ### Calitate cod
 
